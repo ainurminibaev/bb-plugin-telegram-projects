@@ -102,3 +102,9 @@ npm run build   # bb plugin build
 6. Вкладка **Обзор**: нажмите «Создать темы».
 
 Требования, стоимость и ограничения — в английском разделе выше: свой бот, исходящий доступ сервера BB к Telegram, необязательные плагины Tasks, Projects & Sections, CLI Agents и Env Catalog. В личном чате с ботом Telegram умеет только удалять темы, поэтому скрытие проекта удаляет его тему вместе с историей.
+
+### Recovery routing (personal.4)
+Retry notices require the queued retry to belong to the same original Telegram
+task; exhausted or unrelated retries do not promise automatic recovery. A late
+child completion that produces no public activity no longer creates a generic
+progress message. Actual subsequent work and final results still appear.

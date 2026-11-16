@@ -1907,7 +1907,10 @@ export class ChatBridge {
       let queueKnown = true;
       try {
         const queue = await this.d.sdk.threads.queue.list({threadId: t.id, signal: this.d.signal});
-        retry = queue.filter(r => r.payload.kind === "retry").sort((a,c) => (a.sendAt || 0)-(c.sendAt || 0))[0];
+        const failedTurnId = end.scope.turnId;
+        retry = queue.filter(r => r.payload.kind === "retry" && r.state !== "failed_exhausted" &&
+          this.routes.retryBelongsToTurn(t.id, failedTurnId, r.payload.retryOfTurnRequestId))
+          .sort((a,c) => (a.sendAt || 0)-(c.sendAt || 0))[0];
       } catch { queueKnown = false; }
       const retryLabel = retry ? retry.sendAt ? "Автоматическая повторная попытка: " + new Date(retry.sendAt).toLocaleString("ru-RU", {timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) + " МСК. После завершения ответ придёт сюда." : "Автоматическая повторная попытка стоит в очереди. После завершения ответ придёт сюда." :
         queueKnown ? "Автоповтор сейчас не запланирован. Можно попросить продолжить после устранения причины." : "Пока не удалось проверить, запланирован ли автоповтор.";
@@ -2025,12 +2028,15 @@ export class ChatBridge {
                 status:event.data.systemMessageKind === "child-completed" ? "completed" :
                   event.data.systemMessageKind === "child-failed" ? "failed" : "interrupted"}] : []);
               this.routes.inheritOutcomes(b.threadId,event.data.requestId,outcomes);
+              this.s.put("reply:notification-request:" + b.threadId + ":" + event.data.requestId, true);
             } else this.routes.requested(b.threadId, event.data);
             b.cursor = event.seq;
             continue;
           }
           if (event.type === "turn/input/accepted" && event.scope.kind === "turn") {
             this.routes.accept(b.threadId, event.scope.turnId, event.data.clientRequestId);
+            if (this.s.get("reply:notification-request:" + b.threadId + ":" + event.data.clientRequestId))
+              this.s.put("reply:notification-turn:" + b.threadId + ":" + event.scope.turnId, true);
             this.s.put("reply:active-turn:" + b.threadId, event.scope.turnId);
             b.cursor = event.seq;
             continue;
@@ -2127,12 +2133,18 @@ export class ChatBridge {
           ? delegated.join("\n\n")
           : b.activity || b.toolActivity || this.tr("Работаю над задачей…");
         const isWorking = deliverActive && (["active", "starting", "pending"].includes(t.status) || delegated.length > 0);
+        // A late child notice may start an empty acknowledgement turn after
+        // the result was already delivered. Show progress only if that turn
+        // actually produces public activity or starts more work.
+        const hasProgress = !this.s.get("reply:notification-turn:" + b.threadId + ":" + activeTurn) ||
+          Boolean(b.activity || b.toolActivity || delegated.length);
         const status = pending.some((i) => i.status === "pending")
           ? this.tr("нужен ответ")
           : (this.tr(states[t.status] ?? t.status) ?? t.status) +
             " · " + progress;
         if (
           isWorking &&
+          hasProgress &&
           status !== b.status &&
           Date.now() - (b.lastProgress ?? 0) > 5000
         ) {

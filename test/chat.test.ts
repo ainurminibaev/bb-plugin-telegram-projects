@@ -947,6 +947,29 @@ test("native child completion continues its original Telegram task without broad
   } finally {f.cleanup();}
 });
 
+test("late child acknowledgement is silent until it actually performs work", async () => {
+ const f=fixture();try{
+  await f.bridge.handle(f.input("Research"));
+  f.acceptTelegramTurn("parent");f.acceptTelegramTurn("child-turn","child");
+  const routes=new ReplyRoutes(f.store);routes.complete("child","child-turn","completed");
+  f.thread.status="active";
+  const scope={kind:"turn",turnId:"late-notice"};
+  const events:any[]=[
+   {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"notice",initiator:"system",systemMessageKind:"child-completed",systemMessageSubject:{kind:"thread",threadId:"child"}}},
+   {seq:2,type:"turn/input/accepted",scope,data:{clientRequestId:"notice"}},
+   {seq:3,type:"turn/started",scope,data:{}},
+  ];
+  f.setEvents(events);await f.bridge.observe();await f.bridge.flush();
+  assert.equal(f.sent.filter(x=>x.text?.startsWith("⏳")).length,0);
+  events.push({seq:4,type:"item/started",scope,data:{item:{type:"commandExecution"}}});
+  f.setEvents(events);await f.bridge.observe();await f.bridge.flush();
+  assert.equal(f.sent.filter(x=>x.text?.startsWith("⏳")).length,1);
+  events.push({seq:5,type:"item/completed",scope,data:{item:{type:"agentMessage",text:"FOLLOW-UP-RESULT"}}},
+   {seq:6,type:"turn/completed",scope,data:{status:"completed"}});
+  f.thread.status="idle";f.setEvents(events);await f.bridge.observe();await f.bridge.flush();
+  assert.equal(f.sent.filter(x=>x.text==="FOLLOW-UP-RESULT").length,1);
+ }finally{f.cleanup();}
+});
 test("delegated spawn uses native project/environment and keeps one worker on RPC replay", async () => {
   const f=fixture();
   try {
@@ -1073,7 +1096,7 @@ test("failed child notifies parent chat with actual retry time, deduplicates and
   f.acceptTelegramTurn("child-turn","thr_failed");
   const child={...f.thread,id:'thr_failed',parentThreadId:'thr_one',title:'Исследование',status:'error'};
   f.sdk.threads.list=async()=>[child];
-  let retries:any[]=[{id:'retry1',payload:{kind:'retry'},sendAt:Date.now()+60000}];
+  let retries:any[]=[{id:'retry1',state:'scheduled',payload:{kind:'retry',retryOfTurnRequestId:'fixture-child-turn'},sendAt:Date.now()+60000}];
   f.sdk.threads.queue={list:async()=>retries};
   const oldList=f.sdk.threads.events.list;
   f.sdk.threads.events.list=async(a:any)=>a.threadId==='thr_failed'?[
@@ -1087,6 +1110,33 @@ test("failed child notifies parent chat with actual retry time, deduplicates and
   retries=[];await f.bridge.observe();await f.bridge.flush();
   errors=f.sent.filter(x=>x.text?.startsWith('⚠️ Исследование'));assert.equal(errors.length,2);assert.ok(errors[1].text.includes('не запланирован'));
   child.status='idle';await f.bridge.observe();await f.bridge.flush();assert.equal(f.sent.filter(x=>x.text?.startsWith('⚠️ Исследование')).length,2);
+ }finally{f.cleanup();}
+});
+test("failure does not promise another task's retry or an exhausted retry", async () => {
+ const f=fixture();try{
+  await f.bridge.handle(f.input("Run")); f.acceptTelegramTurn("failed-turn");
+  f.thread.status="error";
+  const routes=new ReplyRoutes(f.store);
+  routes.record("thr_one","bb-request",{kind:"bb"});
+  const other=routes.ingress("thr_one",{kind:"telegram",chatId:OWNER_ID,topicId:100,updateId:2});
+  routes.requested("thr_one",{requestId:"other-tg",originPluginId:"telegram-projects",input:[other]});
+  let queue:any[]=[];
+  f.sdk.threads.queue={list:async()=>queue};
+  const fail=[{seq:2,type:"turn/completed",scope:{kind:"turn",turnId:"failed-turn"},data:{status:"failed"}}];
+  const oldList=f.sdk.threads.events.list;
+  f.sdk.threads.events.list=async(a:any)=>a.order==="desc"?fail:oldList(a);
+  queue=[
+   {id:"bb",state:"scheduled",payload:{kind:"retry",retryOfTurnRequestId:"bb-request"},sendAt:Date.now()+1000},
+   {id:"other",state:"scheduled",payload:{kind:"retry",retryOfTurnRequestId:"other-tg"},sendAt:Date.now()+2000},
+   {id:"spent",state:"failed_exhausted",payload:{kind:"retry",retryOfTurnRequestId:"fixture-failed-turn"},sendAt:Date.now()+3000},
+  ];
+  await f.bridge.observe();await f.bridge.flush();
+  const first=f.sent.filter(x=>x.text?.startsWith("⚠️ Помощник"));
+  assert.equal(first.length,1);assert.match(first[0].text,/не запланирован/);
+  queue.push({id:"matching",state:"scheduled",payload:{kind:"retry",retryOfTurnRequestId:"fixture-failed-turn"},sendAt:Date.now()+60000});
+  await f.bridge.observe();await f.bridge.flush();
+  const next=f.sent.filter(x=>x.text?.startsWith("⚠️ Помощник"));
+  assert.equal(next.length,2);assert.match(next[1].text,/Автоматическая повторная попытка:/);
  }finally{f.cleanup();}
 });
 test("main failure reports no retry honestly, later successful final arrives once",async()=>{

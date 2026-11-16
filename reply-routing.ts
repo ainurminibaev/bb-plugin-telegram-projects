@@ -48,6 +48,10 @@ export class ReplyRoutes {
     const key = "reply:outcome:" + JSON.stringify([threadId, turnId]);
     if (!this.store.get(key)) this.store.put(key, {threadId, turnId, status, route, consumedBy: null});
   }
+  retryBelongsToTurn(threadId: string, turnId: string, originalRequestId: string) {
+    return this.sameTask(this.destination(threadId, turnId),
+      this.store.get<ReplyRoute>(this.requestKey(threadId, originalRequestId)));
+  }
   inheritOutcomes(threadId: string, requestId: string, outcomes: readonly {threadId: string; status: string}[]) {
     if (!outcomes.length || new Set(outcomes.map(o => o.threadId)).size !== outcomes.length) return false;
     const candidates = outcomes.map(outcome => this.store.list<{
