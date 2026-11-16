@@ -1,3 +1,4 @@
+import { StateTransfer } from "./state-transfer";
 import { saveLocalTelegramFile, telegramApiRoot as checkedApiRoot } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
 import { translate } from "./locale";
@@ -88,6 +89,15 @@ const statusSchema = z.object({
   tasks: z.number(),
 });
 export const rpcContract = defineRpcContract({
+  exportPrivateState: {
+    input: z.object({confirm: z.literal(true)}).strict(),
+    output: z.object({id: z.string(), sha256: z.string(), rows: z.number()}),
+  },
+  restorePrivateState: {
+    input: z.object({confirm: z.literal(true), id:z.string().uuid(), sha256:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),
+    output: z.object({restored: z.literal(true), rows:z.number(), sha256:z.string()}),
+  },
+
   agencyCapabilities: {input:z.null(),output:agencyCapabilitySchema},
   agencyConfigure: {input:z.object({enabled:z.boolean()}).strict(),output:z.object({saved:z.literal(true)})},
   agencyEnqueue: {input:agencyDeliverySchema,output:agencyReceiptSchema},
@@ -964,6 +974,20 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const agency=agencyIntegration(store);
   bb.rpc.register(rpcContract, {
+    exportPrivateState: async () => {
+      const c = await settings.get();
+      if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge)
+        throw Error("stop_receivers_before_state_export");
+      return new StateTransfer(store).export(c);
+    },
+    restorePrivateState: async ({id, sha256}) => {
+      const c = await settings.get();
+      if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge)
+        throw Error("stop_receivers_before_state_restore");
+      return new StateTransfer(store).restore(id, sha256,
+        value => settings.experimental_set(value as Parameters<typeof settings.experimental_set>[0]));
+    },
+
     agencyCapabilities: async()=>{const c=await settings.get();return agency.capabilities(c.enabled&&c.agencyEnabled);},
     agencyConfigure: async({enabled})=>{await settings.experimental_set({agencyEnabled:enabled});return {saved:true as const};},
     agencyEnqueue: async(input)=>{const c=await settings.get();return agency.enqueue(input,c.enabled&&c.agencyEnabled);},

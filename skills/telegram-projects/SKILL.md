@@ -36,3 +36,23 @@ Failure overlay: failed parent and visible direct child threads produce a dedupl
 Telegram notice. Retry time is taken from the actual durable threads.queue row, not
 from historical retry decisions. With no row, say no automatic retry is scheduled.
 Only sanitized failure categories are shown; never forward raw provider error details.
+
+# Private source migration
+
+Changing an installed Git source with the same plugin ID requires a state
+transfer; ordinary removal deletes the plugin's state and settings. Do not
+remove the old installation before preparing and verifying a recovery copy.
+
+The administrative `exportPrivateState` RPC takes `{ "confirm": true }`.
+Disable both `enabled` and `chatEnabled` first and wait for receivers to stop.
+It writes settings (including credentials) and plugin state to a mode-0600 file
+inside the server user's mode-0700 `~/.bb-plugin-backups/telegram-projects/`.
+Only the backup ID, SHA-256 and row count are returned. Never print, attach,
+commit or copy the backup into a project. Keep it on the same server.
+
+On a fresh, disabled installation, `restorePrivateState` takes `confirm: true`,
+the returned `id` and `sha256`. It refuses conflicting nonempty state, altered
+copies, unsafe file permissions and a replay that would roll back changed
+state. It restores with both receivers disabled. Verify identity, bindings,
+settings and receipts before separately enabling the receiver. These APIs do
+not switch bots, log out Telegram, or enable polling automatically.
