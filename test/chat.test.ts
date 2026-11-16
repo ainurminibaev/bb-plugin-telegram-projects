@@ -1,3 +1,4 @@
+import { ReplyRoutes } from "../reply-routing";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -157,6 +158,13 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
     failNextDelivery: () => {
       failDelivery = true;
     },
+    acceptTelegramTurn: (turnId: string, threadId = "thr_one") => {
+      const routes = new ReplyRoutes(store);
+      const marker = routes.ingress(threadId, {kind:"telegram",chatId:OWNER_ID,topicId:100,updateId:1});
+      routes.requested(threadId, {requestId:"fixture-"+turnId,originPluginId:"telegram-projects",input:[marker]});
+      routes.accept(threadId,turnId,"fixture-"+turnId);
+      store.put("reply:active-turn:"+threadId,turnId);
+    },
     setEvents: (v: any[]) => {
       events = v;
     },
@@ -302,6 +310,8 @@ test("only final agent text sent once, not tool commentary or previous turns", a
   const f = fixture();
   try {
     await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn('turn');
+
     f.setEvents([
       {
         seq: 1,
@@ -376,13 +386,15 @@ test("duplicate accepted update and recovery never replay unknown mutation", () 
     f.cleanup();
   }
 });
-test("approval callback resolves once; later stale tap does not execute again", async () => {
+test("approval callback survives navigation and resolves once; stale tap does not execute again", async () => {
   const f = fixture();
   try {
     await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn('question-turn');
+
     f.setQuestions([
       {
-        id: "ask",
+        id: "ask", turnId: "question-turn",
         status: "pending",
         payload: {
           kind: "approval",
@@ -393,8 +405,11 @@ test("approval callback resolves once; later stale tap does not execute again", 
       },
     ]);
     await f.bridge.observe();
+    f.store.put("chat:binding:100", {...f.store.get<any>("chat:binding:100"), threadId:"thr_new", revision:"new-navigation"});
     await f.press("resolve");
     assert.equal(f.calls.filter((x) => x[0] === "resolve").length, 1);
+    assert.equal(f.calls.find(x => x[0] === "resolve")[1].threadId,"thr_one");
+    assert.equal(f.store.get<any>("chat:binding:100").threadId,"thr_new");
     await f.press("resolve");
     assert.equal(f.calls.filter((x) => x[0] === "resolve").length, 1);
   } finally {
@@ -432,6 +447,8 @@ test("progress is transient, final is clean and acknowledgement is a reaction", 
   try {
     f.thread.status = "active";
     await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn('t');
+
     await f.bridge.observe(); await f.bridge.flush();
     assert.equal(f.sent.filter(x => x.method === "setMessageReaction").length, 1);
     assert.equal(f.sent.some(x => x.text?.includes("Сообщение принято")), false);
@@ -476,8 +493,10 @@ test("free text answers exact pending question; closed question never reopens", 
   const f = fixture();
   try {
     await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn('question-turn');
+
     const q = {
-      id: "q",
+      id: "q", turnId: "question-turn",
       status: "pending",
       payload: {
         kind: "user_question",
@@ -594,7 +613,7 @@ test("CLI profile selection follows model and travels only in initial native pro
     );
     await f.bridge.handle(f.input("Check this"));
     assert.equal(
-      f.calls[0][1].prompt,
+      f.calls[0][1].input[0].text,
       "[cli-agents-selection:11111111-1111-4111-8111-111111111111]\nCheck this",
     );
     assert.equal(f.calls[0][1].model, "model-a");
@@ -799,6 +818,9 @@ test("delegated work stays visible while parent is idle and ignores unrelated/hi
   const f = fixture();
   try {
     await f.bridge.handle(f.input("Research"));
+    f.acceptTelegramTurn('parent-turn');
+    f.acceptTelegramTurn('child-turn', 'child');
+
     const child = {...f.thread, id:"child", parentThreadId:"thr_one", title:"Шаурма в Казани — исследование и PDF", status:"active"};
     f.sdk.threads.list = async (args:any) => {
       assert.equal(args.parentThreadId,"thr_one");
@@ -808,7 +830,7 @@ test("delegated work stays visible while parent is idle and ignores unrelated/hi
       {seq:3,type:"item/started",data:{item:{type:"toolCall",arguments:"SECRET TOOL PAYLOAD"}}},
       {seq:2,type:"item/completed",data:{item:{type:"reasoning",text:"PRIVATE THOUGHT"}}},
       {seq:1,type:"item/completed",data:{item:{type:"agentMessage",text:"Сравниваю меню и свежие отзывы."}}},
-    ];
+    ].map(event => ({...event, scope:{kind:"turn",turnId:"child-turn"}}));
     await f.bridge.observe(); await f.bridge.flush();
     const progress=f.sent.find(x=>x.text?.startsWith("⏳"));
     assert.ok(progress?.text.includes(child.title));
@@ -822,11 +844,178 @@ test("delegated work stays visible while parent is idle and ignores unrelated/hi
   } finally { f.cleanup(); }
 });
 
+test("a worker from another task in the same Telegram topic is not disclosed", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Research"));
+    f.acceptTelegramTurn("parent-turn");
+    const routes = new ReplyRoutes(f.store);
+    routes.record("child", "other-task", {kind:"telegram",chatId:OWNER_ID,topicId:100,updateId:999});
+    routes.accept("child", "child-turn", "other-task");
+    f.sdk.threads.list = async () => [{...f.thread,id:"child",parentThreadId:"thr_one",status:"active",title:"PRIVATE CHILD TITLE"}];
+    f.sdk.threads.events.list = async (args:any) => args.threadId === "thr_one" ? [] : [
+      {seq:2,type:"item/completed",scope:{kind:"turn",turnId:"child-turn"},data:{item:{type:"agentMessage",text:"PRIVATE CHILD PROGRESS"}}},
+      {seq:1,type:"turn/started",scope:{kind:"turn",turnId:"child-turn"}},
+    ];
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(/PRIVATE CHILD/.test(JSON.stringify(f.sent)),false);
+  } finally { f.cleanup(); }
+});
+
+test("accepted Telegram task still delivers after navigation and does not replace the new binding", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Research"));
+    f.acceptTelegramTurn("old-task");
+    const old = f.store.get<any>("chat:binding:100");
+    const next = {...old, threadId:"thr_new", revision:"new-navigation",cursor:0};
+    f.store.put("chat:binding:100", next);
+    f.sdk.threads.events.list = async (args:any) => args.threadId !== "thr_one" ? [] : [
+      {seq:1,type:"item/completed",scope:{kind:"turn",turnId:"old-task"},data:{item:{type:"agentMessage",text:"ORIGINAL-TASK-RESULT"}}},
+      {seq:2,type:"turn/completed",scope:{kind:"turn",turnId:"old-task"},data:{status:"completed"}},
+    ].filter(e => e.seq > Number(args.afterSeq ?? 0));
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter(x => x.text?.includes("ORIGINAL-TASK-RESULT")).length,1);
+    assert.equal(f.store.get<any>("chat:binding:100").threadId,"thr_new");
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter(x => x.text?.includes("ORIGINAL-TASK-RESULT")).length,1);
+  } finally { f.cleanup(); }
+});
+
+test("dispatch queues steering and splits grouped tasks through the native queue", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Run"));
+    const ctx:any = {thread:{id:"thr_one"},originPluginId:null,attempt:"join-turn",initiator:"user",queuedMessages:[]};
+    assert.equal((await f.bridge.admitDispatch(ctx)).action,"wait");
+    assert.equal((await f.bridge.admitDispatch({...ctx,initiator:"system"})).action,"wait");
+    assert.equal((await f.bridge.admitDispatch({...ctx,thread:{id:"unrelated"}})).action,"proceed");
+    assert.equal((await f.bridge.admitDispatch({...ctx,attempt:"start-turn"})).action,"proceed");
+    const boundaries:any[] = [];
+    f.sdk.threads.queuedMessages = {list:async () => [{id:"bb-task"},{id:"telegram-task"}], setGroupBoundary:async (args:any) => boundaries.push(args)};
+    const grouped = {...ctx,attempt:"start-turn",queuedMessages:[{id:"bb-task"},{id:"telegram-task"}]};
+    assert.equal((await f.bridge.admitDispatch(grouped)).action,"wait");
+    assert.equal(boundaries.length,0,"never mutate rows while dispatch owns their claim");
+    await f.bridge.separateQueuedTasks();
+    assert.deepEqual(boundaries,[{threadId:"thr_one",expectedGroupedPrefixQueuedMessageIds:["bb-task"],groupBoundaryQueuedMessageId:"bb-task"}]);
+    assert.equal((await f.bridge.admitDispatch({...grouped,queuedMessages:[{id:"bb-task"}]})).action,"proceed");
+    f.sdk.threads.queuedMessages.setGroupBoundary = async () => {throw Error("stale_neighbor");};
+    assert.equal((await f.bridge.admitDispatch(grouped)).action,"wait");
+    await f.bridge.separateQueuedTasks();
+    assert.equal(f.store.list("reply:separate-queue:").length,1);
+    assert.equal(f.calls.filter(x => x[0] === "send").length,0);
+  } finally { f.cleanup(); }
+});
+
+test("native child completion continues its original Telegram task without broadcasting other work", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Research"));
+    const marker = f.calls.find(c => c[0] === "spawn")[1].input[1];
+    const token = marker.text.match(/route:([^\]]+)/)[1];
+    const threadScope={kind:"thread"};
+    f.setEvents([
+      {seq:1,type:"client/turn/requested",scope:threadScope,data:{requestId:"original",originPluginId:"telegram-projects",input:[marker]}},
+      {seq:2,type:"turn/input/accepted",scope:{kind:"turn",turnId:"parent-turn"},data:{clientRequestId:"original"}},
+    ]);
+    await f.bridge.observe();
+    const child={...f.thread,id:"child",parentThreadId:"thr_one"};
+    f.sdk.threads.get=async ({threadId}:any)=>threadId==="child"?child:f.thread;
+    f.sdk.threads.events.list=async(q:any)=>q.threadId === "thr_one" ? [
+      {seq:1,type:"client/turn/requested",data:{requestId:"original",originPluginId:"telegram-projects",input:[marker]}}
+    ] : [];
+    const args={parentThreadId:"thr_one",threadId:"child",routeToken:token,text:"Research details",deliveryId:"delegation-test-001"};
+    await f.bridge.sendDelegated(args);
+    await f.bridge.sendDelegated(args);
+    const sends=f.calls.filter(c=>c[0]==="send");assert.equal(sends.length,1);
+    const childMarker=sends[0][1].input[1];
+    f.sdk.threads.list=async()=>[child];
+    const childEvents=[
+      {seq:1,type:"client/turn/requested",scope:threadScope,data:{requestId:"child-work",originPluginId:"telegram-projects",input:[childMarker]}},
+      {seq:2,type:"turn/input/accepted",scope:{kind:"turn",turnId:"child-turn"},data:{clientRequestId:"child-work"}},
+      {seq:3,type:"turn/completed",scope:{kind:"turn",turnId:"child-turn"},data:{status:"completed"}},
+    ];
+    const parentEvents=[
+      {seq:3,type:"client/turn/requested",scope:threadScope,data:{requestId:"notice",initiator:"system",systemMessageKind:"child-completed",systemMessageSubject:{kind:"thread",threadId:"child",threadName:"Worker"}}},
+      {seq:4,type:"turn/input/accepted",scope:{kind:"turn",turnId:"parent-final"},data:{clientRequestId:"notice"}},
+      {seq:5,type:"item/completed",scope:{kind:"turn",turnId:"parent-final"},data:{item:{type:"agentMessage",text:"DELEGATED-ROUTE-PASS"}}},
+      {seq:6,type:"turn/completed",scope:{kind:"turn",turnId:"parent-final"},data:{status:"completed"}},
+    ];
+    f.sdk.threads.events.list=async (q:any)=>(q.threadId==="child"?childEvents:parentEvents).filter(e=>e.seq>Number(q.afterSeq??0));
+    await f.bridge.observe();await f.bridge.flush();
+    assert.equal(f.sent.filter(x=>x.text?.includes("DELEGATED-ROUTE-PASS")).length,1);
+  } finally {f.cleanup();}
+});
+
+test("delegated spawn uses native project/environment and keeps one worker on RPC replay", async () => {
+  const f=fixture();
+  try {
+    await f.bridge.handle(f.input("Work"));
+    const marker=f.calls.find(c=>c[0]==="spawn")[1].input[1];
+    const token=marker.text.match(/route:([^\]]+)/)[1];
+    const routes=new ReplyRoutes(f.store);
+    routes.requested("thr_one",{requestId:"original",originPluginId:"telegram-projects",input:[marker]});
+    f.sdk.threads.events.list=async()=>[
+      {seq:1,type:"client/turn/requested",data:{requestId:"original",originPluginId:"telegram-projects",input:[marker]}}
+    ];
+    const nativeCalls:any[]=[];
+    f.sdk.threads.spawn=async (args:any)=>{nativeCalls.push(args);return {...f.thread,id:"new-child",parentThreadId:"thr_one"};};
+    const args={parentThreadId:"thr_one",routeToken:token,projectId:"target-project",environmentId:"target-environment",
+      text:"Do work",title:"Worker",deliveryId:"new-worker-001",providerId:"codex"};
+    assert.deepEqual(await f.bridge.spawnDelegated(args),{threadId:"new-child"});
+    assert.deepEqual(await f.bridge.spawnDelegated(args),{threadId:"new-child"});
+    assert.equal(nativeCalls.length,1);
+    assert.equal(nativeCalls[0].projectId,"target-project");
+    assert.deepEqual(nativeCalls[0].environment,{type:"reuse",environmentId:"target-environment"});
+    assert.equal(nativeCalls[0].parentThreadId,"thr_one");
+    routes.requested("new-child",{requestId:"work",originPluginId:"telegram-projects",input:nativeCalls[0].input});
+    routes.accept("new-child","work-turn","work");
+    assert.equal(routes.destination("new-child","work-turn")?.kind,"telegram");
+    await assert.rejects(f.bridge.spawnDelegated({...args,text:"Different work"}),/conflict/);
+    f.sdk.threads.spawn=async()=>{throw Error("connection_lost");};
+    await assert.rejects(f.bridge.spawnDelegated({...args,deliveryId:"new-worker-002"}),/connection_lost/);
+    await assert.rejects(f.bridge.spawnDelegated({...args,deliveryId:"new-worker-002"}),/uncertain/);
+    f.sdk.threads.events.list=async()=>[
+      {seq:2,type:"client/turn/requested",data:{requestId:"new-bb-task",initiator:"user",input:[{type:"text",text:"New task from BB"}]}}
+    ];
+    await assert.rejects(f.bridge.spawnDelegated({...args,deliveryId:"new-worker-003"}),/does_not_match_current/);
+    assert.equal(f.store.get("reply:delegation-spawn:new-worker-003"),undefined);
+  } finally {f.cleanup();}
+});
+
+test("a Telegram child question resolves in that worker after navigation without forwarding BB questions", async () => {
+  const f=fixture();
+  try {
+    await f.bridge.handle(f.input("Work"));
+    f.acceptTelegramTurn("child-turn","child");
+    f.store.put("reply:child-cursor:child",0);
+    const q={id:"child-question",turnId:"child-turn",status:"pending",payload:{kind:"approval",
+      reason:"Choose for this worker",subject:{kind:"command",command:"ls"},availableDecisions:["allow_once","deny"]}};
+    f.setQuestions([q]);
+    f.sdk.threads.list=async()=>[{...f.thread,id:"child",parentThreadId:"thr_one"}];
+    f.sdk.threads.events.list=async()=>[];
+    f.sdk.threads.interactions.list=async({threadId}:any)=>threadId==="child"?[q]:[];
+    await f.bridge.observe();await f.bridge.flush();
+    assert.equal(f.sent.filter(x=>x.text?.includes("Choose for this worker")).length,1);
+    const current=f.store.get<any>("chat:binding:100");
+    f.store.put("chat:binding:100",{...current,threadId:"different-thread",revision:"new-navigation"});
+    await f.press("resolve");
+    assert.equal(f.calls.find(c=>c[0]==="resolve")[1].threadId,"child");
+    assert.equal(f.store.get<any>("chat:binding:100").threadId,"different-thread");
+    const routes=new ReplyRoutes(f.store);routes.record("child","bb-request",{kind:"bb"});routes.accept("child","bb-turn","bb-request");
+    q.id="bb-child-question";q.turnId="bb-turn";q.status="pending";q.payload.reason="PRIVATE BB QUESTION";
+    await f.bridge.observe();await f.bridge.flush();
+    assert.equal(f.sent.some(x=>x.text?.includes("PRIVATE BB QUESTION")),false);
+  } finally {f.cleanup();}
+});
+
 test("public parent commentary survives subsequent generic tool start", async () => {
   const f=fixture();
   try {
     f.thread.status="active";
     await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn('t');
+
     f.setEvents([
       {seq:1,type:"item/completed",scope:{kind:"turn",turnId:"t"},data:{item:{type:"agentMessage",text:"Проверяю адреса и часы работы."}}},
       {seq:2,type:"item/started",scope:{kind:"turn",turnId:"t"},data:{item:{type:"commandExecution",command:"SECRET COMMAND"}}},
@@ -859,6 +1048,8 @@ test("artifact delivered once before final, unavailable path explicitly reported
     writeFileSync(join(dir,'report.pdf'), '%PDF-1.4 test');
     f.sdk.environments.get=async()=>({path:dir});
     await f.bridge.handle(f.input('Run'));
+    f.acceptTelegramTurn('t');
+
     f.setEvents([
       {seq:1,type:'item/completed',scope:{kind:'turn',turnId:'t'},data:{item:{type:'agentMessage',text:`Готово: [PDF](${dir}/report.pdf). [Нет](${dir}/missing.pdf). [Источник](https://example.org)`}}},
       {seq:2,type:'turn/completed',scope:{kind:'turn',turnId:'t'},data:{status:'completed'}}
@@ -877,6 +1068,9 @@ test("artifact delivered once before final, unavailable path explicitly reported
 test("failed child notifies parent chat with actual retry time, deduplicates and updates cancellation", async()=>{
  const f=fixture();try{
   await f.bridge.handle(f.input('Run'));
+    f.acceptTelegramTurn('parent-turn');
+
+  f.acceptTelegramTurn("child-turn","thr_failed");
   const child={...f.thread,id:'thr_failed',parentThreadId:'thr_one',title:'Исследование',status:'error'};
   f.sdk.threads.list=async()=>[child];
   let retries:any[]=[{id:'retry1',payload:{kind:'retry'},sendAt:Date.now()+60000}];
@@ -885,7 +1079,7 @@ test("failed child notifies parent chat with actual retry time, deduplicates and
   f.sdk.threads.events.list=async(a:any)=>a.threadId==='thr_failed'?[
    {seq:10,type:'turn/started'},
    {seq:11,type:'provider/error',data:{errorInfo:{category:'rate-limit'},detail:'PRIVATE TOKEN MUST NOT LEAK'}},
-   {seq:12,type:'turn/completed',data:{status:'failed'}}
+   {seq:12,type:'turn/completed',scope:{kind:'turn',turnId:'child-turn'},data:{status:'failed'}}
   ]:oldList(a);
   await f.bridge.observe();await f.bridge.flush();await f.bridge.observe();await f.bridge.flush();
   let errors=f.sent.filter(x=>x.text?.startsWith('⚠️ Исследование'));
@@ -897,9 +1091,12 @@ test("failed child notifies parent chat with actual retry time, deduplicates and
 });
 test("main failure reports no retry honestly, later successful final arrives once",async()=>{
  const f=fixture();try{
-  await f.bridge.handle(f.input('Run')); f.thread.status='error';
+  await f.bridge.handle(f.input('Run'));
+    f.acceptTelegramTurn('t');
+    f.acceptTelegramTurn('r');
+ f.thread.status='error';
   f.sdk.threads.queue={list:async()=>[]};
-  const fail=[{seq:1,type:'provider/error',data:{errorInfo:{category:'unauthorized'}}},{seq:2,type:'turn/completed',scope:{kind:'turn',turnId:'t'},data:{status:'failed'}}];
+  const fail=[{seq:1,type:'provider/error',scope:{kind:'turn',turnId:'t'},data:{errorInfo:{category:'unauthorized'}}},{seq:2,type:'turn/completed',scope:{kind:'turn',turnId:'t'},data:{status:'failed'}}];
   const oldList=f.sdk.threads.events.list;
   f.sdk.threads.events.list=async(a:any)=>a.order==='desc'?fail:oldList(a);
   f.setEvents(fail);await f.bridge.observe();await f.bridge.flush();
@@ -1007,4 +1204,44 @@ test("pending question rejects unrelated attachment before downloading it", asyn
     assert.equal(f.calls.filter(c => c[0] === "send").length, 0);
     assert.ok(f.sent.some(s => String(s.text).includes("Файл пока не передан")));
   } finally {f.cleanup();}
+});
+
+test("native request attribution delivers Telegram output but keeps BB output and questions local", async () => {
+  const f=fixture(); try {
+    await f.bridge.handle(f.input("Telegram task"));
+    const input=f.calls.find(c=>c[0]==="spawn")[1].input;
+    f.setEvents([
+      {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"tg-native",originPluginId:"telegram-projects",input}},
+      {seq:2,type:"turn/input/accepted",scope:{kind:"turn",turnId:"tg-turn"},data:{clientRequestId:"tg-native"}},
+      {seq:3,type:"item/completed",scope:{kind:"turn",turnId:"tg-turn"},data:{item:{type:"agentMessage",text:"TG-RESULT"}}},
+      {seq:4,type:"turn/completed",scope:{kind:"turn",turnId:"tg-turn"},data:{status:"completed"}},
+      {seq:5,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"bb-native",input:[{type:"text",text:"BB task"}]}},
+      {seq:6,type:"turn/input/accepted",scope:{kind:"turn",turnId:"bb-turn"},data:{clientRequestId:"bb-native"}},
+      {seq:7,type:"item/completed",scope:{kind:"turn",turnId:"bb-turn"},data:{item:{type:"agentMessage",text:"BB-PRIVATE-RESULT"}}},
+      {seq:8,type:"turn/completed",scope:{kind:"turn",turnId:"bb-turn"},data:{status:"completed"}},
+    ]);
+    f.setQuestions([{id:"bb-question",turnId:"bb-turn",status:"pending",payload:{kind:"user_question",questions:[]}}]);
+    await f.bridge.observe();await f.bridge.flush();await f.bridge.observe();await f.bridge.flush();
+    assert.equal(f.sent.filter(s=>s.text==="TG-RESULT").length,1);
+    assert.equal(f.sent.some(s=>String(s.text).includes("BB-PRIVATE")),false);
+    assert.equal([...f.data.keys()].some(k=>k.startsWith("chat:question-out:")),false);
+    f.thread.status="active";
+    await f.bridge.observe();await f.bridge.flush();
+    assert.equal(f.sent.some(s=>String(s.text).startsWith("⏳")),false);
+  } finally {f.cleanup();}
+});
+test("explicit Telegram delivery is deduplicated and does not change future task routing", async () => {
+  const f=fixture();try {
+    await f.bridge.handle(f.input("bind"));
+    const args={threadId:"thr_one",topicId:100,text:"Explicitly requested",deliveryId:"explicit_test_001"};
+    f.bridge.sendExplicit(args);
+    assert.equal(f.bridge.explicitDeliveryStatus(args.deliveryId).state,"queued");
+    await f.bridge.flush();
+    assert.equal(f.bridge.explicitDeliveryStatus(args.deliveryId).state,"delivered");
+    f.bridge.sendExplicit(args);await f.bridge.flush();
+    assert.equal(f.sent.filter(s=>s.text===args.text).length,1);
+    assert.throws(()=>f.bridge.sendExplicit({...args,text:"changed"}),/conflict/);
+    assert.throws(()=>f.bridge.sendExplicit({...args,threadId:"different"}),/mismatch/);
+    assert.equal([...f.data.keys()].some(k=>k.startsWith("reply:request:")),false);
+  }finally{f.cleanup();}
 });

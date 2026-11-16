@@ -1,4 +1,3 @@
-import { StateTransfer } from "./state-transfer";
 import { saveLocalTelegramFile, telegramApiRoot as checkedApiRoot } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
 import { translate } from "./locale";
@@ -8,6 +7,7 @@ import {
   diagnose,
 } from "./settings";
 import { ChatBridge } from "./chat";
+import { StateTransfer } from "./state-transfer";
 import { routeUpdate } from "./ingress";
 import { menuCommands } from "./commands";
 import {
@@ -97,7 +97,6 @@ export const rpcContract = defineRpcContract({
     input: z.object({confirm: z.literal(true), id:z.string().uuid(), sha256:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),
     output: z.object({restored: z.literal(true), rows:z.number(), sha256:z.string()}),
   },
-
   agencyCapabilities: {input:z.null(),output:agencyCapabilitySchema},
   agencyConfigure: {input:z.object({enabled:z.boolean()}).strict(),output:z.object({saved:z.literal(true)})},
   agencyEnqueue: {input:agencyDeliverySchema,output:agencyReceiptSchema},
@@ -118,6 +117,27 @@ export const rpcContract = defineRpcContract({
   saveToken: {
     input: z.object({ token: z.string().max(200) }),
     output: diagnosisSchema,
+  },
+  telegramDeliveryStatus: {
+    input: z.object({deliveryId: z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/)}),
+    output: z.object({state: z.string(), messageId: z.number().nullable()}),
+  },
+  sendDelegated: {
+    input:z.object({parentThreadId:z.string().min(1),routeToken:z.string().uuid(),threadId:z.string().min(1),
+      text:z.string().min(1).max(100000),deliveryId:z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/)}).strict(),
+    output:z.object({accepted:z.literal(true)}),
+  },
+  spawnDelegated: {
+    input:z.object({parentThreadId:z.string().min(1),routeToken:z.string().uuid(),projectId:z.string().min(1),
+      environmentId:z.string().min(1),text:z.string().min(1).max(100000),title:z.string().min(1).max(200),
+      deliveryId:z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/),providerId:z.string().min(1).optional(),model:z.string().min(1).optional()}).strict(),
+    output:z.object({threadId:z.string()}),
+  },
+  sendToTelegram: {
+    input: z.object({threadId: z.string().min(1), topicId: z.number().int().nonnegative(),
+      text: z.string().min(1).max(16000), deliveryId: z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/),
+      explicit: z.literal(true)}),
+    output: z.object({queued: z.boolean(), deliveryId: z.string()}),
   },
   prepareLocalApi: {
     input: z.object({ expectedUsername: z.string().min(3).max(64), confirm: z.literal(true) }),
@@ -314,6 +334,7 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const lifetime = new AbortController();
   let bridge: ChatBridge | undefined;
+  bb.experimental_hooks.on("message.dispatch", ctx => bridge?.admitDispatch(ctx) ?? {action: "proceed"});
   let flight: Promise<void> | null = null;
   let lastError: string | null = null;
   let topicsEnabled = false;
@@ -987,7 +1008,6 @@ export default async function plugin(bb: BbPluginApi) {
       return new StateTransfer(store).restore(id, sha256,
         value => settings.experimental_set(value as Parameters<typeof settings.experimental_set>[0]));
     },
-
     agencyCapabilities: async()=>{const c=await settings.get();return agency.capabilities(c.enabled&&c.agencyEnabled);},
     agencyConfigure: async({enabled})=>{await settings.experimental_set({agencyEnabled:enabled});return {saved:true as const};},
     agencyEnqueue: async(input)=>{const c=await settings.get();return agency.enqueue(input,c.enabled&&c.agencyEnabled);},
@@ -1018,6 +1038,22 @@ export default async function plugin(bb: BbPluginApi) {
         botId(),
         c.telegramApiRoot,
       );
+    },
+    telegramDeliveryStatus: async ({deliveryId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      return bridge.explicitDeliveryStatus(deliveryId);
+    },
+    sendDelegated: async args => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      return bridge.sendDelegated(args);
+    },
+    spawnDelegated: async args => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      return bridge.spawnDelegated(args);
+    },
+    sendToTelegram: async (args) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      return bridge.sendExplicit(args);
     },
     prepareLocalApi: async ({ expectedUsername }) => {
       const c = await settings.get();

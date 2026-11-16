@@ -37,10 +37,23 @@ Telegram notice. Retry time is taken from the actual durable threads.queue row, 
 from historical retry decisions. With no row, say no automatic retry is scheduled.
 Only sanitized failure categories are shown; never forward raw provider error details.
 
+## Explicit delivery from BB
+
+Do not automatically send an answer to Telegram merely because the BB thread is
+bound to a Telegram chat. A BB-origin request stays in BB. Use `sendToTelegram`
+only when the user explicitly asks to send that result to Telegram. This is an
+extra delivery, not a change to the destination of future requests.
+
+Call the plugin RPC with a JSON input file containing `threadId`, the bound
+`topicId`, `text`, a stable unique `deliveryId` (8–100 ASCII letters/digits/_/-),
+and `explicit: true`. Reuse the same delivery ID for retries of the same delivery.
+A successful RPC means the output was queued, not that Telegram acknowledged it;
+inspect delivery status before claiming it arrived. Never put secrets in the
+message or command arguments. The thread/topic binding must match.
 # Private source migration
 
 Changing an installed Git source with the same plugin ID requires a state
-transfer; ordinary removal deletes the plugin's state and settings. Do not
+transfer; removal deletes settings and secrets and may retain its database. Do not
 remove the old installation before preparing and verifying a recovery copy.
 
 The administrative `exportPrivateState` RPC takes `{ "confirm": true }`.
@@ -56,3 +69,26 @@ copies, unsafe file permissions and a replay that would roll back changed
 state. It restores with both receivers disabled. Verify identity, bindings,
 settings and receipts before separately enabling the receiver. These APIs do
 not switch bots, log out Telegram, or enable polling automatically.
+
+## Delegating a Telegram-origin task
+
+For the CURRENT incoming task only, a hidden input block carries
+`[bb-telegram-reply-route:<uuid>]`. Do not quote it in answers or reuse a token
+from earlier history for a new BB-origin task. It identifies delivery, not a
+project, account, memory or permission grant.
+
+Choose the project, environment and worker with the normal BB registry and
+dispatch instructions. Preserve the transport identity through RPC JSON input:
+
+- `sendDelegated`: parentThreadId, routeToken (current UUID), threadId of the
+  existing direct child, text and stable deliveryId.
+- `spawnDelegated`: parentThreadId, routeToken, projectId, environmentId, title,
+  text, stable deliveryId, optional providerId/model. Create projects through
+  normal BB APIs first. The RPC uses native BB spawn with parent notifications
+  enabled and returns threadId.
+
+These methods attach delivery metadata to native send/spawn. BB owns execution,
+queue and retries. Successful submission is not completion: wait for the native
+child result and verify it. Never bypass an uncertain delivery error by changing
+deliveryId; inspect the native queue/thread first to avoid duplicate work.
+BB-origin tasks use normal dispatch without a Telegram route token.

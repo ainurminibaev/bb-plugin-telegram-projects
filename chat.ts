@@ -1,8 +1,9 @@
+import { ReplyRoutes } from "./reply-routing";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
 import { markdownExcerpt } from "./events";
 import { localArtifacts, renderTelegramParts, cleanAssistantText, publicActivity } from "./telegram-ux";
-import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type { BbPluginApi, MessageDispatchHookContext, MessageDispatchHookDecision } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import {
@@ -55,6 +56,7 @@ export const inputSchema = z.object({
 });
 export type ChatInput = z.infer<typeof inputSchema>;
 type Binding = {
+  questionOnly?: boolean;
   topicId: number;
   projectId: string;
   threadId: string | null;
@@ -91,6 +93,8 @@ type Inbox = {
   at: number;
 };
 type Outbox = {
+  ownerId?: number;
+  sourceThreadId?: string;
   revision?: string;
   topicId: number;
   text: string;
@@ -175,11 +179,185 @@ export class ChatBridge {
   private get s() {
     return this.d.store;
   }
+  private get routes() { return new ReplyRoutes(this.s); }
+  async admitDispatch(ctx: MessageDispatchHookContext): Promise<MessageDispatchHookDecision> {
+    const managed = ctx.originPluginId === "telegram-projects" ||
+      this.deliveryWatches().some(w => w.threadId === ctx.thread.id) ||
+      this.bindings().some(b => b.threadId === ctx.thread.id);
+    if (!managed) return {action: "proceed"};
+    // Use BB's durable queue. Never inject a new human task into an existing
+    // turn whose answer already has a different request identity.
+    if (ctx.attempt === "join-turn")
+      return {action: "wait", reason: "Предыдущее поручение ещё выполняется; ответ останется в исходном интерфейсе.", sendAt: Date.now() + 1000};
+    if (ctx.queuedMessages.length > 1) {
+      // Core has already claimed these rows when invoking this hook. Record
+      // the work; mutate the boundary only after returning wait releases them.
+      this.s.put("reply:separate-queue:" + ctx.thread.id, {threadId: ctx.thread.id});
+      return {action: "wait", reason: "Поручения из очереди выполняются отдельно, чтобы сохранить адрес каждого ответа.", sendAt: Date.now() + 1000};
+    }
+    return {action: "proceed"};
+  }
+  async separateQueuedTasks() {
+    for (const {key, value} of this.s.list<{threadId: string}>("reply:separate-queue:")) {
+      try {
+        const rows = await this.d.sdk.threads.queuedMessages.list({threadId: value.threadId});
+        if (rows.length) {
+          const first = rows[0].id;
+          await this.d.sdk.threads.queuedMessages.setGroupBoundary({threadId: value.threadId,
+            expectedGroupedPrefixQueuedMessageIds: [first], groupBoundaryQueuedMessageId: first});
+        }
+        this.s.del(key);
+      } catch { /* A claimed/changed queue is retried without removing messages. */ }
+    }
+  }
+  private canDeliver(b: Binding, turnId: string | null | undefined, threadId = b.threadId) {
+    if (!turnId || !threadId) return false;
+    const route = this.routes.destination(threadId, turnId);
+    return route?.kind === "telegram" && route.chatId === this.d.owner() && route.topicId === b.topicId;
+  }
+  explicitDeliveryStatus(deliveryId: string) {
+    const row = this.s.get<Outbox>("chat:out:explicit:" + deliveryId);
+    const state = !row ? "unknown" : row.sentId && row.sentId > 0 ? "delivered" :
+      row.sentId === -1 ? "cancelled" : row.error ? "retrying" : "queued";
+    return {state, messageId: row?.sentId && row.sentId > 0 ? row.sentId : null};
+  }
+  async sendDelegated(args: {parentThreadId: string; routeToken: string; threadId: string; text: string; deliveryId: string}): Promise<{accepted: true}> {
+    const child = await this.d.sdk.threads.get({threadId: args.threadId, signal: this.d.signal});
+    if (child.parentThreadId !== args.parentThreadId || child.archivedAt || child.deletedAt)
+      throw Error("delegation_parent_mismatch");
+    const key = "reply:delegation:" + args.deliveryId;
+    const old = this.s.get<{args: typeof args; state: string}>(key);
+    if (old) {
+      if (JSON.stringify(old.args) !== JSON.stringify(args)) throw Error("delegation_id_conflict");
+      if (old.state !== "accepted") throw Error("delegation_delivery_uncertain_check_native_queue");
+      return {accepted: true as const};
+    }
+    await this.validateDelegationParent(args.parentThreadId,args.routeToken);
+    if (this.s.get(key)) return this.sendDelegated(args);
+    const marker = this.routes.delegatedIngress(args.parentThreadId, args.routeToken, args.threadId);
+    // Reserve synchronously before any further await: concurrent RPC retries
+    // must not both submit a message while reading the worker's event cursor.
+    this.s.put(key, {args, state:"sending"});
+    const cursorKey = "reply:child-cursor:" + args.threadId;
+    if (this.s.get(cursorKey) === undefined) {
+      const prior = await this.d.sdk.threads.events.list({threadId:args.threadId,order:"desc",limit:"100",
+        types:["client/turn/requested","turn/input/accepted","turn/completed"],signal:this.d.signal});
+      for (const event of [...prior].sort((a,b)=>a.seq-b.seq)) {
+        if (event.type === "client/turn/requested") this.routes.requested(args.threadId,event.data);
+        else if (event.type === "turn/input/accepted" && event.scope.kind === "turn")
+          this.routes.accept(args.threadId,event.scope.turnId,event.data.clientRequestId);
+      }
+      // Historical completions predate this delegation and are not notices
+      // belonging to it. An already-running turn still has its own route above.
+      this.s.put(cursorKey,Math.max(0,...prior.map(e=>e.seq)));
+    }
+    await this.d.sdk.threads.send({threadId:args.threadId, mode:"queue-if-active",
+      input:[{type:"text",text:args.text,mentions:[]},marker]});
+    this.s.put(key, {args, state:"accepted"});
+    return {accepted:true as const};
+  }
+  async spawnDelegated(args: {parentThreadId: string; routeToken: string; projectId: string;
+    environmentId: string; text: string; title: string; deliveryId: string; providerId?: string; model?: string}): Promise<{threadId:string}> {
+    const key = "reply:delegation-spawn:" + args.deliveryId;
+    const old = this.s.get<{args: typeof args; state: string; threadId?: string}>(key);
+    if (old) {
+      if (JSON.stringify(old.args) !== JSON.stringify(args)) throw Error("delegation_id_conflict");
+      if (old.state !== "accepted" || !old.threadId) throw Error("delegation_delivery_uncertain_check_native_threads");
+      return {threadId:old.threadId};
+    }
+    await this.validateDelegationParent(args.parentThreadId,args.routeToken);
+    // Another identical RPC may have reserved this delivery during validation.
+    if (this.s.get(key)) return this.spawnDelegated(args);
+    const marker = this.routes.delegatedIngress(args.parentThreadId,args.routeToken,null);
+    // The caller chooses the project/environment using the ordinary BB registry.
+    // Native spawn validates that pair and handles execution, limits and retries.
+    this.s.put(key,{args,state:"sending"});
+    const child = await this.d.sdk.threads.spawn({projectId:args.projectId,
+      environment:{type:"reuse",environmentId:args.environmentId},parentThreadId:args.parentThreadId,
+      parentNotifications:"auto",title:args.title,visibility:"visible",
+      ...(args.providerId ? {providerId:args.providerId}:{}),...(args.model ? {model:args.model}:{}),
+      input:[{type:"text",text:args.text,mentions:[]},marker]});
+    this.routes.bindIngress(marker,child.id);
+    this.s.put("reply:child-cursor:"+child.id,0);
+    this.s.put(key,{args,state:"accepted",threadId:child.id});
+    return {threadId:child.id};
+  }
+  private async validateDelegationParent(threadId: string, token: string) {
+    const events = await this.d.sdk.threads.events.list({threadId,order:"desc",limit:"1",
+      types:["client/turn/requested"],signal:this.d.signal});
+    const latest = events.find(e=>e.type === "client/turn/requested");
+    if (!latest || latest.type !== "client/turn/requested") throw Error("current_parent_request_unavailable");
+    // System child notices have already inherited their route through outcome
+    // reconciliation. Ordinary native requests can be resolved directly here,
+    // without waiting for the periodic observer to see the current turn.
+    if (!latest.data.systemMessageKind?.startsWith("child-"))
+      this.routes.requested(threadId,latest.data);
+    this.routes.assertCurrentDelegation(threadId,token,latest.data.requestId);
+  }
+  private async observeChildRoutes(parent: Binding) {
+    const parentThreadId = parent.threadId!;
+    let caughtUp = true;
+    const children = await this.d.sdk.threads.list({parentThreadId,archived:false,includeHidden:false,limit:100,signal:this.d.signal});
+    for (const child of children.filter(c => c.parentThreadId === parentThreadId && !c.deletedAt && !c.archivedAt)) {
+      const key = "reply:child-cursor:" + child.id;
+      if (this.s.get(key) === undefined) continue;
+      const events = await this.d.sdk.threads.events.list({threadId:child.id,
+        afterSeq:String(this.s.get<number>(key) ?? 0),limit:"100",signal:this.d.signal,
+        types:["client/turn/requested","turn/input/accepted","turn/completed"]});
+      if (events.length === 100) caughtUp = false;
+      for (const event of events) {
+        if (event.type === "client/turn/requested") this.routes.requested(child.id,event.data);
+        else if (event.type === "turn/input/accepted" && event.scope.kind === "turn")
+          this.routes.accept(child.id,event.scope.turnId,event.data.clientRequestId);
+        else if (event.type === "turn/completed" && event.scope.kind === "turn")
+          this.routes.complete(child.id,event.scope.turnId,event.data.status);
+        this.s.put(key,event.seq);
+      }
+      const questions = await this.d.sdk.threads.interactions.list({threadId:child.id,signal:this.d.signal});
+      for (const question of questions.filter(q=>q.status === "pending" && this.canDeliver(parent,q.turnId,child.id))) {
+        const revision = parent.revision + "-child-" + child.id;
+        const binding: Binding = {...parent,projectId:child.projectId,threadId:child.id,revision,questionOnly:true};
+        this.s.put("reply:watch:"+revision,{...binding,owner:this.d.owner()});
+        this.question(binding,question);
+      }
+    }
+    return caughtUp;
+  }
+  sendExplicit(args: {threadId: string; topicId: number; text: string; deliveryId: string}) {
+    const binding = this.binding(args.topicId);
+    if (!this.d.owner() || !binding || binding.threadId !== args.threadId)
+      throw Error("explicit_delivery_binding_mismatch");
+    if (!args.text.trim() || args.text.length > 16000 || !/^[a-zA-Z0-9_-]{8,100}$/.test(args.deliveryId))
+      throw Error("invalid_explicit_delivery");
+    const key = "reply:explicit:" + args.deliveryId;
+    const old = this.s.get<{threadId: string; topicId: number; text: string}>(key);
+    if (old && (old.threadId !== args.threadId || old.topicId !== args.topicId || old.text !== args.text))
+      throw Error("explicit_delivery_id_conflict");
+    this.s.put(key, {threadId: args.threadId, topicId: args.topicId, text: args.text});
+    this.enqueue(args.topicId, args.text, undefined, "explicit:" + args.deliveryId, false);
+    const outKey = "chat:out:explicit:" + args.deliveryId;
+    const out = this.s.get<Outbox>(outKey);
+    if (out) this.s.put(outKey, {...out, sourceThreadId: args.threadId});
+    return {queued: true, deliveryId: args.deliveryId};
+  }
   forget(topicId: number) {
     this.s.del("chat:binding:" + topicId);
   }
   bindings() {
     return this.s.list<Binding>("chat:binding:").map((x) => x.value);
+  }
+  private watchInput(b: Binding) {
+    if (!b.threadId) return;
+    const exists = this.deliveryWatches().some(w => !w.questionOnly && w.threadId === b.threadId && w.topicId === b.topicId);
+    if (!exists) this.s.put("reply:watch:" + b.revision, {...b, owner: this.d.owner()});
+  }
+  private deliveryWatches() {
+    return this.s.list<Binding & {owner: number}>("reply:watch:")
+      .map(row => row.value).filter(w => w.owner === this.d.owner());
+  }
+  private deliveryBinding(topicId: number, revision?: string) {
+    return (revision ? this.deliveryWatches().find(w => w.topicId === topicId && w.revision === revision) : undefined)
+      ?? this.binding(topicId);
   }
   private save(b: Binding) {
     this.s.put("chat:binding:" + b.topicId, b);
@@ -289,6 +467,7 @@ export class ChatBridge {
     const key = "chat:out:" + id;
     if (this.s.get(key)) return;
     this.s.put(key, {
+      ownerId: this.d.owner(),
       topicId,
       text,
       keys,
@@ -997,6 +1176,7 @@ export class ChatBridge {
     if (input.callback) {
       const id = input.callback.replace(/^bb:/, "");
       const a = this.s.get<Action>("chat:button:" + id);
+      if (a?.kind === "resolve") b = this.deliveryBinding(input.topicId, a.revision);
       if (
         !a ||
         a.used ||
@@ -1201,7 +1381,7 @@ export class ChatBridge {
         revision: string;
       }>("chat:question:" + input.topicId + ":" + input.replyTo);
       if (q) {
-        await this.answerText(b, q, text);
+        await this.answerText(this.deliveryBinding(input.topicId, q.revision) ?? b, q, text);
         return;
       }
     }
@@ -1221,10 +1401,12 @@ export class ChatBridge {
         return;
       }
       await this.validThread(b, b.threadId);
+      this.watchInput(b);
       await this.d.sdk.threads.send({
         threadId: b.threadId,
-        mode: "auto",
-        input: [{ type: "text", text, mentions: [] }],
+        mode: "queue-if-active",
+        input: [{ type: "text", text, mentions: [] }, this.routes.ingress(b.threadId,
+          {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId})],
       });
     } else {
       if (!b.ready) {
@@ -1253,17 +1435,21 @@ export class ChatBridge {
         });
         prompt = "[cli-agents-selection:" + selection.token + "]\n" + text;
       }
+      const marker = this.routes.ingress(null,
+        {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId});
       const t = await this.d.sdk.threads.spawn({
         projectId: b.projectId,
         environment,
-        prompt,
+        input: [{type: "text", text: prompt, mentions: []}, marker],
         title: label(text, 85),
         visibility: "visible",
         ...(b.providerId ? { providerId: b.providerId } : {}),
         ...(b.model ? { model: b.model } : {}),
       });
+      this.routes.bindIngress(marker, t.id);
       b = { ...b, threadId: t.id, cursor: 0, ready: false };
       this.save(b);
+      this.watchInput(b);
     }
     // The reaction acknowledges input without adding a service receipt to the chat.
     await this.d.tg("setMessageReaction", {
@@ -1708,7 +1894,8 @@ export class ChatBridge {
       const events = await this.d.sdk.threads.events.list({threadId: t.id, order: "desc", limit: "30", types: ["provider/error", "turn/completed", "turn/started"], signal: this.d.signal});
       const sorted = [...events].sort((a,c) => c.seq-a.seq);
       const end = sorted.find(e => e.type === "turn/completed");
-      if (end?.type !== "turn/completed" || end.data.status !== "failed") continue;
+      if (end?.type !== "turn/completed" || end.data.status !== "failed" ||
+          end.scope.kind !== "turn" || !this.canDeliver(b, end.scope.turnId, t.id)) continue;
       const start = sorted.find(e => e.type === "turn/started");
       const error = sorted.find(e => e.type === "provider/error" && (!start || e.seq > start.seq));
       const category = error?.type === "provider/error" ? error.data.errorInfo?.category : undefined;
@@ -1741,8 +1928,11 @@ export class ChatBridge {
       !child.archivedAt && !child.deletedAt &&
       ["active", "starting", "pending", "stopping"].includes(child.status));
     const result: string[] = [];
-    for (const child of active.slice(0, 3)) {
+    const parentTurn = this.s.get<string>("reply:active-turn:" + b.threadId);
+    const parentRoute = parentTurn ? this.routes.destination(b.threadId, parentTurn) : undefined;
+    for (const child of active) {
       let action = "";
+      let attributed = false;
       try {
         const events = await this.d.sdk.threads.events.list({
           threadId: child.id, order: "desc", limit: "25",
@@ -1751,8 +1941,17 @@ export class ChatBridge {
         });
         let fallback = "";
         for (const event of [...events].sort((a, c) => c.seq - a.seq)) {
-          if (event.type === "turn/started") break;
+          if (event.type === "turn/started") {
+            if (event.scope.kind === "turn" && this.routes.sameTask(parentRoute,
+                this.routes.destination(child.id, event.scope.turnId))) attributed = true;
+            break;
+          }
           if (event.type !== "item/started" && event.type !== "item/completed") continue;
+          // A reused worker can be doing an unrelated BB task. Parentage and
+          // the same Telegram topic alone do not prove task ownership.
+          if (event.scope.kind !== "turn" || !this.routes.sameTask(parentRoute,
+              this.routes.destination(child.id, event.scope.turnId))) continue;
+          attributed = true;
           const item = event.data.item;
           // Only public commentary: never reasoning, commands or tool payloads.
           if (event.type === "item/completed" && item.type === "agentMessage" && !item.parentToolCallId) {
@@ -1764,6 +1963,7 @@ export class ChatBridge {
         }
         action ||= fallback;
       } catch { /* A child event failure must not block parent delivery. */ }
+      if (!attributed) continue;
       const state = child.hasPendingInteraction ? "нужен ответ" :
         child.status === "pending" ? "в очереди" :
         child.status === "starting" ? "запускается" :
@@ -1771,11 +1971,16 @@ export class ChatBridge {
       const title = cleanAssistantText(child.title || "Отдельная задача").replace(/\s+/g, " ").slice(0, 140);
       result.push(`${title} — ${state}${action ? "\n" + action : ""}`);
     }
-    if (active.length > 3) result.push(`Ещё задач выполняется: ${active.length - 3}`);
-    return result;
+    return result.length > 3
+      ? [...result.slice(0, 3), `Ещё задач выполняется: ${result.length - 3}`]
+      : result;
   }
   async observe() {
-    for (const b of this.bindings()) {
+    await this.separateQueuedTasks();
+    const watches = this.deliveryWatches().filter(w=>!w.questionOnly);
+    const observedBindings = [...watches, ...this.bindings().filter(b =>
+      !watches.some(w => w.threadId === b.threadId && w.topicId === b.topicId))];
+    for (const b of observedBindings) {
       if (!b.threadId) continue;
       const downloadProgressKey = "chat:download-progress:" + b.topicId + ":" + b.revision;
       if (this.lanes.has(b.topicId)) {
@@ -1793,6 +1998,7 @@ export class ChatBridge {
       this.s.del(downloadProgressKey);
       try {
         const t = await this.validThread(b, b.threadId);
+        if (!await this.observeChildRoutes(b)) continue;
         const events = await this.d.sdk.threads.events.list({
           threadId: b.threadId,
           afterSeq: String(b.cursor),
@@ -1801,14 +2007,42 @@ export class ChatBridge {
             "item/completed",
             "turn/completed",
             "turn/started",
+            "client/turn/requested",
+            "turn/input/accepted",
           ],
           limit: "100",
           signal: this.d.signal,
         });
-        const current = this.binding(b.topicId);
+        const current = this.deliveryBinding(b.topicId, b.revision);
         if (current?.revision !== b.revision || current.threadId !== b.threadId)
           continue;
         for (const event of events) {
+          if (event.type === "client/turn/requested") {
+            const subject = event.data.systemMessageSubject;
+            if (event.data.initiator === "system" && event.data.systemMessageKind?.startsWith("child-") &&
+                (subject?.kind === "thread" || subject?.kind === "thread-batch")) {
+              const outcomes = subject.outcomes ?? (subject.kind === "thread" ? [{threadId:subject.threadId,
+                status:event.data.systemMessageKind === "child-completed" ? "completed" :
+                  event.data.systemMessageKind === "child-failed" ? "failed" : "interrupted"}] : []);
+              this.routes.inheritOutcomes(b.threadId,event.data.requestId,outcomes);
+            } else this.routes.requested(b.threadId, event.data);
+            b.cursor = event.seq;
+            continue;
+          }
+          if (event.type === "turn/input/accepted" && event.scope.kind === "turn") {
+            this.routes.accept(b.threadId, event.scope.turnId, event.data.clientRequestId);
+            this.s.put("reply:active-turn:" + b.threadId, event.scope.turnId);
+            b.cursor = event.seq;
+            continue;
+          }
+          if (event.type === "turn/started" && event.scope.kind === "turn") {
+            this.s.put("reply:active-turn:" + b.threadId, event.scope.turnId);
+            b.activity = undefined; b.toolActivity = undefined;
+          }
+          if (event.scope.kind !== "turn" || !this.canDeliver(b, event.scope.turnId)) {
+            b.cursor = event.seq;
+            continue;
+          }
           if (event.type === "item/started") {
             const item = event.data.item;
             if (
@@ -1882,15 +2116,17 @@ export class ChatBridge {
           threadId: b.threadId,
           signal: this.d.signal,
         });
-        for (const i of pending.filter((i) => i.status === "pending"))
+        for (const i of pending.filter((i) => i.status === "pending" && this.canDeliver(b, i.turnId)))
           this.question(b, i);
         try { await this.observeFailures(b, t); } catch { /* Keep delivery alive when status is unavailable. */ }
         let delegated: string[] = [];
-        try { delegated = await this.delegatedProgress(b); } catch { /* parent remains observable */ }
+        const activeTurn = this.s.get<string>("reply:active-turn:" + b.threadId);
+        const deliverActive = this.canDeliver(b, activeTurn);
+        try { if (deliverActive) delegated = await this.delegatedProgress(b); } catch { /* parent remains observable */ }
         const progress = delegated.length
           ? delegated.join("\n\n")
           : b.activity || b.toolActivity || this.tr("Работаю над задачей…");
-        const isWorking = ["active", "starting", "pending"].includes(t.status) || delegated.length > 0;
+        const isWorking = deliverActive && (["active", "starting", "pending"].includes(t.status) || delegated.length > 0);
         const status = pending.some((i) => i.status === "pending")
           ? this.tr("нужен ответ")
           : (this.tr(states[t.status] ?? t.status) ?? t.status) +
@@ -1916,6 +2152,9 @@ export class ChatBridge {
           await this.clearProgress(b.topicId, b.revision);
           b.status = status;
         }
+        // Delivery cursors outlive navigation without overwriting the current menu.
+        if (this.s.get("reply:watch:" + b.revision))
+          this.s.put("reply:watch:" + b.revision, {...b, owner: this.d.owner()});
         // Binding writes may never overwrite a user's concurrent menu action.
         if (
           !this.lanes.has(b.topicId) &&
@@ -1947,13 +2186,14 @@ export class ChatBridge {
   private async deliverArtifacts(text: string, key: string, o: Outbox): Promise<string> {
     const links = localArtifacts(text);
     if (!links.length) return text;
-    const binding = this.binding(o.topicId);
+    const binding = this.deliveryBinding(o.topicId, o.revision);
+    const sourceThreadId = o.sourceThreadId ?? binding?.threadId;
     const roots: string[] = [];
-    if (binding?.threadId) {
-      const threads = [await this.d.sdk.threads.get({threadId: binding.threadId, signal: this.d.signal}),
-        ...await this.d.sdk.threads.list({parentThreadId: binding.threadId, archived: false, limit: 100, signal: this.d.signal})];
+    if (sourceThreadId) {
+      const threads = [await this.d.sdk.threads.get({threadId: sourceThreadId, signal: this.d.signal}),
+        ...await this.d.sdk.threads.list({parentThreadId: sourceThreadId, archived: false, limit: 100, signal: this.d.signal})];
       for (const t of threads) {
-        if (t.id !== binding.threadId && t.parentThreadId !== binding.threadId) continue;
+        if (t.id !== sourceThreadId && t.parentThreadId !== sourceThreadId) continue;
         if (t.visibility !== "visible" || t.deletedAt || t.archivedAt || !t.environmentId) continue;
         try {
           const env = await this.d.sdk.environments.get({environmentId: t.environmentId, signal: this.d.signal});
@@ -2002,13 +2242,17 @@ export class ChatBridge {
       .sort((a, b) => a.value.at - b.value.at)) {
       if (this.disposed || this.d.signal.aborted || count >= 8) break;
       if (o.sentId || o.retryAt > Date.now()) continue;
-      if (o.revision && this.binding(o.topicId)?.revision !== o.revision) {
+      if (o.ownerId !== undefined && o.ownerId !== this.d.owner()) {
+        this.s.put(key, {...o, sentId: -1, text: "", keys: undefined});
+        continue;
+      }
+      if (o.revision && this.deliveryBinding(o.topicId, o.revision)?.revision !== o.revision) {
         this.s.put(key, { ...o, sentId: -1, text: "", keys: undefined });
         continue;
       }
       count++;
       try {
-        const assistantOutput = key.startsWith("chat:out:event:");
+        const assistantOutput = key.startsWith("chat:out:event:") || key.startsWith("chat:out:explicit:");
         const delivered = assistantOutput ? await this.deliverArtifacts(o.text, key, o) : o.text;
         const chunks = assistantOutput ? renderTelegramParts(cleanAssistantText(delivered)) : splitText(delivered, 1800);
         // Keep formatted HTML below Telegram's limit even after escaping.
@@ -2074,7 +2318,7 @@ export class ChatBridge {
         this.s.put(key, { ...o, sentId: last, text: "", keys: undefined });
         if (key.startsWith("chat:out:progress:") && o.revision)
           this.s.put("chat:progress:" + o.topicId + ":" + o.revision, last);
-        if ((assistantOutput || key.startsWith("chat:out:end:")) && o.revision)
+        if ((key.startsWith("chat:out:event:") || key.startsWith("chat:out:end:")) && o.revision)
           await this.clearProgress(o.topicId, o.revision);
         const question = this.s.get(
           "chat:question-out:" + key.slice("chat:out:".length),
