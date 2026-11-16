@@ -32,6 +32,10 @@ test("private snapshot restores settings and exact state without returning crede
     await transfer.restore(receipt.id,receipt.sha256,async () => {});
     target.put("chat:out:x",{sentId:99});
     await assert.rejects(transfer.restore(receipt.id,receipt.sha256,async () => {}),/state_has_changed/);
+    const nextBackup=transfer.export(settings);
+    assert.notEqual(nextBackup.sha256,receipt.sha256);
+    await transfer.restore(nextBackup.id,nextBackup.sha256,async () => {});
+    assert.deepEqual(target.get("chat:out:x"),{sentId:99});
   } finally {rmSync(root,{recursive:true,force:true});}
 });
 test("restore refuses live settings, conflicting state and corrupted or public backups", async () => {
