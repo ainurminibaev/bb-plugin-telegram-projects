@@ -21,7 +21,10 @@ test("private snapshot restores settings and exact state without returning crede
     const receipt = new StateTransfer(source,root).export(settings);
     assert.equal(JSON.stringify(receipt).includes("fixture-secret"),false);
     assert.equal(statSync(join(root,"telegram-projects",receipt.id+".json")).mode & 0o777,0o600);
-    const target = store(); const transfer = new StateTransfer(target,root);
+    const target = store();
+    // BB can retain its plugin database while removing settings and secrets.
+    for (const row of source.list("")) target.put(row.key,row.value);
+    const transfer = new StateTransfer(target,root);
     let restored:any;
     await transfer.restore(receipt.id,receipt.sha256,async s => {restored=s;});
     assert.deepEqual(restored,settings);

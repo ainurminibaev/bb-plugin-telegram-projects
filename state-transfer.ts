@@ -56,7 +56,10 @@ export class StateTransfer {
       throw Error("invalid_backup_rows");
     const previous = this.store.get<{sha256:string}>(restoreKey);
     if (previous && previous.sha256 !== sha256) throw Error("different_backup_already_restored");
-    if (!previous && this.store.list("").length) throw Error("restore_requires_empty_state");
+    const existing = this.store.list("").filter(row => row.key !== restoreKey);
+    const identical = existing.length === data.rows.length && data.rows.every(row =>
+      JSON.stringify(this.store.get(row.key)) === JSON.stringify(row.value));
+    if (!previous && existing.length && !identical) throw Error("restore_requires_empty_state");
     if (previous) {
       const current = this.store.list("").filter(r => r.key !== restoreKey);
       if (current.length !== data.rows.length || data.rows.some(row =>
