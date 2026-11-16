@@ -33,15 +33,22 @@ export function routeUpdate(
   const text: string | undefined =
     typeof m.text === "string"
       ? m.text
+      : typeof m.caption === "string"
+        ? m.caption
       : m.forum_topic_created
         ? "/project"
         : undefined;
   const topicId = m.message_thread_id ?? 0;
   if (!callback && text?.match(/^\/tasks(?:@\w+)?(?:\s|$)/))
     return { kind: "tasks", topicId };
-  if (!callback && !text && !m.voice && !m.audio && !m.document && !m.photo)
+  if (!callback && !text && !m.voice && !m.audio && !m.document && !m.photo && !m.video)
     return { kind: "ignore" };
-  const v = m.voice ?? m.audio;
+  const v = m.voice && (m.voice.file_size ?? 0) <= 15_000_000 &&
+    (m.voice.duration ?? 0) <= 600 ? m.voice : undefined;
+  const photo = Array.isArray(m.photo) ? m.photo.at(-1) : undefined;
+  const attached = m.document ?? m.video ?? m.audio ?? (v ? undefined : m.voice) ?? photo;
+  const kind = m.document ? "document" : m.video ? "video" : m.audio ? "audio" :
+    m.voice ? "voice" : "photo";
   return {
     kind: "chat",
     callbackId,
@@ -53,6 +60,13 @@ export function routeUpdate(
       messageId: m.message_id,
       text: callback ? undefined : text?.slice(0, 16000),
       callback,
+      attachment: !callback && attached ? {
+        fileId: attached.file_id,
+        name: attached.file_name ?? `${kind}-${m.message_id}.${kind === "photo" ? "jpg" : kind === "voice" ? "ogg" : kind === "video" ? "mp4" : "bin"}`,
+        mime: attached.mime_type ?? (kind === "photo" ? "image/jpeg" : "application/octet-stream"),
+        size: attached.file_size ?? 0,
+        kind,
+      } : undefined,
       replyTo: m.reply_to_message?.message_id,
       voice: v
         ? {

@@ -20,3 +20,19 @@ Version 0.3.1 wakes BB on durable spool changes; timed polling is recovery only.
 Version 0.4 adds optional CLI Agents catalog/select RPC after model selection for new sessions. Selection is target-scoped and revalidated at spawn; marker appears only in the initial prompt. No global CLI config changes. Provider/section changes clear the profile. Existing sessions keep their native role. Section profiles require an already registered matching environment.
 
 Use `/server` before choosing a model to select the new chat host. The project needs a source on that host. `/profile` opens native profiles; empty catalogs show a default-agent explanation. Existing chats keep their host.
+
+## Personal bridge delivery overlay
+Use normal Markdown for public replies: HTTP(S) links stay clickable; basic emphasis,
+headings, lists and code render to Telegram HTML. Long replies are split without
+truncation. Reference generated files with absolute Markdown links; the bridge uploads
+allowed files from the connected thread or its visible direct children before the final
+text. Files must currently exist on the bridge host, be under an environment workspace,
+not a hidden path, and at most 49 MiB. Unsupported/unavailable files and uncertain
+uploads are explicitly labelled. Never claim delivery before a bridge receipt.
+Do not tell the user to click a local server path. Explain work in ordinary language,
+without dispatch/subthread/tool names. Only public progress is forwarded, not reasoning.
+
+Failure overlay: failed parent and visible direct child threads produce a deduplicated
+Telegram notice. Retry time is taken from the actual durable threads.queue row, not
+from historical retry decisions. With no row, say no automatic retry is scheduled.
+Only sanitized failure categories are shown; never forward raw provider error details.

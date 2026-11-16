@@ -1,3 +1,4 @@
+import { saveLocalTelegramFile, telegramApiRoot as checkedApiRoot } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
 import { translate } from "./locale";
 import {
@@ -108,6 +109,10 @@ export const rpcContract = defineRpcContract({
     input: z.object({ token: z.string().max(200) }),
     output: diagnosisSchema,
   },
+  prepareLocalApi: {
+    input: z.object({ expectedUsername: z.string().min(3).max(64), confirm: z.literal(true) }),
+    output: z.object({ loggedOut: z.boolean(), botId: z.number() }),
+  },
   useEnvToken: { input: z.null(), output: z.boolean() },
   summaryDefaults: {
     input: z.null(),
@@ -195,6 +200,18 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Time zone, e.g. Europe/Madrid (empty: server) / Часовой пояс",
       default: "",
+    },
+    telegramApiRoot: {
+      type: "string", label: "Telegram Bot API URL", default: "https://api.telegram.org",
+    },
+    telegramLocalRoot: {
+      type: "string", label: "Local Bot API data directory", default: "",
+    },
+    telegramInboxRoot: {
+      type: "string", label: "Private received-file directory", default: "",
+    },
+    telegramFileHostId: {
+      type: "string", label: "BB machine holding received files", default: "",
     },
     cliPath: {
       type: "string",
@@ -294,6 +311,7 @@ export default async function plugin(bb: BbPluginApi) {
   let lastSync: string | null = null;
   let wake: (() => void) | undefined;
   let ingressError: string | null = null;
+  let ingressPolling = false;
   let activeTasks: { task: Task; tracker: Tracker }[] = [];
   let envToken = { name: "", value: "", at: 0 };
   // A manually saved token wins; otherwise the shared Env Catalog entry, re-read every 5 minutes.
@@ -379,6 +397,11 @@ export default async function plugin(bb: BbPluginApi) {
     envToken.at = 0;
     throw new Error("bot_configuration_unavailable");
   }
+  const apiRoot = async () => (await settings.get()).telegramApiRoot;
+  const localFiles = async () => {
+    const c = await settings.get();
+    return {localRoot:c.telegramLocalRoot, inboxRoot:c.telegramInboxRoot};
+  };
   const safeError = (e: unknown) =>
     e instanceof TelegramFailure
       ? e.code
@@ -418,7 +441,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (!cfg.enabled) return;
     if ((store.get<number>("retryAt") ?? 0) > Date.now()) return;
     if (!store.get("trackingSince")) store.put("trackingSince", Date.now());
-    const tg = telegram(botToken, lifetime.signal, 15_000, ownerId);
+    const tg = telegram(botToken, lifetime.signal, 15_000, ownerId, apiRoot);
     const me = await checkBot(tg, botId());
     if (!botId()) store.put("bot:id", me.id);
     username = me.username;
@@ -969,11 +992,34 @@ export default async function plugin(bb: BbPluginApi) {
         token?.trim() || (await botToken().catch(() => "")),
         fetch,
         botId(),
+        c.telegramApiRoot,
       );
+    },
+    prepareLocalApi: async ({ expectedUsername }) => {
+      const c = await settings.get();
+      if (c.enabled || c.chatEnabled) throw Error("disable_receivers_before_transfer");
+      if (ingressPolling || flight || bridge) throw Error("wait_for_receivers_to_stop");
+      if (checkedApiRoot(c.telegramApiRoot) !== "https://api.telegram.org")
+        throw Error("cloud_endpoint_required");
+      const key = "migration:cloud-logout";
+      const previous = store.get<{state: string; username: string; botId: number}>(key);
+      if (previous) {
+        if (previous.username !== expectedUsername) throw Error("transfer_identity_changed");
+        if (previous.state !== "done") throw Error("logout_outcome_uncertain_check_before_retry");
+        return {loggedOut: true, botId: previous.botId};
+      }
+      const tg = telegram(botToken, lifetime.signal, 30_000, ownerId, apiRoot);
+      const me = await checkBot(tg, botId());
+      if (me.username !== expectedUsername) throw Error("unexpected_bot_identity");
+      store.put(key, {state: "attempting", username: me.username, botId: me.id});
+      const result = await tg("logOut", {});
+      if (result !== true) throw Error("logout_not_confirmed");
+      store.put(key, {state: "done", username: me.username, botId: me.id});
+      return {loggedOut: true, botId: me.id};
     },
     saveToken: async ({ token }) => {
       const clean = token.trim();
-      const result = await diagnose(clean, fetch, botId());
+      const result = await diagnose(clean, fetch, botId(), await apiRoot());
       if (result.valid && result.sameBot && !result.error && !result.webhook) {
         await settings.experimental_set({ botToken: clean });
       }
@@ -1183,7 +1229,7 @@ export default async function plugin(bb: BbPluginApi) {
             .some((x) => x.value.key !== key && x.value.threadId === threadId)
         )
           return { exitCode: 1, stderr: "topic_already_bound" };
-        const tg = telegram(botToken, lifetime.signal, 15_000, ownerId);
+        const tg = telegram(botToken, lifetime.signal, 15_000, ownerId, apiRoot);
         await checkBot(tg, botId());
         if (topic.name)
           await tg("editForumTopic", {
@@ -1301,7 +1347,7 @@ export default async function plugin(bb: BbPluginApi) {
               bridge = new ChatBridge({
                 store,
                 sdk: bb.sdk,
-                tg: telegram(botToken, bridgeSignal, 15_000, ownerId),
+                tg: telegram(botToken, bridgeSignal, 15_000, ownerId, apiRoot),
                 owner: ownerId,
                 spool,
                 get baseUrl() {
@@ -1312,7 +1358,26 @@ export default async function plugin(bb: BbPluginApi) {
                 language: () => language,
                 wake: wakeChat,
                 transcribe: (v) =>
-                  transcribeTelegramVoice(botToken, bb.sdk, v, bridgeSignal),
+                  transcribeTelegramVoice(botToken, bb.sdk, v, bridgeSignal, apiRoot, localFiles),
+                receiveAttachment: async (input, threadId) => {
+                  const c = await settings.get();
+                  if (checkedApiRoot(c.telegramApiRoot) === "https://api.telegram.org" ||
+                      !c.telegramLocalRoot || !c.telegramInboxRoot)
+                    throw Error("attachment_local_api_required");
+                  const thread = await bb.sdk.threads.get({threadId});
+                  if (!thread.environmentId || !c.telegramFileHostId) throw Error("attachment_wrong_host");
+                  const env = await bb.sdk.environments.get({environmentId:thread.environmentId});
+                  if (env.hostId !== c.telegramFileHostId) throw Error("attachment_wrong_host");
+                  const incoming = input.attachment!;
+                  if (incoming.size > 2 * 1024 * 1024 * 1024) throw Error("attachment_too_large");
+                  const tg = telegram(botToken, bridgeSignal, 30 * 60 * 1000, ownerId, apiRoot);
+                  const file = await tg("getFile", {file_id:incoming.fileId});
+                  if (typeof file.file_path !== "string") throw Error("attachment_file_invalid");
+                  return saveLocalTelegramFile({sourcePath:file.file_path,
+                    localRoot:c.telegramLocalRoot, inboxRoot:c.telegramInboxRoot,
+                    updateId:input.updateId, fileId:incoming.fileId, name:incoming.name,
+                    expectedBytes:incoming.size || undefined, signal:bridgeSignal});
+                },
               });
               bridge.recover();
             }
@@ -1399,7 +1464,7 @@ export default async function plugin(bb: BbPluginApi) {
           }
           signal.addEventListener("abort", done, { once: true });
         });
-      const tg = telegram(botToken, signal, 40_000, ownerId);
+      const tg = telegram(botToken, signal, 40_000, ownerId, apiRoot);
       while (!signal.aborted) {
         const cfg = await settings.get();
         // Hold updates until the chat bridge exists, so none is consumed and lost.
@@ -1409,11 +1474,15 @@ export default async function plugin(bb: BbPluginApi) {
           continue;
         }
         try {
-          const updates = await tg<any[]>("getUpdates", {
-            offset: store.get<number>("ingress:offset") ?? 0,
-            timeout: 25,
-            allowed_updates: ["message", "callback_query"],
-          });
+          let updates: any[];
+          ingressPolling = true;
+          try {
+            updates = await tg<any[]>("getUpdates", {
+              offset: store.get<number>("ingress:offset") ?? 0,
+              timeout: 25,
+              allowed_updates: ["message", "callback_query"],
+            });
+          } finally { ingressPolling = false; }
           ingressError = null;
           for (const u of updates) {
             const route = routeUpdate(u, ownerId(), store.get("pair:code"));

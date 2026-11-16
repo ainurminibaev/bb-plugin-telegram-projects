@@ -1,3 +1,5 @@
+> This is the personal-assistant fork. See [FORK.md](FORK.md) for scope, installation and validation. Upstream documentation follows.
+
 # Telegram Projects for BB
 
 [![BB](https://img.shields.io/badge/BB-%3E%3D0.43-blue.svg)](https://getbb.app)

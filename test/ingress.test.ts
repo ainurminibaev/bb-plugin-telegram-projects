@@ -27,6 +27,7 @@ test("owner text in a topic becomes a chat input", () => {
     callback: undefined,
     replyTo: undefined,
     voice: undefined,
+    attachment: undefined,
   });
 });
 test("other users, groups and foreign callbacks are ignored", () => {
@@ -97,4 +98,34 @@ test("before pairing only /start with the page code binds the owner", () => {
   assert.equal(route(u("привет"), undefined, "123456").kind, "ignore");
   assert.equal(route(u("/start 123456"), undefined, undefined).kind, "ignore");
   assert.equal(route(u("/start 123456", 7), 42, "123456").kind, "ignore");
+});
+
+test("large documents retain caption and metadata without content", () => {
+  const r = routeUpdate({update_id: 10, message: {message_id: 11, chat, from,
+    caption: "Разбери видео", document: {file_id: "large", file_name: "video.mp4", file_size: 2_000_000_000, mime_type: "video/mp4"}}});
+  assert.equal(r.kind, "chat");
+  if (r.kind !== "chat") return;
+  assert.equal(r.input.text, "Разбери видео");
+  assert.equal(r.input.attachment?.size, 2_000_000_000);
+  assert.equal(r.input.attachment?.fileId, "large");
+  assert.equal(r.input.voice, undefined);
+});
+test("only short voice notes are transcribed; audio and long voice are files", () => {
+  for (const [field, size, duration, transcribe] of [
+    ["voice", 2000, 5, true], ["voice", 16_000_000, 5, false],
+    ["voice", 2000, 601, false], ["audio", 2000, 5, false],
+  ] as const) {
+    const r = routeUpdate({update_id: 12, message: {message_id: 12, chat, from,
+      [field]: {file_id: "a", file_size: size, duration}}});
+    assert.equal(r.kind, "chat");
+    if (r.kind !== "chat") continue;
+    assert.equal(Boolean(r.input.voice), transcribe);
+    assert.equal(Boolean(r.input.attachment), !transcribe);
+  }
+});
+test("photo chooses largest variant, foreign owners cannot submit files", () => {
+  const message = {message_id: 13, chat, from, photo: [{file_id: "small", file_size: 5}, {file_id: "big", file_size: 50}]};
+  const r = routeUpdate({update_id: 13, message});
+  assert.equal(r.kind === "chat" && r.input.attachment?.fileId, "big");
+  assert.equal(routeUpdate({update_id: 13, message: {...message, from: {id: 99}}}).kind, "ignore");
 });

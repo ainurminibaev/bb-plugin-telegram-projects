@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { telegramApiRoot, saveLocalTelegramFile } from "./telegram-files";
+import { readFile } from "node:fs/promises";
 import {
   TelegramFailure,
   taskSchema,
@@ -9,33 +11,36 @@ import {
 } from "./model";
 const exec = promisify(execFile);
 export type TokenSource = () => Promise<string>;
+export type ApiRootSource = () => Promise<string>;
 export function telegram(
   token: TokenSource,
   signal: AbortSignal,
   timeoutMs = 15_000,
   /** The paired owner's private chat; every chat method targets it. */
   owner: () => number | undefined = () => undefined,
+  apiRoot: ApiRootSource = async () => "https://api.telegram.org",
 ): Telegram {
   return async <T>(
     method: string,
     body: Record<string, unknown>,
   ): Promise<T> => {
     const secret = await token();
+    const endpoint = telegramApiRoot(await apiRoot());
+    const payload: Record<string, unknown> = { ...body,
+      ...(["getMe", "getUpdates", "setMyCommands", "setMyDescription", "setMyShortDescription"].includes(method) ? {} : { chat_id: owner() }) };
+    const multipart = Object.values(payload).some(v => v instanceof Blob);
+    const form = new FormData();
+    if (multipart) for (const [key, value] of Object.entries(payload)) {
+      if (value === undefined) continue;
+      if (value instanceof Blob) form.append(key, value, String(body.document_filename || "attachment"));
+      else if (key !== "document_filename") form.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
+    }
     let r: Response;
     try {
-      r = await fetch(`https://api.telegram.org/bot${secret}/${method}`, {
+      r = await fetch(`${endpoint}/bot${secret}/${method}`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          ...body,
-          ...(method === "getMe" ||
-          method === "getUpdates" ||
-          method === "setMyCommands" ||
-          method === "setMyDescription" ||
-          method === "setMyShortDescription"
-            ? {}
-            : { chat_id: owner() }),
-        }),
+        headers: multipart ? undefined : { "content-type": "application/json" },
+        body: multipart ? form : JSON.stringify(payload),
         signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
       });
     } catch {
@@ -166,12 +171,27 @@ export async function transcribeTelegramVoice(
   sdk: import("@get-bb/plugin-sdk").BbPluginApi["sdk"],
   voice: { fileId: string; mime: string; size: number; duration: number },
   signal: AbortSignal,
+  apiRoot: ApiRootSource = async () => "https://api.telegram.org",
+  localFiles?: () => Promise<{ localRoot: string; inboxRoot: string }>,
 ): Promise<string> {
   if (voice.size > 15_000_000 || voice.duration > 600)
     throw Error("voice_too_large");
-  const file = await telegram(token, signal)("getFile", {
+  const endpoint = telegramApiRoot(await apiRoot());
+  const file = await telegram(token, signal, 30_000, undefined, apiRoot)("getFile", {
     file_id: voice.fileId,
   });
+  if (endpoint !== "https://api.telegram.org") {
+    if (!localFiles || typeof file.file_path !== "string") throw Error("voice_file_invalid");
+    const config = await localFiles();
+    const saved = await saveLocalTelegramFile({ ...config, sourcePath: file.file_path,
+      updateId: 0, fileId: voice.fileId, name: "voice.ogg", expectedBytes: voice.size || undefined,
+      maxBytes: 15_000_000, signal });
+    const bytes = await readFile(saved.path);
+    const result = await sdk.system.transcribeVoice({ file: new Blob([bytes], {type: voice.mime}), signal });
+    const text = (result as {text?:string}).text;
+    if (!text?.trim() || text.length > 16000) throw Error("voice_transcription_empty");
+    return text;
+  }
   if (
     typeof file.file_path !== "string" ||
     !/^[a-zA-Z0-9_/.\-]+$/.test(file.file_path) ||
@@ -179,7 +199,7 @@ export async function transcribeTelegramVoice(
   )
     throw Error("voice_file_invalid");
   const response = await fetch(
-    `https://api.telegram.org/file/bot${await token()}/${file.file_path}`,
+    `${endpoint}/file/bot${await token()}/${file.file_path}`,
     { signal: AbortSignal.any([signal, AbortSignal.timeout(30000)]) },
   ).catch(() => {
     throw Error("voice_download_failed");

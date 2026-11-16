@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { telegramApiRoot } from "./telegram-files";
 export const preferencesSchema = z
   .object({
     language: z.enum(["ru", "en"]),
@@ -35,6 +36,7 @@ export async function diagnose(
   token: string,
   request: typeof fetch = fetch,
   expectedBot?: number,
+  apiRoot = "https://api.telegram.org",
 ): Promise<Diagnosis> {
   const d: Diagnosis = {
     valid: false,
@@ -47,10 +49,13 @@ export async function diagnose(
   };
   if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(token))
     return { ...d, error: "invalid_token" };
+  let endpoint: string;
+  try { endpoint = telegramApiRoot(apiRoot); }
+  catch { return { ...d, error: "telegram_api_root_invalid" }; }
   async function call(method: string) {
     try {
       const r = await request(
-        `https://api.telegram.org/bot${token}/${method}`,
+        `${endpoint}/bot${token}/${method}`,
         { method: "POST", signal: AbortSignal.timeout(15000) },
       );
       const data = (await r.json()) as any;

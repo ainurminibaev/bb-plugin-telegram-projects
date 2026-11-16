@@ -1,6 +1,8 @@
 // Telegram texts are written in Russian; English replaces them through this table.
 export type Language = "ru" | "en";
 export const english: Record<string, string> = {
+  "Получаю файл из Telegram…": "Receiving the file from Telegram…",
+  "Работаю над задачей…": "Working on the task…",
   "❓ Агентство: нужен ответ": "❓ Agency: answer needed",
   "Агентство · уведомление": "Agency · notice",
   "Уведомления Tasks будут приходить в тему своего проекта. Это проверка доставки, не настоящая задача.": "Tasks notifications will arrive in their project topic. This is a delivery check, not a real task.",

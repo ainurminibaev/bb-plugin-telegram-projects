@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { ChatBridge, inputSchema, splitText, type ChatInput } from "../chat";
 import { TelegramFailure, type Store } from "../model";
 const OWNER_ID = 259034221;
-function fixture() {
+function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{path: string; name: string; bytes: number; sha256: string}>) {
   const data = new Map<string, any>();
   const calls: any[] = [];
   const sent: any[] = [];
@@ -104,6 +104,7 @@ function fixture() {
       },
     },
   };
+  const controller = new AbortController();
   const dir = mkdtempSync(join(tmpdir(), "bb-chat-test-"));
   const bridge = new ChatBridge({
     store,
@@ -119,8 +120,9 @@ function fixture() {
     spool: dir,
     owner: () => OWNER_ID,
     baseUrl: "https://bb.example",
-    signal: new AbortController().signal,
+    signal: controller.signal,
     rich: () => false,
+    receiveAttachment,
   });
   let update = 0;
   const input = (text: string, topicId = 100): ChatInput => ({
@@ -143,6 +145,7 @@ function fixture() {
   };
   return {
     data,
+    abort: () => controller.abort(),
     store,
     calls,
     sent,
@@ -424,22 +427,31 @@ test("long text splitting preserves content and surrogate pairs", () => {
   );
 });
 
-test("progress edits its previous card instead of adding a new one", async () => {
+test("progress is transient, final is clean and acknowledgement is a reaction", async () => {
   const f = fixture();
   try {
+    f.thread.status = "active";
     await f.bridge.handle(f.input("Run"));
-    await f.bridge.observe();
-    await f.bridge.flush();
-    f.thread.status = "error";
-    await f.bridge.observe();
-    await f.bridge.flush();
-    assert.equal(
-      f.sent.filter((x) => x.method === "editMessageText").length,
-      1,
-    );
-  } finally {
-    f.cleanup();
-  }
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter(x => x.method === "setMessageReaction").length, 1);
+    assert.equal(f.sent.some(x => x.text?.includes("Сообщение принято")), false);
+    assert.equal(f.sent.filter(x => x.method === "sendMessage" && x.text?.startsWith("⏳")).length, 1);
+    f.setEvents([
+      {seq:1,type:"item/completed",scope:{kind:"turn",turnId:"t"},data:{item:{type:"reasoning",text:"PRIVATE THOUGHT"}}},
+      {seq:2,type:"item/completed",scope:{kind:"turn",turnId:"t"},data:{item:{type:"agentMessage",text:"Готово: [result.md](/srv/projects/test/result.md), @thread:thr_one. **Проверено**"}}},
+      {seq:3,type:"turn/completed",scope:{kind:"turn",turnId:"t"},data:{status:"completed"}}
+    ]);
+    f.thread.status = "idle";
+    await f.bridge.observe(); await f.bridge.flush(); await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter(x=>x.method === "deleteMessage").length,1);
+    const final=f.sent.find(x=>x.text?.startsWith("Готово:"));
+    assert.ok(final); assert.equal(final.parse_mode,"HTML");
+    assert.equal(final.reply_markup,undefined);
+    assert.equal(final.text.includes("/srv/"),false); assert.equal(final.text.includes("@thread:"),false);
+    assert.equal(final.text.includes("<b>Проверено</b>"),true);
+    assert.equal(JSON.stringify(f.sent).includes("PRIVATE THOUGHT"),false);
+    assert.equal(f.sent.filter(x=>x.text?.startsWith("Готово:")).length,1);
+  } finally { f.cleanup(); }
 });
 test("429 retains message and confirmed receipts avoid replay", async () => {
   const f = fixture();
@@ -781,4 +793,218 @@ test("empty native profile catalog explains fallback after model selection", asy
   } finally {
     f.cleanup();
   }
+});
+
+test("delegated work stays visible while parent is idle and ignores unrelated/hidden chats", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Research"));
+    const child = {...f.thread, id:"child", parentThreadId:"thr_one", title:"Шаурма в Казани — исследование и PDF", status:"active"};
+    f.sdk.threads.list = async (args:any) => {
+      assert.equal(args.parentThreadId,"thr_one");
+      return [child, {...child,id:"other",parentThreadId:"other-parent",title:"UNRELATED"}, {...child,id:"hidden",visibility:"hidden",title:"HIDDEN"}];
+    };
+    f.sdk.threads.events.list = async (args:any) => args.threadId === "thr_one" ? [] : [
+      {seq:3,type:"item/started",data:{item:{type:"toolCall",arguments:"SECRET TOOL PAYLOAD"}}},
+      {seq:2,type:"item/completed",data:{item:{type:"reasoning",text:"PRIVATE THOUGHT"}}},
+      {seq:1,type:"item/completed",data:{item:{type:"agentMessage",text:"Сравниваю меню и свежие отзывы."}}},
+    ];
+    await f.bridge.observe(); await f.bridge.flush();
+    const progress=f.sent.find(x=>x.text?.startsWith("⏳"));
+    assert.ok(progress?.text.includes(child.title));
+    assert.ok(progress.text.includes("Сравниваю меню"));
+    assert.equal(progress.reply_markup,undefined);
+    assert.equal(f.sent.some(x=>x.method==="deleteMessage"),false);
+    assert.equal(/UNRELATED|HIDDEN|PRIVATE THOUGHT|SECRET TOOL PAYLOAD/.test(JSON.stringify(f.sent)),false);
+    child.status="idle";
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter(x=>x.method==="deleteMessage").length,1);
+  } finally { f.cleanup(); }
+});
+
+test("public parent commentary survives subsequent generic tool start", async () => {
+  const f=fixture();
+  try {
+    f.thread.status="active";
+    await f.bridge.handle(f.input("Run"));
+    f.setEvents([
+      {seq:1,type:"item/completed",scope:{kind:"turn",turnId:"t"},data:{item:{type:"agentMessage",text:"Проверяю адреса и часы работы."}}},
+      {seq:2,type:"item/started",scope:{kind:"turn",turnId:"t"},data:{item:{type:"commandExecution",command:"SECRET COMMAND"}}},
+    ]);
+    await f.bridge.observe(); await f.bridge.flush();
+    const progress=f.sent.find(x=>x.text?.startsWith("⏳"));
+    assert.ok(progress?.text.includes("Проверяю адреса"));
+    assert.equal(progress.text.includes("Выполняю шаг"),false);
+  } finally {f.cleanup();}
+});
+
+import { localArtifacts, renderTelegramParts } from "../telegram-ux";
+import { writeFileSync } from "node:fs";
+test("Telegram rendering preserves links, escaping, lists, code and long text", () => {
+  const source = '# Заголовок\n**Жирный** и *курсив*\n- [Источник](https://example.org/?a=1&b=2)\n`x < y`\n' + '**' + 'Длинный ответ '.repeat(800) + '**';
+  const parts = renderTelegramParts(source);
+  assert.ok(parts.length > 2);
+  assert.ok(parts.every(p => p.length < 4096));
+  const all = parts.join('');
+  assert.ok(all.includes('<a href="https://example.org/?a=1&amp;b=2">Источник</a>'));
+  assert.ok(all.includes('<code>x &lt; y</code>'));
+  assert.ok(all.includes('• '));
+  for (const p of parts) assert.equal((p.match(/<b>/g)||[]).length, (p.match(/<\/b>/g)||[]).length);
+  assert.equal((all.replace(/<[^>]+>/g, '').match(/Длинный ответ /g)||[]).length, 800);
+  assert.deepEqual(localArtifacts('[PDF](</tmp/a b.pdf>)'), [{markdown:'[PDF](</tmp/a b.pdf>)',path:'/tmp/a b.pdf'}]);
+});
+test("artifact delivered once before final, unavailable path explicitly reported", async () => {
+  const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'artifact-'));
+  try {
+    writeFileSync(join(dir,'report.pdf'), '%PDF-1.4 test');
+    f.sdk.environments.get=async()=>({path:dir});
+    await f.bridge.handle(f.input('Run'));
+    f.setEvents([
+      {seq:1,type:'item/completed',scope:{kind:'turn',turnId:'t'},data:{item:{type:'agentMessage',text:`Готово: [PDF](${dir}/report.pdf). [Нет](${dir}/missing.pdf). [Источник](https://example.org)`}}},
+      {seq:2,type:'turn/completed',scope:{kind:'turn',turnId:'t'},data:{status:'completed'}}
+    ]);
+    await f.bridge.observe(); await f.bridge.flush(); await f.bridge.flush();
+    const docs=f.sent.filter(x=>x.method==='sendDocument');
+    assert.equal(docs.length,1); assert.equal(docs[0].document_filename,'report.pdf');
+    assert.equal(await docs[0].document.text(),'%PDF-1.4 test');
+    const final=f.sent.find(x=>x.text?.startsWith('Готово:'));
+    assert.ok(final.text.includes('файл отправлен выше')); assert.ok(final.text.includes('не удалось отправить файл'));
+    assert.ok(final.text.includes('<a href="https://example.org">Источник</a>'));
+    assert.ok(f.sent.indexOf(docs[0]) < f.sent.indexOf(final));
+  } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+
+test("failed child notifies parent chat with actual retry time, deduplicates and updates cancellation", async()=>{
+ const f=fixture();try{
+  await f.bridge.handle(f.input('Run'));
+  const child={...f.thread,id:'thr_failed',parentThreadId:'thr_one',title:'Исследование',status:'error'};
+  f.sdk.threads.list=async()=>[child];
+  let retries:any[]=[{id:'retry1',payload:{kind:'retry'},sendAt:Date.now()+60000}];
+  f.sdk.threads.queue={list:async()=>retries};
+  const oldList=f.sdk.threads.events.list;
+  f.sdk.threads.events.list=async(a:any)=>a.threadId==='thr_failed'?[
+   {seq:10,type:'turn/started'},
+   {seq:11,type:'provider/error',data:{errorInfo:{category:'rate-limit'},detail:'PRIVATE TOKEN MUST NOT LEAK'}},
+   {seq:12,type:'turn/completed',data:{status:'failed'}}
+  ]:oldList(a);
+  await f.bridge.observe();await f.bridge.flush();await f.bridge.observe();await f.bridge.flush();
+  let errors=f.sent.filter(x=>x.text?.startsWith('⚠️ Исследование'));
+  assert.equal(errors.length,1);assert.ok(errors[0].text.includes('достигнут лимит'));assert.ok(errors[0].text.includes('МСК'));assert.ok(!JSON.stringify(f.sent).includes('PRIVATE TOKEN'));
+  retries=[];await f.bridge.observe();await f.bridge.flush();
+  errors=f.sent.filter(x=>x.text?.startsWith('⚠️ Исследование'));assert.equal(errors.length,2);assert.ok(errors[1].text.includes('не запланирован'));
+  child.status='idle';await f.bridge.observe();await f.bridge.flush();assert.equal(f.sent.filter(x=>x.text?.startsWith('⚠️ Исследование')).length,2);
+ }finally{f.cleanup();}
+});
+test("main failure reports no retry honestly, later successful final arrives once",async()=>{
+ const f=fixture();try{
+  await f.bridge.handle(f.input('Run')); f.thread.status='error';
+  f.sdk.threads.queue={list:async()=>[]};
+  const fail=[{seq:1,type:'provider/error',data:{errorInfo:{category:'unauthorized'}}},{seq:2,type:'turn/completed',scope:{kind:'turn',turnId:'t'},data:{status:'failed'}}];
+  const oldList=f.sdk.threads.events.list;
+  f.sdk.threads.events.list=async(a:any)=>a.order==='desc'?fail:oldList(a);
+  f.setEvents(fail);await f.bridge.observe();await f.bridge.flush();
+  const msg=f.sent.find(x=>x.text?.startsWith('⚠️ Помощник'));assert.ok(msg.text.includes('авторизации'));assert.ok(msg.text.includes('не запланирован'));
+  f.thread.status='idle';f.setEvents([{seq:3,type:'item/completed',scope:{kind:'turn',turnId:'r'},data:{item:{type:'agentMessage',text:'Восстановился, результат готов'}}},{seq:4,type:'turn/completed',scope:{kind:'turn',turnId:'r'},data:{status:'completed'}}]);
+  await f.bridge.observe();await f.bridge.flush();await f.bridge.observe();await f.bridge.flush();assert.equal(f.sent.filter(x=>x.text==='Восстановился, результат готов').length,1);
+ }finally{f.cleanup();}
+});
+
+const attachment = {fileId: "file-large", name: "video.mp4", mime: "video/mp4", size: 2_000_000_000, kind: "document" as const};
+test("attachment reaches the bound thread only after storage succeeds; duplicate update is ignored", async () => {
+  let copies = 0;
+  const f = fixture(async (input, threadId) => {
+    copies++;
+    assert.equal(threadId, "thr_one");
+    assert.equal(input.attachment?.size, 2_000_000_000);
+    return {path: "/inbox/video.mp4", name: "video.mp4", bytes: 2_000_000_000, sha256: "a".repeat(64)};
+  });
+  try {
+    await f.bridge.handle(f.input("hello"));
+    const input = {...f.input("Проанализируй"), attachment};
+    f.bridge.accept(input);
+    await f.bridge.tick();
+    await f.bridge.dispose();
+    assert.equal(copies, 1);
+    const sends = f.calls.filter(c => c[0] === "send");
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0][1].threadId, "thr_one");
+    assert.match(sends[0][1].input[0].text, /Проанализируй/);
+    assert.match(sends[0][1].input[0].text, /\/inbox\/video.mp4/);
+    assert.match(sends[0][1].input[0].text, /2000000000/);
+    f.bridge.accept(input);
+    assert.equal([...f.data.values()].filter(v => v?.state === "pending").length, 0);
+  } finally {f.cleanup();}
+});
+test("attachment storage failure never invokes the agent and gives a bounded error", async () => {
+  const f = fixture(async () => {throw new Error("attachment_disk_space_low");});
+  try {
+    await f.bridge.handle(f.input("hello"));
+    await f.bridge.handle({...f.input("Разбери"), attachment});
+    await f.bridge.tick();
+    await f.bridge.dispose();
+    assert.equal(f.calls.filter(c => c[0] === "send").length, 0);
+    assert.ok(f.sent.some(s => String(s.text).includes("недостаточно места")));
+  } finally {f.cleanup();}
+});
+
+test("shutdown during attachment download preserves input and resumes once before dispatch", async () => {
+  let entered!: () => void;
+  let finish!: () => void;
+  const started = new Promise<void>(r => entered = r);
+  const released = new Promise<void>(r => finish = r);
+  const saved = {path: "/inbox/video.mp4", name: "video.mp4", bytes: 2_000_000_000, sha256: "b".repeat(64)};
+  const f = fixture(async () => {entered(); await released; return saved;});
+  let resumed = 0;
+  const g = fixture(async () => {resumed++; return saved;});
+  try {
+    await f.bridge.handle(f.input("hello"));
+    const input = {...f.input("Разбери файл"), attachment};
+    f.bridge.accept(input);
+    await f.bridge.tick();
+    await started;
+    await f.bridge.observe(); await f.bridge.flush();
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter(s => String(s.text).includes("Получаю файл из Telegram")).length, 1);
+    f.abort(); finish(); await f.bridge.dispose();
+    assert.equal(f.calls.filter(c => c[0] === "send").length, 0);
+    const row = f.store.get<any>("chat:in:" + input.updateId);
+    assert.equal(row.state, "claimed");
+    assert.equal(row.phase, "attachment-download");
+    assert.equal(row.input.text, "Разбери файл");
+    for (const [k,v] of f.data) g.store.put(k, v);
+    g.bridge.recover();
+    assert.equal(g.store.get<any>("chat:in:" + input.updateId).state, "pending");
+    await g.bridge.tick(); await g.bridge.dispose();
+    assert.equal(resumed, 1);
+    assert.equal(g.calls.filter(c => c[0] === "send").length, 1);
+    assert.equal(g.store.get<any>("chat:in:" + input.updateId).state, "done");
+    g.bridge.recover();
+    assert.equal(g.store.get<any>("chat:in:" + input.updateId).state, "done");
+  } finally {f.cleanup(); g.cleanup();}
+});
+test("claimed input after the download boundary is not replayed on recovery", async () => {
+  const f = fixture();
+  try {
+    const input = {...f.input("Уже мог отправить"), attachment};
+    f.store.put("chat:in:" + input.updateId, {input, state: "claimed", at: Date.now()});
+    f.bridge.recover();
+    await f.bridge.tick(); await f.bridge.dispose();
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.store.get<any>("chat:in:" + input.updateId).state, "done");
+    assert.ok(f.sent.some(s => String(s.text).includes("Исход действия не подтверждён")));
+  } finally {f.cleanup();}
+});
+
+test("pending question rejects unrelated attachment before downloading it", async () => {
+  let copies = 0;
+  const f = fixture(async () => {copies++; throw Error("should not run");});
+  try {
+    await f.bridge.handle(f.input("hello"));
+    f.setQuestions([{id: "q", status: "pending"}]);
+    await f.bridge.handle({...f.input("Файл"), attachment});
+    await f.bridge.flush();
+    assert.equal(copies, 0);
+    assert.equal(f.calls.filter(c => c[0] === "send").length, 0);
+    assert.ok(f.sent.some(s => String(s.text).includes("Файл пока не передан")));
+  } finally {f.cleanup();}
 });
