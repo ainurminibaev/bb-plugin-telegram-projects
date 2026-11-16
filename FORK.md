@@ -16,11 +16,17 @@ assistant's instructions.
 ## Installation and updates
 
 Keep plugin ID `telegram-projects` to preserve settings and chat bindings.
-Install from this fork pinned to an audited commit, not an upstream semver range:
+For a fresh installation, install from this fork pinned to an audited commit,
+not an upstream semver range:
 
 ```
 bb plugin install git:https://github.com/ainurminibaev/bb-plugin-telegram-projects.git@COMMIT
 ```
+
+Existing managed installs cannot currently change Git source in place: BB refuses
+the duplicate plugin ID. Do not uninstall as a workaround until a tested private
+state/settings transfer and restoration procedure is available. The production
+source switch is pending that procedure.
 
 Replace COMMIT with the reviewed commit hash. Do not install two copies of the
 same Telegram bot poller. Back up the existing sources, bundle and BB data before
@@ -61,9 +67,10 @@ or a bot-token replacement command.
 Run `npm ci`, `npm run check`, `npm test`, and `bb plugin build`.
 Tests cover formatting, child progress, file receipts, unsafe paths, duplicate
 updates, download interruption/recovery, post-dispatch uncertainty, pending
-questions and cloud-transfer identity checks. A filesystem-only 2 GB copy and a
-real 24 MiB Telegram delivery have passed. Full 2 GB Telegram acceptance is still
-in progress. A real provider-limit notification and scheduled retry were seen;
+questions and cloud-transfer identity checks. A filesystem-only 2 GB copy, a real 24 MiB Telegram delivery, and a full
+2,000,000,000-byte Telegram delivery have passed. The large file was independently
+hashed on the receiving host, checked again by the assistant, and acknowledged
+back in Telegram; the temporary download status was deleted. A real provider-limit notification and scheduled retry were seen;
 automatic post-limit recovery has not yet been accepted.
 
 Do not silently repeat a task whose dispatch outcome is unknown. The bridge
