@@ -24,9 +24,10 @@ bb plugin install git:https://github.com/ainurminibaev/bb-plugin-telegram-projec
 ```
 
 Existing managed installs cannot currently change Git source in place: BB refuses
-the duplicate plugin ID. Do not uninstall as a workaround until a tested private
-state/settings transfer and restoration procedure is available. The production
-source switch is pending that procedure.
+the duplicate plugin ID. Do not uninstall as a shortcut: it deletes settings,
+secrets and schedules. The personal-assistant installation has already moved to
+this fork using a separately verified private state-transfer procedure; that
+completed migration does not authorize repeating removal on another installation.
 
 Replace COMMIT with the reviewed commit hash. Do not install two copies of the
 same Telegram bot poller. Back up the existing sources, bundle and BB data before
@@ -78,3 +79,23 @@ resumes interrupted pre-dispatch downloads; it reports uncertain later outcomes.
 New unbound chats still need a project/thread binding before receiving files.
 Outgoing attachments retain their separate size limit. Download progress is a
 transient status message, not a fabricated percentage or private model reasoning.
+
+
+## Prepared personal.8 update
+
+This version is not yet published or installed. The personal-chat overview fix
+is independent of BB core. Exact child-result routing additionally requires BB
+notifications to preserve `outcomes[].turnId` from the actual terminal turn,
+including durable queued notices. An absent field retains legacy behavior for old BB versions. An explicit null
+means no terminal turn exists and cannot inherit an earlier result. Multiple
+possible results are never resolved by choosing the newest one.
+
+Before deployment, preserve the currently installed commit, settings and state.
+Use a pinned commit from this same fork and verify the installed source and
+version afterwards. Do not remove the plugin, clear its database or rebind the
+chat. Validate Telegram-origin failure and completion after reusing a child,
+BB-origin responses remaining in BB, and duplicate-notification handling.
+Rollback must preserve current chat state and restore the previous plugin code
+and corresponding BB runtime files. A build or a passing unit test is not live
+acceptance. The original memory and conversation archives are not part of this
+plugin update.

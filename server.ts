@@ -590,7 +590,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (!store.get("topicsBootstrapped")) {
       if (store.list("topic:").length) store.put("topicsBootstrapped", true);
       else {
-        lastError = "topics_not_initialized";
+        // A connected personal chat works without creating project topics.
+        // Keep actual Tasks failures visible even in this mode.
+        lastError = cfg.chatEnabled && (bridge?.status().bindings.length ?? 0) > 0
+          ? taskFailure
+          : "topics_not_initialized";
         await publishProjection(cfg.companionDir, allTasks);
         return;
       }

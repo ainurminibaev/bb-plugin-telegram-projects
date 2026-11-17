@@ -927,7 +927,7 @@ test("dispatch queues steering and splits grouped tasks through the native queue
   } finally { f.cleanup(); }
 });
 
-test("native child completion continues its original Telegram task without broadcasting other work", async () => {
+for (const exactIdentity of [false, true]) test(`native child completion continues its original Telegram task (exact identity: ${exactIdentity})`, async () => {
   const f = fixture();
   try {
     await f.bridge.handle(f.input("Research"));
@@ -955,8 +955,14 @@ test("native child completion continues its original Telegram task without broad
       {seq:2,type:"turn/input/accepted",scope:{kind:"turn",turnId:"child-turn"},data:{clientRequestId:"child-work"}},
       {seq:3,type:"turn/completed",scope:{kind:"turn",turnId:"child-turn"},data:{status:"completed"}},
     ];
+    if (exactIdentity) {
+      const routes = new ReplyRoutes(f.store);
+      routes.record("child", "old-bb", {kind:"bb"});
+      routes.accept("child", "old-turn", "old-bb");
+      routes.complete("child", "old-turn", "completed");
+    }
     const parentEvents=[
-      {seq:3,type:"client/turn/requested",scope:threadScope,data:{requestId:"notice",initiator:"system",systemMessageKind:"child-completed",systemMessageSubject:{kind:"thread",threadId:"child",threadName:"Worker"}}},
+      {seq:3,type:"client/turn/requested",scope:threadScope,data:{requestId:"notice",initiator:"system",systemMessageKind:"child-completed",systemMessageSubject:{kind:"thread",threadId:"child",threadName:"Worker", ...(exactIdentity ? {outcomes:[{threadId:"child",status:"completed",turnId:"child-turn"}]} : {})}}},
       {seq:4,type:"turn/input/accepted",scope:{kind:"turn",turnId:"parent-final"},data:{clientRequestId:"notice"}},
       {seq:5,type:"item/completed",scope:{kind:"turn",turnId:"parent-final"},data:{item:{type:"agentMessage",text:"DELEGATED-ROUTE-PASS"}}},
       {seq:6,type:"turn/completed",scope:{kind:"turn",turnId:"parent-final"},data:{status:"completed"}},

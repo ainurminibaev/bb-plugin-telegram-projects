@@ -14,6 +14,41 @@ function fixture() {
   return {store, routes: new ReplyRoutes(store)};
 }
 const tg = {kind: "telegram" as const, chatId: 10, topicId: 20, updateId: 30};
+test("setup failure with explicitly absent turn identity cannot consume an older Telegram failure", () => {
+  const {routes} = fixture();
+  routes.record("child", "old-request", tg);
+  routes.accept("child", "old-turn", "old-request");
+  routes.complete("child", "old-turn", "failed");
+  assert.equal(routes.inheritOutcomes("parent", "setup-failure", [{threadId:"child",status:"failed",turnId:null}]), false);
+  routes.accept("parent", "setup-reply", "setup-failure");
+  assert.equal(routes.destination("parent", "setup-reply"), undefined);
+  assert.equal(routes.inheritOutcomes("parent", "correct-notice", [{threadId:"child",status:"failed",turnId:"old-turn"}]), true);
+  routes.accept("parent", "correct-reply", "correct-notice");
+  assert.deepEqual(routes.destination("parent", "correct-reply"), tg);
+});
+test("exact native outcome identity distinguishes a Telegram failure from old BB failures after restart", () => {
+  const {store, routes} = fixture();
+  for (let i = 0; i < 6; i++) {
+    routes.record("child", `bb-${i}`, {kind: "bb"});
+    routes.accept("child", `old-${i}`, `bb-${i}`);
+    routes.complete("child", `old-${i}`, "failed");
+  }
+  routes.record("child", "tg", tg);
+  routes.accept("child", "new", "tg");
+  routes.complete("child", "new", "failed");
+  const restored = new ReplyRoutes(store);
+  assert.equal(restored.inheritOutcomes("parent", "legacy", [{threadId:"child", status:"failed"}]), false);
+  const outcome = [{threadId:"child", status:"failed", turnId:"new"}];
+  assert.equal(restored.inheritOutcomes("parent", "notice", outcome), true);
+  assert.equal(restored.inheritOutcomes("parent", "notice", outcome), true);
+  restored.accept("parent", "reply", "notice");
+  assert.deepEqual(restored.destination("parent", "reply"), tg);
+  assert.equal(restored.inheritOutcomes("parent", "duplicate", outcome), false);
+  assert.equal(restored.inheritOutcomes("parent", "missing", [{...outcome[0],turnId:"unknown"}]), false);
+  assert.equal(restored.inheritOutcomes("parent", "old-notice", [{threadId:"child",status:"failed",turnId:"old-0"}]), true);
+  restored.accept("parent", "bb-reply", "old-notice");
+  assert.deepEqual(restored.destination("parent", "bb-reply"), {kind:"bb"});
+});
 test("BB request stays in BB while queued Telegram request retains its destination", () => {
   const {routes} = fixture();
   routes.record("thread", "tg-request", tg);

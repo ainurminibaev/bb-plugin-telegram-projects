@@ -278,8 +278,8 @@ function problem(code: string, t: T) {
       "The Tasks plugin is disabled or unavailable: task events are not delivered. Agent reports still work.",
     ),
     topics_not_initialized: t(
-      "База плагина пустая, темы не созданы.",
-      "The plugin database is empty; no topics yet.",
+      "Темы проектов не настроены. Для личного чата они не требуются.",
+      "Project topics are not configured. Personal chats do not require them.",
     ),
     bot_configuration_unavailable: t(
       "Нет токена бота: сохрани его на вкладке «Подключение» или добавь в Env Catalog.",
@@ -307,8 +307,10 @@ function Overview(props: {
 }) {
   const { t, data } = props;
   if (!data) return null;
+  const chatCount = data.chatBindings?.length ?? 0;
+  const personalChatConnected = data.chatEnabled && chatCount > 0;
   const problems = [data.error, data.chatError, data.ingressError].filter(
-    Boolean,
+    (code) => Boolean(code) && !(code === "topics_not_initialized" && personalChatConnected),
   ) as string[];
   const stats: [string, string][] = [
     [
@@ -322,6 +324,7 @@ function Overview(props: {
         : "—",
     ],
     [t("Темы", "Topics"), String(data.topics.length)],
+    [t("Подключённые чаты", "Connected chats"), String(chatCount)],
     [t("Очередь", "Queue"), String(data.queue + data.chatQueue)],
     [t("Задачи", "Tasks"), String(data.tasks)],
   ];
@@ -339,7 +342,7 @@ function Overview(props: {
           </button>
         }
       >
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
           {stats.map(([label, value]) => (
             <div key={label} className="tg-inner">
               <div className="text-xs text-muted-foreground">{label}</div>
@@ -361,7 +364,13 @@ function Overview(props: {
             {t("Всё работает", "Everything works")}
           </p>
         )}
-        {data.error === "topics_not_initialized" && (
+        {personalChatConnected && data.topics.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            {t("Личный чат подключён. Создавать темы проектов для него не нужно.",
+              "Your personal chat is connected. You do not need to create project topics for it.")}
+          </p>
+        )}
+        {data.error === "topics_not_initialized" && !personalChatConnected && (
           <div className="tg-inner space-y-2">
             <p className="text-sm">
               {t(

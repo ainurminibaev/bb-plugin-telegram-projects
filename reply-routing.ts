@@ -52,12 +52,15 @@ export class ReplyRoutes {
     return this.sameTask(this.destination(threadId, turnId),
       this.store.get<ReplyRoute>(this.requestKey(threadId, originalRequestId)));
   }
-  inheritOutcomes(threadId: string, requestId: string, outcomes: readonly {threadId: string; status: string}[]) {
+  inheritOutcomes(threadId: string, requestId: string, outcomes: readonly {threadId: string; status: string; turnId?: string | null}[]) {
     if (!outcomes.length || new Set(outcomes.map(o => o.threadId)).size !== outcomes.length) return false;
+    if (outcomes.some(outcome => outcome.turnId === null)) return false;
     const candidates = outcomes.map(outcome => this.store.list<{
-      threadId: string; status: string; route?: ReplyRoute; consumedBy: string | null;
+      threadId: string; turnId: string; status: string; route?: ReplyRoute; consumedBy: string | null;
     }>("reply:outcome:").filter(({value}) => value.threadId === outcome.threadId &&
-      value.status === outcome.status && (value.consumedBy === null || value.consumedBy === threadId + ":" + requestId)));
+      value.status === outcome.status &&
+      (outcome.turnId === undefined || value.turnId === outcome.turnId) &&
+      (value.consumedBy === null || value.consumedBy === threadId + ":" + requestId)));
     if (candidates.some(rows => rows.length !== 1)) return false;
     const rows = candidates.map(rows => rows[0]);
     const route = rows[0].value.route;
