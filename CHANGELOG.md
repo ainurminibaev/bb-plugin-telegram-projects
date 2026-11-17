@@ -1,3 +1,8 @@
+# 0.9.1-personal.9
+
+- Fix Telegram voice transcription: preserve voice.ogg filename in BB multipart upload.
+- Regression coverage for cloud and local Bot API; filename-less upload reproduced HTTP 502, named upload succeeded on Tru.
+
 # Changelog
 
 ## 0.9.1-personal.8 — unreleased

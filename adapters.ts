@@ -187,7 +187,7 @@ export async function transcribeTelegramVoice(
       updateId: 0, fileId: voice.fileId, name: "voice.ogg", expectedBytes: voice.size || undefined,
       maxBytes: 15_000_000, signal });
     const bytes = await readFile(saved.path);
-    const result = await sdk.system.transcribeVoice({ file: new Blob([bytes], {type: voice.mime}), signal });
+    const result = await sdk.system.transcribeVoice({ file: new File([bytes], "voice.ogg", {type: voice.mime}), signal });
     const text = (result as {text?:string}).text;
     if (!text?.trim() || text.length > 16000) throw Error("voice_transcription_empty");
     return text;
@@ -224,7 +224,7 @@ export async function transcribeTelegramVoice(
   }
   const bytes = Buffer.concat(chunks);
   const result = await sdk.system.transcribeVoice({
-    file: new Blob([bytes], { type: voice.mime }),
+    file: new File([bytes], "voice.ogg", { type: voice.mime }),
     signal,
   });
   const text = (result as { text?: string }).text;
