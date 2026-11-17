@@ -148,3 +148,14 @@ setting. It must exist and pass local language/fallback tests before enabling it
 Failures do not silently send the recording to an external transcription service.
 Temporary audio is private and removed after success/failure; cancellation is passed
 to the child process. The Telegram voice limits remain 10 minutes and 15 MB.
+
+
+## Photo albums
+Consecutive photo links in one final reply are delivered as a Telegram album
+(sendMediaGroup, 2–10 photos). Larger sets use ordered groups of ten and, when
+needed, one final sendPhoto. Explicit document links separate photo groups and
+remain documents. Captions use descriptive link labels as literal text. Never
+combine photos into a collage unless requested. The bridge persists every
+message ID and media_group_id together; uncertain sends are not replayed.
+If an album contains an unavailable/forbidden/oversized file, validation rejects
+that group before sending. The reply explains that delivery failed.

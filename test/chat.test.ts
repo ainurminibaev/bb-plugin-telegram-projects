@@ -14,6 +14,8 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
   const sent: any[] = [];
   let message = 10;
   let failDelivery = false;
+  let albumFailure: TelegramFailure | undefined;
+  let malformedAlbum = false;
   let events: any[] = [];
   let interactions: any[] = [];
   const thread = {
@@ -117,6 +119,11 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
         throw new TelegramFailure("telegram_429", 20, false);
       }
       sent.push({ method, ...payload });
+      if (method === "sendMediaGroup") {
+        if (albumFailure) { const error = albumFailure; albumFailure = undefined; throw error; }
+        if (malformedAlbum) return [{message_id: ++message}] as any;
+        return (payload.media as any[]).map(() => ({message_id: ++message, media_group_id: "album-" + sent.length})) as any;
+      }
       return { message_id: ++message } as any;
     },
     spool: dir,
@@ -156,6 +163,8 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
     bridge,
     input,
     press,
+    malformedAlbum: () => { malformedAlbum = true; },
+    failNextAlbum: (error: TelegramFailure) => { albumFailure = error; },
     failNextDelivery: () => {
       failDelivery = true;
     },
@@ -1383,8 +1392,85 @@ test("multiple images use Russian link captions; document image retains explicit
   f.sdk.environments.get=async()=>({path:dir});await f.bridge.handle(f.input('bind'));
   const text=`[Зелёный треугольник](${dir}/a.png)\n[b.png](${dir}/b.png)\n[Вариант с рамкой](<${dir}/c.png> "telegram:document")`;
   f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text,deliveryId:'image_many_001'});await f.bridge.flush();
-  assert.deepEqual(f.sent.filter(x=>x.method==='sendPhoto').map(x=>x.caption),['Зелёный треугольник','Вариант 2']);
+  assert.deepEqual(f.sent.find(x=>x.method==='sendMediaGroup').media.map((x:any)=>x.caption),['Зелёный треугольник','Вариант 2']);
   assert.equal(f.sent.find(x=>x.method==='sendDocument').caption,'Вариант с рамкой');
   assert.equal(f.bridge.explicitDeliveryStatus('image_many_001').state,'delivered');
+ } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+
+for (const count of [2, 5, 10, 11, 21]) test(`photo album preserves order and receipts for ${count} images`, async () => {
+ const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'album-'));
+ try {
+  f.sdk.environments.get=async()=>({path:dir}); await f.bridge.handle(f.input('bind'));await f.bridge.flush();f.sent.length=0;
+  const links=Array.from({length:count},(_,i)=>{writeFileSync(join(dir,`${i}.png`),`image-${i}`);return `[Снимок ${i} <&>](${dir}/${i}.png)`;});
+  const args={threadId:'thr_one',topicId:100,text:links.join('\n'),deliveryId:`album_count_${count}`};
+  f.bridge.sendExplicit(args);await f.bridge.flush();
+  const media=f.sent.filter(x=>['sendMediaGroup','sendPhoto'].includes(x.method));
+  assert.deepEqual(media.map(x=>x.method==='sendMediaGroup'?x.media.length:1),count===21?[10,10,1]:count===11?[10,1]:[count]);
+  const names=media.flatMap(x=>x.method==='sendMediaGroup'?x.media.map((_:any,i:number)=>x[`media${i}_filename`]):[x.photo_filename]);
+  assert.deepEqual(names,Array.from({length:count},(_,i)=>`${i}.png`));
+  for(const album of media.filter(x=>x.method==='sendMediaGroup')) {
+   assert.equal(album.media[0].parse_mode,undefined); // captions are literal text, not HTML
+   assert.ok(album.media[0].caption.includes('<&>'));
+  }
+  assert.equal(f.sent.filter(x=>['sendDocument','sendMessage'].includes(x.method)).length,0);
+  assert.equal(f.bridge.explicitDeliveryStatus(args.deliveryId).state,'delivered');
+  const receipts=[...f.data.entries()].filter(([k])=>k.startsWith('chat:album:')).map(([,v])=>v);
+  assert.equal(receipts.length,Math.floor(count/10)+(count%10>1?1:0));
+  assert.ok(receipts.every(r=>r.state==='delivered'&&r.mediaGroupId&&r.messageIds.length===r.paths.length));
+  const sends=f.sent.length;f.bridge.sendExplicit(args);await f.bridge.flush();assert.equal(f.sent.length,sends);
+ } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+test('uncertain album does not retry or fall back to individual photos',async()=>{
+ const f=fixture();const dir=mkdtempSync(join(tmpdir(),'album-unknown-'));
+ try {
+  for(const name of ['a.png','b.png'])writeFileSync(join(dir,name),'image');
+  f.sdk.environments.get=async()=>({path:dir});await f.bridge.handle(f.input('bind'));await f.bridge.flush();f.sent.length=0;
+  f.failNextAlbum(new TelegramFailure('telegram_network',30,true));
+  f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:`[Первый](${dir}/a.png) [Второй](${dir}/b.png)`,deliveryId:'album_unknown_001'});
+  await f.bridge.flush();await f.bridge.flush();
+  assert.equal(f.sent.filter(x=>x.method==='sendMediaGroup').length,1);
+  assert.equal(f.sent.filter(x=>['sendPhoto','sendDocument'].includes(x.method)).length,0);
+  assert.ok(f.sent.some(x=>x.text?.includes('не удалось подтвердить')));
+  assert.ok([...f.data.entries()].filter(([k])=>k.startsWith('chat:file:')).every(([,v])=>v==='uncertain'));
+ } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+test('album validates all paths before sending any bytes',async()=>{
+ const f=fixture();const dir=mkdtempSync(join(tmpdir(),'album-invalid-'));
+ try {
+  writeFileSync(join(dir,'a.png'),'image');f.sdk.environments.get=async()=>({path:dir});await f.bridge.handle(f.input('bind'));await f.bridge.flush();f.sent.length=0;
+  f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:`[Первый](${dir}/a.png) [Нет файла](${dir}/missing.png)`,deliveryId:'album_missing_001'});
+  await f.bridge.flush();
+  assert.equal(f.sent.filter(x=>['sendMediaGroup','sendPhoto','sendDocument'].includes(x.method)).length,0);
+  assert.ok(f.sent.some(x=>x.text?.includes('не удалось отправить')));
+ } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+test('confirmed album rate limit retries the group once without duplicate photos',async()=>{
+ const f=fixture();const dir=mkdtempSync(join(tmpdir(),'album-rate-'));
+ try {
+  for(const name of ['a.png','b.png'])writeFileSync(join(dir,name),'image');
+  f.sdk.environments.get=async()=>({path:dir});await f.bridge.handle(f.input('bind'));await f.bridge.flush();f.sent.length=0;
+  f.failNextAlbum(new TelegramFailure('telegram_429',20,false));
+  f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:`[Первый](${dir}/a.png) [Второй](${dir}/b.png)`,deliveryId:'album_rate_001'});
+  await f.bridge.flush();
+  assert.equal([...f.data.keys()].filter(k=>k.startsWith('chat:file:')).length,0);
+  for(const [k,v] of f.data)if(k.startsWith('chat:out:')&&!v.sentId)f.data.set(k,{...v,retryAt:0});
+  await f.bridge.flush();await f.bridge.flush();
+  assert.equal(f.sent.filter(x=>x.method==='sendMediaGroup').length,2);
+  assert.equal(f.sent.filter(x=>x.method==='sendPhoto').length,0);
+  assert.equal(f.bridge.explicitDeliveryStatus('album_rate_001').state,'delivered');
+ } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('incomplete album acknowledgement stays uncertain and is never replayed',async()=>{
+ const f=fixture();const dir=mkdtempSync(join(tmpdir(),'album-receipt-'));
+ try {
+  for(const name of ['a.png','b.png'])writeFileSync(join(dir,name),'image');
+  f.sdk.environments.get=async()=>({path:dir});await f.bridge.handle(f.input('bind'));await f.bridge.flush();f.sent.length=0;
+  f.malformedAlbum();
+  f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:`[Первый](${dir}/a.png) [Второй](${dir}/b.png)`,deliveryId:'album_invalid_receipt'});
+  await f.bridge.flush();await f.bridge.flush();
+  assert.equal(f.sent.filter(x=>x.method==='sendMediaGroup').length,1);
+  assert.ok([...f.data.entries()].filter(([k])=>k.startsWith('chat:file:')).every(([,v])=>v==='uncertain'));
  } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
 });

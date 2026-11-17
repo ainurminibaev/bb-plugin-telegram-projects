@@ -2215,7 +2215,73 @@ export class ChatBridge {
         } catch { /* unavailable host/path: report failed delivery, never guess */ }
       }
     }
-    for (const link of links) {
+    const receiptFor = (path: string) => "chat:file:" + key + ":" + path;
+    const captionFor = (link: typeof links[number]) => {
+      const label = cleanAssistantText(link.label).replace(/[*_`\[\]]/g, "").trim();
+      const meaningful = /[а-яё]/i.test(label) && label !== basename(link.path) && !/^(картинка|изображение|фото)$/i.test(label);
+      return Array.from(meaningful ? label : `Вариант ${imagePaths.indexOf(link.path) + 1}`).slice(0, 900).join("");
+    };
+    const photoData = (link: typeof links[number]) => {
+      const path = realpathSync(link.path);
+      if (!roots.some(root => path.startsWith(root + sep))) throw new Error("outside_workspace");
+      if (path.split(sep).some(x => x.startsWith("."))) throw new Error("private_path");
+      if (!/\.(png|jpe?g|webp|gif)$/i.test(path)) throw new Error("unsupported_artifact");
+      const stat = statSync(path);
+      if (!stat.isFile() || stat.size > 10 * 1024 * 1024) throw new Error("photo_limit");
+      return new Blob([new Uint8Array(readFileSync(path))], {type: ({".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".webp":"image/webp", ".gif":"image/gif"} as Record<string,string>)[extname(path).toLowerCase()]});
+    };
+    for (const [linkIndex, link] of links.entries()) {
+      // Group only contiguous photos, preserving the position of explicit documents.
+      // A receipt on any item is a boundary: never regroup an uncertain prior send.
+      if (!this.s.get(receiptFor(link.path)) && !link.asDocument && imagePaths.includes(link.path)) {
+        const group: typeof links = [];
+        const seen = new Set<string>();
+        for (const candidate of links.slice(linkIndex)) {
+          if (group.length === 10 || candidate.asDocument || !imagePaths.includes(candidate.path) || this.s.get(receiptFor(candidate.path))) break;
+          if (seen.has(candidate.path)) continue;
+          seen.add(candidate.path); group.push(candidate);
+        }
+        if (group.length > 1) {
+          const albumKey = "chat:album:" + key + ":" + linkIndex;
+          try {
+            const payload: Record<string, unknown> = {message_thread_id: o.topicId || undefined};
+            payload.media = group.map((item, index) => {
+              const field = "media" + index;
+              payload[field] = photoData(item);
+              payload[field + "_filename"] = basename(item.path);
+              return {type: "photo", media: "attach://" + field, caption: captionFor(item)};
+            });
+            this.s.atomic(() => {
+              this.s.put(albumKey, {state: "uncertain", paths: group.map(item => item.path)});
+              for (const item of group) this.s.put(receiptFor(item.path), "uncertain");
+            });
+            const result = await this.d.tg<any[]>("sendMediaGroup", payload);
+            if (!Array.isArray(result) || result.length !== group.length ||
+                result.some(item => !Number.isSafeInteger(item.message_id) || item.message_id <= 0 || typeof item.media_group_id !== "string" || !item.media_group_id) ||
+                new Set(result.map(item => item.message_id)).size !== group.length ||
+                new Set(result.map(item => item.media_group_id)).size !== 1) throw new Error("invalid_album_receipt");
+            this.s.atomic(() => {
+              this.s.put(albumKey, {state: "delivered", mediaGroupId: result[0].media_group_id,
+                messageIds: result.map(item => item.message_id), paths: group.map(item => item.path)});
+              group.forEach((item, index) => this.s.put(receiptFor(item.path), result[index].message_id));
+            });
+          } catch (error) {
+            if (error instanceof TelegramFailure && !error.ambiguous && error.code === "telegram_429") {
+              this.s.atomic(() => {
+                this.s.del(albumKey);
+                for (const item of group) this.s.del(receiptFor(item.path));
+              });
+              throw error;
+            }
+            this.s.atomic(() => {
+              for (const item of group) {
+                const receipt = receiptFor(item.path);
+                if (!this.s.get(receipt)) this.s.put(receipt, "failed");
+              }
+            });
+          }
+        }
+      }
       const isImage = imagePaths.includes(link.path);
       const plainLabel = cleanAssistantText(link.label).replace(/[*_`\[\]]/g, "").trim();
       const meaningfulLabel = /[а-яё]/i.test(plainLabel) && plainLabel !== basename(link.path) && !/^(картинка|изображение|фото)$/i.test(plainLabel);

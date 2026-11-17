@@ -33,7 +33,7 @@ export function telegram(
     if (multipart) for (const [key, value] of Object.entries(payload)) {
       if (value === undefined) continue;
       if (value instanceof Blob) form.append(key, value, String(body[`${key}_filename`] || "attachment"));
-      else if (key !== "document_filename" && key !== "photo_filename") form.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
+      else if (!key.endsWith("_filename")) form.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
     }
     let r: Response;
     try {

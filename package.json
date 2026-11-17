@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-telegram-projects",
-  "version": "0.9.1-personal.10",
+  "version": "0.9.1-personal.11",
   "type": "module",
   "engines": {
     "bb": ">=0.43",
