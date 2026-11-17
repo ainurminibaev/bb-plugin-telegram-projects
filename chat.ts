@@ -2224,12 +2224,14 @@ export class ChatBridge {
           if (!/^(\.pdf|\.png|\.jpg|\.jpeg|\.webp|\.gif|\.txt|\.md|\.csv|\.xlsx|\.docx|\.pptx|\.html|\.json|\.zip)$/i.test(extname(path))) throw new Error("unsupported_artifact");
           const stat = statSync(path);
           if (!stat.isFile() || stat.size > 49 * 1024 * 1024) throw new Error("file_limit");
+          const photo = /\.(png|jpe?g|webp|gif)$/i.test(path) && !link.asDocument;
+          if (photo && stat.size > 10 * 1024 * 1024) throw new Error("photo_limit");
           const data = readFileSync(path);
           this.s.put(receipt, "uncertain");
-          const result = await this.d.tg("sendDocument", {
+          const result = await this.d.tg(photo ? "sendPhoto" : "sendDocument", {
             message_thread_id: o.topicId || undefined,
-            document: new Blob([new Uint8Array(data)], {type: extname(path) === ".pdf" ? "application/pdf" : "application/octet-stream"}),
-            document_filename: basename(path), caption: basename(path),
+            [photo ? "photo" : "document"]: new Blob([new Uint8Array(data)], {type: ({".pdf":"application/pdf", ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".webp":"image/webp", ".gif":"image/gif"} as Record<string,string>)[extname(path).toLowerCase()] ?? "application/octet-stream"}),
+            [photo ? "photo_filename" : "document_filename"]: basename(path), caption: basename(path),
           });
           state = result.message_id;
           this.s.put(receipt, state);

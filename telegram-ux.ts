@@ -21,13 +21,14 @@ export function publicActivity(type: string): string {
 import { markdownExcerpt } from "./events";
 
 /** Resolve local artifacts before sanitizing visible text. */
-export function localArtifacts(text: string): {markdown: string; path: string}[] {
-  const found: {markdown: string; path: string}[] = [];
+export function localArtifacts(text: string): {markdown: string; path: string; asDocument?: boolean}[] {
+  const found: {markdown: string; path: string; asDocument?: boolean}[] = [];
   for (const m of text.matchAll(/\[[^\]]+\]\((<[^>]+>|[^\n)]+)\)/g)) {
-    let path = m[1].replace(/^<|>$/g, "").replace(/^file:\/\//, "");
+    const titled = m[1].match(/^(.*?)\s+"telegram:document"$/);
+    let path = (titled ? titled[1] : m[1]).replace(/^<|>$/g, "").replace(/^file:\/\//, "");
     try { path = decodeURIComponent(path); } catch { continue; }
     if (!path.startsWith("/")) continue;
-    found.push({markdown: m[0], path});
+    found.push({markdown: m[0], path, ...(titled ? {asDocument: true} : {})});
   }
   return found;
 }

@@ -112,3 +112,18 @@ queue and retries. Successful submission is not completion: wait for the native
 child result and verify it. Never bypass an uncertain delivery error by changing
 deliveryId; inspect the native queue/thread first to avoid duplicate work.
 BB-origin tasks use normal dispatch without a Telegram route token.
+
+
+## Image delivery
+
+Local image links (PNG, JPEG, WebP, GIF) in the final answer are uploaded as
+Telegram photos by default. PDFs and other supported artifacts remain documents.
+When the user explicitly requests an image as a file/document or an uncompressed
+original, add the standard Markdown link title `"telegram:document"` to that
+artifact only: `[Original](</absolute/project/image.png> "telegram:document")`.
+Do not add this title unless the current request asks for document delivery.
+The title is transport metadata and is removed from the Telegram reply. It does
+not change the route, permissions, or format of other artifacts or tasks.
+Photos may be recompressed by Telegram; do not promise byte-identical originals.
+A rejected/oversized photo is not silently retried as a document. Explain the
+failure and offer a resized photo or, with the user's agreement, a document.

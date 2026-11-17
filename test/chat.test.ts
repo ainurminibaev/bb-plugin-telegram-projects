@@ -1315,3 +1315,38 @@ test("explicit Telegram delivery is deduplicated and does not change future task
     assert.equal([...f.data.keys()].some(k=>k.startsWith("reply:request:")),false);
   }finally{f.cleanup();}
 });
+
+
+test("images default to photos; explicit per-artifact documents do not affect following photos", async () => {
+  const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'photos-'));
+  try {
+    for (const name of ['a.png','b.png','c.jpg']) writeFileSync(join(dir,name),'fixture-image');
+    f.sdk.environments.get=async()=>({path:dir});
+    await f.bridge.handle(f.input('Run')); f.acceptTelegramTurn('t');
+    const text=`[A](${dir}/a.png) [B](<${dir}/b.png> "telegram:document") [C](${dir}/c.jpg)`;
+    f.setEvents([
+      {seq:1,type:'item/completed',scope:{kind:'turn',turnId:'t'},data:{item:{type:'agentMessage',text}}},
+      {seq:2,type:'turn/completed',scope:{kind:'turn',turnId:'t'},data:{status:'completed'}}
+    ]);
+    await f.bridge.observe(); await f.bridge.flush(); await f.bridge.flush();
+    assert.deepEqual(f.sent.filter(x=>x.method==='sendPhoto').map(x=>x.photo_filename),['a.png','c.jpg']);
+    assert.deepEqual(f.sent.filter(x=>x.method==='sendDocument').map(x=>x.document_filename),['b.png']);
+    assert.ok(!f.sent.some(x=>x.text?.includes('telegram:document')));
+  } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+
+test("oversized photos never silently fall back to documents", async () => {
+  const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'photos-limit-'));
+  try {
+    writeFileSync(join(dir,'big.png'),Buffer.alloc(10*1024*1024+1));
+    f.sdk.environments.get=async()=>({path:dir});
+    await f.bridge.handle(f.input('Run')); f.acceptTelegramTurn('t');
+    f.setEvents([
+      {seq:1,type:'item/completed',scope:{kind:'turn',turnId:'t'},data:{item:{type:'agentMessage',text:`[Image](${dir}/big.png)`}}},
+      {seq:2,type:'turn/completed',scope:{kind:'turn',turnId:'t'},data:{status:'completed'}}
+    ]);
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter(x=>['sendPhoto','sendDocument'].includes(x.method)).length,0);
+    assert.ok(f.sent.some(x=>x.text?.includes('не удалось отправить файл')));
+  } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
