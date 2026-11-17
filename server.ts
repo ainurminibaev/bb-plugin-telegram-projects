@@ -90,7 +90,7 @@ const statusSchema = z.object({
   ),
   tasks: z.number(),
 });
-const handoffStatusSchema = z.object({id: z.string(), phase: z.string(), sourceThreadId: z.string(), targetThreadId: z.string().nullable(), error: z.string().nullable()});
+const handoffStatusSchema = z.object({id: z.string(), phase: z.string(), sourceThreadId: z.string(), targetThreadId: z.string().nullable(), error: z.string().nullable(), retirement: z.string().nullable(), retirementReason: z.string().nullable()});
 export const rpcContract = defineRpcContract({
   providerHandoffStatus: {
     input: z.object({topicId: z.number().int().nonnegative()}).strict(), output: handoffStatusSchema.nullable(),

@@ -195,6 +195,13 @@ export class ChatBridge {
           status: undefined, progressId: undefined, progressText: undefined, activity: undefined, toolActivity: undefined});
       },
       notify: job => this.handoffStatus(job),
+      sourceRetired: job => {
+        // All source deliveries were drained before its archive. Its route
+        // ledger is retained, but no watcher should poll an archived runtime.
+        for (const {key, value} of this.s.list<Binding>("reply:watch:"))
+          if (value.threadId === job.source) this.s.del(key);
+      },
+      sourceIsBound: threadId => this.bindings().some(b => b.threadId === threadId),
     });
   }
   private get s() {
@@ -203,7 +210,8 @@ export class ChatBridge {
   private get routes() { return new ReplyRoutes(this.s); }
   providerHandoffStatus(topicId: number) {
     const j = this.handoffs.jobs().filter(j => j.binding.topicId === topicId).sort((a,b) => b.at - a.at)[0];
-    return j ? {id: j.id, phase: j.phase, sourceThreadId: j.source, targetThreadId: j.target ?? null, error: j.error ?? null} : null;
+    return j ? {id: j.id, phase: j.phase, sourceThreadId: j.source, targetThreadId: j.target ?? null, error: j.error ?? null,
+      retirement: j.retirement ?? null, retirementReason: j.retirementReason ?? null} : null;
   }
   async beginProviderHandoff(topicId: number, sourceThreadId: string, providerId: string, model: string) {
     const b = this.binding(topicId);
@@ -593,7 +601,7 @@ export class ChatBridge {
   async tick() {
     if (this.disposed || this.d.signal.aborted) return;
     this.ingestFiles();
-    if (!this.handoffPolling && Date.now() >= this.nextHandoffPoll && this.handoffs.jobs().some(j => !["done", "cancelled"].includes(j.phase))) {
+    if (!this.handoffPolling && Date.now() >= this.nextHandoffPoll && this.handoffs.needsPolling()) {
       this.nextHandoffPoll = Date.now() + 2000;
       this.handoffPolling = true;
       const work = this.handoffs.poll().finally(() => {

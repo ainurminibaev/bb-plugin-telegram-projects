@@ -16,6 +16,9 @@ export type HandoffJob = {
   pickupRequests?: string[];
   retryAt?: number;
   errorSeenAt?: number;
+  title?: string;
+  retirement?: "archived" | "kept";
+  retirementReason?: string;
 };
 const historySchema = z.object({handoffs: z.array(z.object({
   sourceThreadId: z.string(), targetThreadId: z.string(), targetProvider: z.string(),
@@ -51,12 +54,15 @@ export class TelegramHandoff {
     commit: (job: HandoffJob, cursor: number) => void;
     notify: (job: HandoffJob) => void;
     assertDeliveryDrained: (source: string, topic: number) => void;
+    sourceRetired: (job: HandoffJob) => void;
+    sourceIsBound: (threadId: string) => boolean;
   }) {}
   private save(j: HandoffJob) {
     if (this.d.store.get<HandoffJob>("chat:handoff:" + j.id)?.cancelRequested) j.cancelRequested = true;
     this.d.store.put("chat:handoff:" + j.id, j);
   }
   jobs() { return this.d.store.list<HandoffJob>("chat:handoff:").map(r => r.value); }
+  needsPolling() { return this.jobs().some(j => !terminal(j) || (j.phase === "done" && !j.retirement)); }
   active(topic: number) { return this.jobs().find(j => j.binding.topicId === topic && !terminal(j)); }
   private owns(j: HandoffJob) {
     const b = this.d.binding(j.binding.topicId);
@@ -120,6 +126,7 @@ export class TelegramHandoff {
       if (this.jobs().some(other => other.id !== j.id && !terminal(other) && other.frozen.some(id => j.frozen.includes(id))))
         throw Error("handoff_overlapping_transfer");
       j.environmentId = source.environmentId;
+      j.title = (source.title ?? "Личный помощник").replace(/^(?:Handoff(?: from message)?:\s*)+/i, "") || "Личный помощник";
       this.save(j);
       for (const id of j.frozen) await this.safe(id);
       this.owns(j);
@@ -182,6 +189,12 @@ export class TelegramHandoff {
     } finally { this.flights.delete(j.id); }
   }
   async poll() {
+    for (const j of this.jobs().filter(j => j.phase === "done" && !j.retirement)) {
+      if (this.flights.has(j.id)) continue;
+      this.flights.add(j.id);
+      try { await this.retire(j); } catch { /* Keep history visible until safe cleanup can be verified. */ }
+      finally { this.flights.delete(j.id); }
+    }
     for (const j of this.jobs().filter(j => !terminal(j))) {
       if (this.flights.has(j.id)) continue;
       this.flights.add(j.id);
@@ -235,6 +248,7 @@ export class TelegramHandoff {
         if (!requests.length) throw Error("handoff_pickup_unconfirmed");
         const output = await this.d.sdk.threads.output({threadId: j.target});
         if (target.status === "error" || output.output?.trim() !== `HANDOFF-READY:${j.id}`) throw Error("handoff_pickup_unconfirmed");
+        if (j.title && target.title !== j.title) await this.d.sdk.threads.update({threadId: j.target, title: j.title});
         const transfer = this.transfer(j);
         await transfer.prepare(j.id, j.source, j.target);
         j.phase = "moving"; this.save(j);
@@ -259,5 +273,45 @@ export class TelegramHandoff {
         this.save(j); this.d.notify(j);
       } finally { this.flights.delete(j.id); }
     }
+  }
+  private async retire(j: HandoffJob) {
+    if (this.d.sourceIsBound(j.source)) {
+      j.retirement = "kept"; j.retirementReason = "source_connected_again"; this.save(j); return;
+    }
+    const source = await this.d.sdk.threads.get({threadId: j.source});
+    if (source.archivedAt) {
+      this.d.sourceRetired(j); j.retirement = "archived"; this.save(j); return;
+    }
+    if (source.deletedAt) {j.retirement = "kept"; j.retirementReason = "source_deleted_externally"; this.save(j); return;}
+    // A user who continues an older BB tab has started independent work.
+    // Do not archive that tab or reinterpret its new requests as this handoff.
+    const events = await this.d.sdk.threads.events.list({threadId: j.source, afterSeq: String(j.sourceSeq),
+      types: ["client/turn/requested"], order: "asc", limit: "100"});
+    if (events.length >= 100 || events.some(e => e.type === "client/turn/requested" &&
+      !["ownership-assigned", "ownership-removed", "ownership-batch"].includes(e.data.systemMessageKind ?? ""))) {
+      j.retirement = "kept"; j.retirementReason = "source_used_again"; this.save(j); return;
+    }
+    await this.safe(j.source);
+    this.d.assertDeliveryDrained(j.source, j.binding.topicId);
+    if (source.pinnedAt) {j.retirement = "kept"; j.retirementReason = "source_pinned"; this.save(j); return;}
+    const descendants = await this.d.sdk.threads.experimental_listDescendants({threadIds: [j.source], includeHidden: true, includeArchived: true});
+    if (descendants.threads.some(r => r.descendantIds.length)) {
+      j.retirement = "kept"; j.retirementReason = "source_has_children"; this.save(j); return;
+    }
+    const cascade = await this.d.sdk.threads.experimental_listCascade({threadIds: [j.source], action: "archive"});
+    if (cascade.threads.some(r => r.cascadeThreadIds.some(id => id !== j.source))) {
+      j.retirement = "kept"; j.retirementReason = "archive_would_affect_other_threads"; this.save(j); return;
+    }
+    // Never let an automatic history cleanup remove a managed checkout.
+    if (!source.environmentId) return;
+    const env = await this.d.sdk.environments.get({environmentId: source.environmentId});
+    if (env.managed || env.isWorktree) {j.retirement = "kept"; j.retirementReason = "managed_workspace"; this.save(j); return;}
+    await this.safe(j.source);
+    if (this.d.sourceIsBound(j.source)) return;
+    if (await this.seq(j.source) !== (events.at(-1)?.seq ?? j.sourceSeq)) return;
+    await this.d.sdk.threads.archive({threadId: j.source});
+    const archived = await this.d.sdk.threads.get({threadId: j.source});
+    if (!archived.archivedAt) throw Error("handoff_archive_unconfirmed");
+    this.d.sourceRetired(j); j.retirement = "archived"; this.save(j);
   }
 }

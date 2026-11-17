@@ -7,15 +7,18 @@ import type {Store} from "../model";
 function fixture() {
   const row = (id: string, providerId = "claude-code", parentThreadId: string | null = null) => ({
     ...makeThreadResponse({id, projectId: "assistant", environmentId: "env", providerId, parentThreadId}),
-    status: "idle", model: providerId + "-model", hasPendingInteraction: false,
+    title: "Личный помощник", status: "idle", model: providerId + "-model", hasPendingInteraction: false,
     activity: {activeBackgroundAgentCount: 0, activeBackgroundCommandCount: 0, activePlanModeCount: 0, activeWorkflowCount: 0},
   });
   const rows = [row("source"), {...row("worker", "codex", "source"), projectId: "finance", environmentId: "finance-env"}];
-  const queues = new Set<string>(), calls: any[] = [], histories: any[] = [], notices: HandoffJob[] = [];
+  const queues = new Set<string>(), calls: any[] = [], histories: any[] = [], notices: HandoffJob[] = [], retired: string[] = [];
   const seqs = new Map<string, number>([["source", 10]]), outputs = new Map<string, string>();
   let lostCreate = false, noCreate = false, lostUpdate = false, queueAfterUpdate = false, ownershipOnUpdate = false;
   const ownershipQueues = new Set<string>();
+  const environment = {managed: false, isWorktree: false};
+  const cascadeIds: string[] = [];
   const {bb, harness} = createFakePluginHost({pluginId: "telegram-projects", sdk: {
+    environments: {get: async () => environment as any},
     providers: {
       list: async () => ["codex", "claude-code"].map(id => ({id, available: true})) as any,
       models: async ({providerId}: any) => ({modelLoadError: null, models: [{model: providerId + "-model"}]}) as any,
@@ -25,7 +28,7 @@ function fixture() {
       assert.equal(args.method, "startHandoff"); calls.push(args.input);
       if (noCreate) throw Error("network_unknown");
       const id = "target-" + calls.length;
-      rows.push(row(id, args.input.providerId));
+      rows.push({...row(id, args.input.providerId), title: "Handoff: " + rows.find(r => r.id === args.input.threadId)!.title});
       histories.push({sourceThreadId: args.input.threadId, targetThreadId: id,
         targetProvider: args.input.providerId, model: args.input.model, workspace: "reuse", at: Date.now(), verification: "pending"});
       outputs.set(id, args.input.extraInstructions.match(/HANDOFF-READY:[a-f0-9-]+/)[0]);
@@ -42,12 +45,15 @@ function fixture() {
         ...(queues.has(threadId) ? [{payload: {kind: "retry", retryOfTurnRequestId: "request-" + threadId}}] : []),
         ...(ownershipQueues.has(threadId) ? [{initiator: "system", payload: {kind: "inline"}, systemNotice: {kind: "ownership-batch"}}] : []),
       ] as any},
-      events: {list: async ({threadId}: any) => [{seq: seqs.get(threadId) ?? 0, type: "client/turn/requested",
+      events: {list: async ({threadId, afterSeq}: any) => afterSeq && Number(afterSeq) >= (seqs.get(threadId) ?? 0) ? [] : [{seq: seqs.get(threadId) ?? 0, type: "client/turn/requested",
         data: {requestId: "request-" + threadId, originPluginId: "handoff", input: [{type: "text", text: outputs.get(threadId)}]}}] as any},
       output: async ({threadId}: any) => ({output: outputs.get(threadId) ?? ""}) as any,
       experimental_listDescendants: async ({threadIds}: any) => ({threads: threadIds.map((threadId: string) =>
         ({threadId, descendantIds: rows.filter(r => r.parentThreadId === threadId).map(r => r.id)}))}),
+      experimental_listCascade: async ({threadIds}: any) => ({threads: threadIds.map((threadId: string) => ({threadId, cascadeThreadIds: [threadId, ...cascadeIds]}))}),
+      archive: async ({threadId}: any) => {rows.find(r => r.id === threadId)!.archivedAt = Date.now(); return {} as any;},
       update: async (args: any) => {
+        if (args.title !== undefined) {rows.find(r => r.id === args.threadId)!.title = args.title; return {} as any;}
         if (ownershipOnUpdate) {
           ownershipQueues.add(rows.find(r => r.id === args.threadId)!.parentThreadId!);
           ownershipQueues.add(args.parentThreadId);
@@ -75,11 +81,68 @@ function fixture() {
     assertDeliveryDrained: () => {},
     commit: (job, cursor) => store.put("binding", {...binding(), threadId: job.target, revision: job.id, cursor}),
     notify: job => notices.push(structuredClone(job)),
+    sourceRetired: job => retired.push(job.source),
+    sourceIsBound: threadId => binding().threadId === threadId,
   });
-  return {create, binding, rows, queues, calls, histories, notices, seqs, outputs, harness,
+  return {create, binding, rows, queues, calls, histories, notices, seqs, outputs, harness, retired, environment, cascadeIds,
     loseCreate: () => {lostCreate = true;}, unknownCreate: () => {noCreate = true;},
     loseUpdate: () => {lostUpdate = true;}, queueOnUpdate: () => {queueAfterUpdate = true;},
     enableOwnership: () => {ownershipOnUpdate = true;}};
+}
+
+test("one visible coordinator: keep original title and archive only the idle childless predecessor", async () => {
+  const f = fixture();
+  try {
+    await f.create().begin(f.binding(), "codex", "codex-model");
+    await f.create().poll();
+    assert.equal(f.rows[2].title, "Личный помощник");
+    assert.equal(f.rows[0].archivedAt, null);
+    await f.create().poll();
+    assert.ok(f.rows[0].archivedAt);
+    assert.equal(f.rows[1].archivedAt, null);
+    assert.equal(f.rows[2].archivedAt, null);
+    assert.deepEqual(f.retired, ["source"]);
+    assert.equal(f.create().needsPolling(), false);
+  } finally {await f.harness.lifecycle.dispose();}
+});
+
+test("an old coordinator used again in BB is not auto-archived", async () => {
+  const f = fixture();
+  try {
+    await f.create().begin(f.binding(), "codex", "codex-model");
+    await f.create().poll();
+    f.seqs.set("source", 11);
+    await f.create().poll();
+    assert.equal(f.rows[0].archivedAt, null);
+    assert.equal(f.create().jobs()[0].retirementReason, "source_used_again");
+  } finally {await f.harness.lifecycle.dispose();}
+});
+
+test("retirement waits for native ownership messages to finish", async () => {
+  const f = fixture();
+  try {
+    await f.create().begin(f.binding(), "codex", "codex-model"); await f.create().poll();
+    f.queues.add("source"); await f.create().poll();
+    assert.equal(f.rows[0].archivedAt, null);
+    f.queues.delete("source"); await f.create().poll();
+    assert.ok(f.rows[0].archivedAt);
+  } finally {await f.harness.lifecycle.dispose();}
+});
+
+for (const reason of ["pinned", "managed", "cascade", "question"] as const) {
+  test(`automatic retirement protects ${reason}`, async () => {
+    const f = fixture();
+    try {
+      await f.create().begin(f.binding(), "codex", "codex-model"); await f.create().poll();
+      if (reason === "pinned") f.rows[0].pinnedAt = Date.now();
+      if (reason === "managed") f.environment.managed = true;
+      if (reason === "cascade") f.cascadeIds.push("unrelated");
+      if (reason === "question") f.rows[0].hasPendingInteraction = true;
+      await f.create().poll();
+      assert.equal(f.rows[0].archivedAt, null);
+      assert.deepEqual(f.retired, []);
+    } finally {await f.harness.lifecycle.dispose();}
+  });
 }
 
 test("native ownership notices generated by reparenting do not abort the transaction", async () => {

@@ -22,9 +22,13 @@ switching; BB requests are held in native queues. A fresh target reads the nativ
 handoff and returns a per-transfer acknowledgement without replaying old work.
 Existing children keep IDs, projects, environments, models and notification
 settings; only their parent changes. Returning to Claude creates a fresh Claude
-coordinator with the latest history, not the earlier Claude snapshot. Old
-coordinators are preserved. BB may deliver its ordinary ownership notices to
-them; this does not send replies to Telegram.
+coordinator with the latest history, not the earlier Claude snapshot. The current
+coordinator keeps its original title without accumulating `Handoff:` prefixes.
+Old coordinators keep their history and are archived after they are idle and all
+queues/deliveries are drained. Pinned threads, managed worktrees, other affected
+threads, a new connection or new user work in an old tab prevent auto-archive.
+BB may deliver its ordinary ownership notices first; these do not send replies
+to Telegram. Completed delivery watchers are removed only after archive.
 
 Never retry `startHandoff` after a timeout: creation has no idempotency key.
 The bridge reconciles its journal with native handoff history. Unknown or
