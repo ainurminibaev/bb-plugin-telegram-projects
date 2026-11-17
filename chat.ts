@@ -1039,6 +1039,7 @@ export class ChatBridge {
       "Передаю историю новому агенту. Рабочие подтреды останутся прежними и появятся под новым помощником. Новые сообщения пока сохраняются в очереди.";
     const reason = job.error === "handoff_thread_busy" || job.error === "handoff_thread_queued" ? " Есть выполняющаяся задача, вопрос или ожидающее поручение." :
       job.error === "handoff_source_changed" ? " Во время переключения исходная переписка изменилась." :
+      job.error === "handoff_provider_limited" ? " Новый агент достиг лимита провайдера. Ожидающего автоматического повтора в BB нет." :
       job.error === "handoff_pickup_unconfirmed" ? " Новый агент не подтвердил приём истории." : "";
     const retry = job.retryAt && job.retryAt > Date.now() ? " Следующая попытка BB: " +
       new Date(job.retryAt).toLocaleString("ru-RU", {timeZone: "Europe/Moscow"}) + " МСК. Можно отменить переключение." : "";

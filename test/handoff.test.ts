@@ -13,6 +13,8 @@ function fixture() {
   const rows = [row("source"), {...row("worker", "codex", "source"), projectId: "finance", environmentId: "finance-env"}];
   const queues = new Set<string>(), calls: any[] = [], histories: any[] = [], notices: HandoffJob[] = [], retired: string[] = [];
   const seqs = new Map<string, number>([["source", 10]]), outputs = new Map<string, string>();
+  const providerErrors = new Map<string, any>();
+  const extraRequests = new Map<string, any[]>();
   let lostCreate = false, noCreate = false, lostUpdate = false, queueAfterUpdate = false, ownershipOnUpdate = false;
   const ownershipQueues = new Set<string>();
   const environment = {managed: false, isWorktree: false};
@@ -45,8 +47,11 @@ function fixture() {
         ...(queues.has(threadId) ? [{payload: {kind: "retry", retryOfTurnRequestId: "request-" + threadId}}] : []),
         ...(ownershipQueues.has(threadId) ? [{initiator: "system", payload: {kind: "inline"}, systemNotice: {kind: "ownership-batch"}}] : []),
       ] as any},
-      events: {list: async ({threadId, afterSeq}: any) => afterSeq && Number(afterSeq) >= (seqs.get(threadId) ?? 0) ? [] : [{seq: seqs.get(threadId) ?? 0, type: "client/turn/requested",
-        data: {requestId: "request-" + threadId, originPluginId: "handoff", input: [{type: "text", text: outputs.get(threadId)}]}}] as any},
+      events: {list: async ({threadId, afterSeq, types}: any) => types?.includes("provider/error") ?
+        (providerErrors.has(threadId) ? [{seq: 30, type: "provider/error", data: providerErrors.get(threadId)}] : []) :
+        afterSeq && Number(afterSeq) >= (seqs.get(threadId) ?? 0) ? [] : [{seq: seqs.get(threadId) ?? 0, type: "client/turn/requested",
+        data: {requestId: "request-" + threadId, originPluginId: "handoff", input: [{type: "text", text: outputs.get(threadId)}]}},
+        ...(extraRequests.get(threadId) ?? [])] as any},
       output: async ({threadId}: any) => ({output: outputs.get(threadId) ?? ""}) as any,
       experimental_listDescendants: async ({threadIds}: any) => ({threads: threadIds.map((threadId: string) =>
         ({threadId, descendantIds: rows.filter(r => r.parentThreadId === threadId).map(r => r.id)}))}),
@@ -84,7 +89,7 @@ function fixture() {
     sourceRetired: job => retired.push(job.source),
     sourceIsBound: threadId => binding().threadId === threadId,
   });
-  return {create, binding, rows, queues, calls, histories, notices, seqs, outputs, harness, retired, environment, cascadeIds,
+  return {create, binding, rows, queues, calls, histories, notices, seqs, outputs, providerErrors, extraRequests, harness, retired, environment, cascadeIds,
     loseCreate: () => {lostCreate = true;}, unknownCreate: () => {noCreate = true;},
     loseUpdate: () => {lostUpdate = true;}, queueOnUpdate: () => {queueAfterUpdate = true;},
     enableOwnership: () => {ownershipOnUpdate = true;}};
@@ -241,6 +246,54 @@ test("held messages and child work wait, while native pickup can run", async () 
     await f.create().poll();
     assert.equal(f.binding().threadId, "target-1");
   } finally {await f.harness.lifecycle.dispose();}
+});
+
+test("failed pickup inline retry is left to the native scheduler, but foreign work cancels the switch", async () => {
+  const f = fixture();
+  try {
+    await f.create().begin(f.binding(), "codex", "codex-model");
+    f.rows[2].status = "error";
+    // The real initial retry has no queued row or origin plugin in its hook.
+    assert.equal(f.create().dispatch({thread: {id: "target-1", status: "error"},
+      originPluginId: null, queuedMessages: [], input: {text: "Please continue."}} as any), undefined);
+    assert.equal(f.create().dispatch({thread: {id: "source", status: "error"},
+      originPluginId: null, queuedMessages: []} as any)?.action, "wait");
+    f.extraRequests.set("target-1", [{seq: 21, type: "client/turn/requested",
+      data: {requestId: "foreign-request", originPluginId: null, input: [{type: "text", text: "Separate task"}]}}]);
+    f.rows[2].status = "idle";
+    await f.create().poll();
+    assert.equal(f.create().active(0)?.error, "handoff_target_changed");
+    await f.create().poll();
+    assert.equal(f.create().jobs()[0].phase, "cancelled");
+    assert.equal(f.binding().threadId, "source");
+    assert.equal(f.rows[1].parentThreadId, "source");
+    assert.equal(f.rows[2].archivedAt, null);
+  } finally {await f.harness.lifecycle.dispose();}
+});
+
+test("provider quota without a pending retry preserves the source and reports the actual failure", async () => {
+  const f = fixture();
+  const realNow = Date.now;
+  try {
+    await f.create().begin(f.binding(), "codex", "codex-model");
+    f.rows[2].status = "error";
+    f.providerErrors.set("target-1", {errorInfo: {category: "rate-limit", httpStatusCode: 429}});
+    f.queues.add("target-1");
+    await f.create().poll();
+    assert.equal(f.create().active(0)?.phase, "waiting");
+    f.queues.delete("target-1");
+    await f.create().poll();
+    const later = realNow() + 11000;
+    Date.now = () => later;
+    await f.create().poll();
+    assert.equal(f.create().active(0)?.error, "handoff_provider_limited");
+    await f.create().poll();
+    assert.equal(f.create().jobs()[0].phase, "cancelled");
+    assert.equal(f.create().jobs()[0].retryAt, undefined);
+    assert.equal(f.binding().threadId, "source");
+    assert.equal(f.rows[1].parentThreadId, "source");
+    assert.equal(f.calls.length, 1);
+  } finally {Date.now = realNow; await f.harness.lifecycle.dispose();}
 });
 
 test("busy worker prevents native creation", async () => {

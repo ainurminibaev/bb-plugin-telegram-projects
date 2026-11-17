@@ -1,3 +1,10 @@
+# 0.9.1-personal.14
+
+- Leave inline retries of failed handoff pickups to BB's native scheduler, avoiding a short bridge wait replacing the provider reset deadline on BB 0.49.
+- Keep source/worker dispatch holds; unrelated work in the new target cancels the switch before moving children or the Telegram binding.
+- Report structured provider limits without claiming a retry is pending when the native queue is empty.
+- Validation: 163 tests and TypeScript check pass. Live quota acceptance remains required.
+
 # 0.9.1-personal.10
 
 - Optional bot-only local voice router via voiceRouterPath. Empty keeps the BB ASR service; configuring it never changes global BB voice settings.

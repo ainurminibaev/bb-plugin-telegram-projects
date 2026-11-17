@@ -36,6 +36,12 @@ export function handoffDispatch(store: Store, ctx: MessageDispatchHookContext): 
     !terminal(j) && (j.frozen.includes(ctx.thread.id) || j.target === ctx.thread.id));
   if (!job) return;
   if (job.target === ctx.thread.id) {
+    // Native retry first arrives inline: this SDK exposes neither its retry
+    // identity nor its scheduled time in the hook context. Returning a short
+    // wait here overwrites the native reset deadline in BB 0.49. Leave failed
+    // pickup dispatch to core while waiting; pickup() rejects any unrelated
+    // request before children or the Telegram binding can be moved.
+    if (ctx.thread.status === "error" && job.phase === "waiting") return;
     if (ctx.originPluginId === "handoff" && ctx.input?.text.includes(`HANDOFF-READY:${job.id}`)) return;
     if (ctx.queuedMessages?.length === 1) {
       const payload = ctx.queuedMessages[0].payload;
@@ -246,6 +252,17 @@ export class TelegramHandoff {
           if (Date.now() - j.errorSeenAt < 10000) continue;
         }
         if (!requests.length) throw Error("handoff_pickup_unconfirmed");
+        // Only diagnose a terminal failed pickup after the native retry queue
+        // is empty. Never infer a reset time from human-readable output.
+        if (target.status === "error") {
+          const errors = await this.d.sdk.threads.events.list({threadId: j.target,
+            types: ["provider/error"], order: "desc", limit: "1"});
+          const error = errors[0];
+          j.retryAt = undefined;
+          if (error?.type === "provider/error" &&
+              (error.data.errorInfo?.category === "rate-limit" || error.data.errorInfo?.httpStatusCode === 429))
+            throw Error("handoff_provider_limited");
+        }
         const output = await this.d.sdk.threads.output({threadId: j.target});
         if (target.status === "error" || output.output?.trim() !== `HANDOFF-READY:${j.id}`) throw Error("handoff_pickup_unconfirmed");
         if (j.title && target.title !== j.title) await this.d.sdk.threads.update({threadId: j.target, title: j.title});

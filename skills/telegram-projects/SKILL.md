@@ -36,6 +36,12 @@ conflicting creation remains held until reconciled or cancelled. `/status` or
 `/menu` shows progress and a cancel button. Cancellation restores partial child
 moves before releasing the inbox; it does not delete the new or old thread.
 Provider retries remain native BB retries, with the actual scheduled time shown.
+Failed target pickup retries are not held by the bridge: on BB 0.49 a plugin
+wait can replace their scheduled reset time. If a user sends separate work to
+that provisional target, its request history invalidates the handoff; the
+source remains connected and the target's work is preserved. A provider limit
+with no pending native retry is reported explicitly; no custom retry timer or
+automatic recreation of the target is used.
 
 Administrative RPCs (use only for a user-requested switch or acceptance test):
 - `providerHandoffStatus`: `{topicId}`; sanitized journal summary, no messages.
