@@ -70,6 +70,26 @@ state. It restores with both receivers disabled. Verify identity, bindings,
 settings and receipts before separately enabling the receiver. These APIs do
 not switch bots, log out Telegram, or enable polling automatically.
 
+For a deliberate change of bot identity, `replacePrivateState` accepts
+`confirm: true`, candidate snapshot `id`/`sha256`, and
+`expectedCurrentSha256` from a fresh disabled export. Unlike ordinary restore,
+this replaces all plugin rows. It first writes a private rollback export and
+returns that export's receipt; it refuses changed checkpoints or active
+receivers. Settings and store use separate transactions: a process crash or
+settings failure requires inspection and a new disabled export before retry;
+never enable receivers blindly after a failed call.
+
+Prepare a candidate containing the confirmed owner and destination binding
+before starting polling. Without an owner, ordinary pending messages are
+ignored during pairing. Never carry the old bot's ingress offset, queued
+messages, reply routes or delivery receipts to a different bot. Establish the
+destination thread's current event cursor instead of replaying its history.
+Keep both receivers disabled until Telegram's own local-server transition and
+identity checks are complete. Replacement itself makes no Telegram requests.
+To roll back, export the current disabled state, then replace it using the
+returned rollback snapshot and the new current checkpoint. This does not undo
+external Telegram deliveries or move a bot back between Bot API servers.
+
 ## Delegating a Telegram-origin task
 
 For the CURRENT incoming task only, a hidden input block carries

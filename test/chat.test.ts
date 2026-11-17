@@ -1,4 +1,5 @@
 import { ReplyRoutes } from "../reply-routing";
+import { routeUpdate } from "../ingress";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -366,6 +367,25 @@ test("queued answer from old binding never enters new conversation", async () =>
   } finally {
     f.cleanup();
   }
+});
+test("prebound migration accepts the first pending private message once without pairing or spawning", async () => {
+  const f = fixture();
+  try {
+    f.store.put("chat:binding:0", {topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"migration",ready:true,cursor:99});
+    const routed=routeUpdate({update_id:7,message:{message_id:8,text:"pending task",chat:{id:OWNER_ID,type:"private"},from:{id:OWNER_ID}}},OWNER_ID);
+    assert.equal(routed.kind,"chat");
+    if (routed.kind!=="chat") throw Error("not routed");
+    f.bridge.accept(routed.input);
+    await f.bridge.tick();
+    f.bridge.accept(routed.input);
+    await f.bridge.tick();
+    await f.bridge.dispose();
+    const sends=f.calls.filter(c=>c[0]==="send");
+    assert.equal(sends.length,1);
+    assert.equal(sends[0][1].threadId,"thr_one");
+    assert.equal(f.calls.filter(c=>c[0]==="spawn").length,0);
+    assert.equal(f.bridge.bindings()[0].threadId,"thr_one");
+  } finally {f.cleanup();}
 });
 test("duplicate accepted update and recovery never replay unknown mutation", () => {
   const f = fixture();

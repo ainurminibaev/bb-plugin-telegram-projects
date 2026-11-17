@@ -97,6 +97,13 @@ export const rpcContract = defineRpcContract({
     input: z.object({confirm: z.literal(true), id:z.string().uuid(), sha256:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),
     output: z.object({restored: z.literal(true), rows:z.number(), sha256:z.string()}),
   },
+  replacePrivateState: {
+    input: z.object({confirm: z.literal(true), id:z.string().uuid(),
+      sha256:z.string().regex(/^[a-f0-9]{64}$/),
+      expectedCurrentSha256:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),
+    output: z.object({replaced:z.literal(true), rows:z.number(), sha256:z.string(),
+      rollback:z.object({id:z.string(),sha256:z.string(),rows:z.number()})}),
+  },
   agencyCapabilities: {input:z.null(),output:agencyCapabilitySchema},
   agencyConfigure: {input:z.object({enabled:z.boolean()}).strict(),output:z.object({saved:z.literal(true)})},
   agencyEnqueue: {input:agencyDeliverySchema,output:agencyReceiptSchema},
@@ -365,6 +372,7 @@ export default async function plugin(bb: BbPluginApi) {
   // Owner and bot are learned at runtime: pairing sets the owner, the first getMe the bot.
   const ownerId = () => store.get<number>("owner:id");
   const botId = () => store.get<number>("bot:id");
+  let stateTransferBusy = false;
   function pairCode() {
     let code = store.get<string>("pair:code");
     if (!code) {
@@ -469,7 +477,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function run() {
     const cfg = await settings.get();
     const tr = (s: string) => translate(cfg.language as "ru" | "en", s);
-    if (!cfg.enabled) return;
+    if (!cfg.enabled || stateTransferBusy) return;
     if ((store.get<number>("retryAt") ?? 0) > Date.now()) return;
     if (!store.get("trackingSince")) store.put("trackingSince", Date.now());
     const tg = telegram(botToken, lifetime.signal, 15_000, ownerId, apiRoot);
@@ -996,17 +1004,33 @@ export default async function plugin(bb: BbPluginApi) {
   const agency=agencyIntegration(store);
   bb.rpc.register(rpcContract, {
     exportPrivateState: async () => {
+      if (stateTransferBusy) throw Error("state_transfer_in_progress");
       const c = await settings.get();
       if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge)
         throw Error("stop_receivers_before_state_export");
       return new StateTransfer(store).export(c);
     },
     restorePrivateState: async ({id, sha256}) => {
-      const c = await settings.get();
-      if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge)
-        throw Error("stop_receivers_before_state_restore");
-      return new StateTransfer(store).restore(id, sha256,
-        value => settings.experimental_set(value as Parameters<typeof settings.experimental_set>[0]));
+      if (stateTransferBusy) throw Error("state_transfer_in_progress");
+      stateTransferBusy = true;
+      try {
+        const c = await settings.get();
+        if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge)
+          throw Error("stop_receivers_before_state_restore");
+        return await new StateTransfer(store).restore(id, sha256,
+          value => settings.experimental_set(value as Parameters<typeof settings.experimental_set>[0]));
+      } finally { stateTransferBusy = false; }
+    },
+    replacePrivateState: async ({id, sha256, expectedCurrentSha256}) => {
+      if (stateTransferBusy) throw Error("state_transfer_in_progress");
+      stateTransferBusy = true;
+      try {
+        const c = await settings.get();
+        if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge)
+          throw Error("stop_receivers_before_state_replace");
+        return await new StateTransfer(store).replace(id, sha256, expectedCurrentSha256, c,
+          value => settings.experimental_set(value as Parameters<typeof settings.experimental_set>[0]));
+      } finally { stateTransferBusy = false; }
     },
     agencyCapabilities: async()=>{const c=await settings.get();return agency.capabilities(c.enabled&&c.agencyEnabled);},
     agencyConfigure: async({enabled})=>{await settings.experimental_set({agencyEnabled:enabled});return {saved:true as const};},
@@ -1027,6 +1051,7 @@ export default async function plugin(bb: BbPluginApi) {
       };
     },
     savePreferences: async (value) => {
+      if (stateTransferBusy) throw Error("state_transfer_in_progress");
       await settings.experimental_set(value);
       return true;
     },
@@ -1392,7 +1417,7 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         while (!signal.aborted) {
           const cfg = await settings.get();
-          if (cfg.enabled && cfg.chatEnabled) {
+          if (cfg.enabled && cfg.chatEnabled && !stateTransferBusy) {
             rich = cfg.richReplies;
             currentUrl = new URL(cfg.appUrl).origin;
             language = cfg.language as "ru" | "en";
@@ -1528,7 +1553,7 @@ export default async function plugin(bb: BbPluginApi) {
       while (!signal.aborted) {
         const cfg = await settings.get();
         // Hold updates until the chat bridge exists, so none is consumed and lost.
-        if (!cfg.enabled || (cfg.chatEnabled && ownerId() && !bridge)) {
+        if (!cfg.enabled || stateTransferBusy || (cfg.chatEnabled && ownerId() && !bridge)) {
           ingressError = null;
           await pause(cfg.enabled ? 1000 : 5000);
           continue;

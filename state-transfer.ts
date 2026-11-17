@@ -39,7 +39,7 @@ export class StateTransfer {
     try { writeFileSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
     return {id, sha256: digest(text), rows: data.rows.length};
   }
-  async restore(id: string, sha256: string, setSettings: (value: z.infer<typeof snapshotSchema>["settings"]) => Promise<unknown>) {
+  private read(id: string, sha256: string) {
     if (!/^[a-f0-9-]{36}$/.test(id) || !/^[a-f0-9]{64}$/.test(sha256)) throw Error("invalid_backup_identity");
     const fd = openSync(join(this.secureDirectory(), id + ".json"), constants.O_RDONLY | constants.O_NOFOLLOW);
     let text: string;
@@ -54,6 +54,29 @@ export class StateTransfer {
     if (data.settings.enabled || data.settings.chatEnabled) throw Error("backup_receivers_must_be_disabled");
     if (new Set(data.rows.map(r => r.key)).size !== data.rows.length || data.rows.some(r => r.key === restoreKey))
       throw Error("invalid_backup_rows");
+    return data;
+  }
+  // Deliberate replacement, unlike ordinary restore. Require an exact exported
+  // checkpoint and save a fresh rollback copy before touching settings or rows.
+  // No Telegram calls: the caller must keep all receivers stopped throughout.
+  async replace(id: string, sha256: string, expectedCurrentSha256: string,
+    settings: Record<string, string | number | boolean | undefined | null>,
+    setSettings: (value: z.infer<typeof snapshotSchema>["settings"]) => Promise<unknown>) {
+    const data = this.read(id, sha256);
+    const beforeRows = JSON.stringify(this.store.list(""));
+    const rollback = this.export(settings);
+    if (rollback.sha256 !== expectedCurrentSha256) throw Error("current_state_changed");
+    await setSettings({...data.settings, enabled:false, chatEnabled:false});
+    this.store.atomic(() => {
+      if (JSON.stringify(this.store.list("")) !== beforeRows) throw Error("current_state_changed");
+      for (const row of this.store.list("")) this.store.del(row.key);
+      for (const row of data.rows) this.store.put(row.key, row.value);
+      this.store.put(restoreKey, {sha256, id});
+    });
+    return {replaced: true as const, rows: data.rows.length, sha256, rollback};
+  }
+  async restore(id: string, sha256: string, setSettings: (value: z.infer<typeof snapshotSchema>["settings"]) => Promise<unknown>) {
+    const data = this.read(id, sha256);
     const previous = this.store.get<{sha256:string}>(restoreKey);
     const existing = this.store.list("").filter(row => row.key !== restoreKey);
     const identical = existing.length === data.rows.length && data.rows.every(row =>
