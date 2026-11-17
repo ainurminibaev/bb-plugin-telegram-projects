@@ -127,3 +127,13 @@ not change the route, permissions, or format of other artifacts or tasks.
 Photos may be recompressed by Telegram; do not promise byte-identical originals.
 A rejected/oversized photo is not silently retried as a document. Explain the
 failure and offer a resized photo or, with the user's agreement, a document.
+
+
+A single image is sent without a Telegram caption or a duplicate technical
+"file sent above" message. If the image is the entire requested answer, return
+only its Markdown link. For several images, use concise descriptive Russian
+link labels; they become captions. Do not use filenames, internal paths or test
+markers as captions. The bridge supplies a neutral numbered caption when a label
+is unsuitable. Document mode remains per-artifact and requires an explicit user
+request. A successful image-only response has the image's delivery receipt;
+never send an extra message merely to make it count as delivered.

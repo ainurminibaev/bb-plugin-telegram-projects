@@ -2195,9 +2195,11 @@ export class ChatBridge {
           ["telegram_400", "message_missing"].includes(error.code)) this.s.del(key);
     }
   }
-  private async deliverArtifacts(text: string, key: string, o: Outbox): Promise<string> {
+  private async deliverArtifacts(text: string, key: string, o: Outbox): Promise<{text: string; lastMediaId: number}> {
     const links = localArtifacts(text);
-    if (!links.length) return text;
+    let lastMediaId = 0;
+    if (!links.length) return {text, lastMediaId};
+    const imagePaths = [...new Set(links.filter(link => /\.(png|jpe?g|webp|gif)$/i.test(link.path)).map(link => link.path))];
     const binding = this.deliveryBinding(o.topicId, o.revision);
     const sourceThreadId = o.sourceThreadId ?? binding?.threadId;
     const roots: string[] = [];
@@ -2214,6 +2216,10 @@ export class ChatBridge {
       }
     }
     for (const link of links) {
+      const isImage = imagePaths.includes(link.path);
+      const plainLabel = cleanAssistantText(link.label).replace(/[*_`\[\]]/g, "").trim();
+      const meaningfulLabel = /[а-яё]/i.test(plainLabel) && plainLabel !== basename(link.path) && !/^(картинка|изображение|фото)$/i.test(plainLabel);
+      const caption = isImage ? (imagePaths.length > 1 ? Array.from(meaningfulLabel ? plainLabel : `Вариант ${imagePaths.indexOf(link.path) + 1}`).slice(0, 900).join("") : undefined) : basename(link.path);
       const receipt = "chat:file:" + key + ":" + link.path;
       let state = this.s.get<string | number>(receipt);
       if (!state) {
@@ -2231,7 +2237,7 @@ export class ChatBridge {
           const result = await this.d.tg(photo ? "sendPhoto" : "sendDocument", {
             message_thread_id: o.topicId || undefined,
             [photo ? "photo" : "document"]: new Blob([new Uint8Array(data)], {type: ({".pdf":"application/pdf", ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".webp":"image/webp", ".gif":"image/gif"} as Record<string,string>)[extname(path).toLowerCase()] ?? "application/octet-stream"}),
-            [photo ? "photo_filename" : "document_filename"]: basename(path), caption: basename(path),
+            [photo ? "photo_filename" : "document_filename"]: basename(path), ...(caption ? {caption} : {}),
           });
           state = result.message_id;
           this.s.put(receipt, state);
@@ -2243,11 +2249,12 @@ export class ChatBridge {
           this.s.put(receipt, state);
         }
       }
-      const label = typeof state === "number" ? basename(link.path) + " — файл отправлен выше" :
+      if (typeof state === "number") lastMediaId = state;
+      const label = typeof state === "number" ? (isImage ? "" : basename(link.path) + " — файл отправлен выше") :
         basename(link.path) + (state === "uncertain" ? " — не удалось подтвердить доставку файла" : " — не удалось отправить файл");
       text = text.split(link.markdown).join(label);
     }
-    return text;
+    return {text, lastMediaId};
   }
   async flush() {
     let count = 0;
@@ -2267,11 +2274,11 @@ export class ChatBridge {
       count++;
       try {
         const assistantOutput = key.startsWith("chat:out:event:") || key.startsWith("chat:out:explicit:");
-        const delivered = assistantOutput ? await this.deliverArtifacts(o.text, key, o) : o.text;
-        const chunks = assistantOutput ? renderTelegramParts(cleanAssistantText(delivered)) : splitText(delivered, 1800);
+        const delivered = assistantOutput ? await this.deliverArtifacts(o.text, key, o) : {text: o.text, lastMediaId: 0};
+        const chunks = assistantOutput ? renderTelegramParts(cleanAssistantText(delivered.text).trim()) : splitText(delivered.text, 1800);
         // Keep formatted HTML below Telegram's limit even after escaping.
         // Durable per-part receipts prevent already-confirmed parts from replaying.
-        let last = 0;
+        let last = delivered.lastMediaId;
         for (let index = 0; index < chunks.length; index++) {
           const partKey = "chat:receipt:" + key + ":" + index;
           const old = this.s.get<number>(partKey);
@@ -2329,7 +2336,7 @@ export class ChatBridge {
           last = edited ? editId! : result.message_id;
           this.s.put(partKey, last);
         }
-        this.s.put(key, { ...o, sentId: last, text: "", keys: undefined });
+        this.s.put(key, { ...o, sentId: last || -1, text: "", keys: undefined });
         if (key.startsWith("chat:out:progress:") && o.revision)
           this.s.put("chat:progress:" + o.topicId + ":" + o.revision, last);
         if ((key.startsWith("chat:out:event:") || key.startsWith("chat:out:end:")) && o.revision)

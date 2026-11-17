@@ -1083,7 +1083,7 @@ test("Telegram rendering preserves links, escaping, lists, code and long text", 
   assert.ok(all.includes('• '));
   for (const p of parts) assert.equal((p.match(/<b>/g)||[]).length, (p.match(/<\/b>/g)||[]).length);
   assert.equal((all.replace(/<[^>]+>/g, '').match(/Длинный ответ /g)||[]).length, 800);
-  assert.deepEqual(localArtifacts('[PDF](</tmp/a b.pdf>)'), [{markdown:'[PDF](</tmp/a b.pdf>)',path:'/tmp/a b.pdf'}]);
+  assert.deepEqual(localArtifacts('[PDF](</tmp/a b.pdf>)'), [{markdown:'[PDF](</tmp/a b.pdf>)',path:'/tmp/a b.pdf',label:'PDF'}]);
 });
 test("artifact delivered once before final, unavailable path explicitly reported", async () => {
   const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'artifact-'));
@@ -1349,4 +1349,36 @@ test("oversized photos never silently fall back to documents", async () => {
     assert.equal(f.sent.filter(x=>['sendPhoto','sendDocument'].includes(x.method)).length,0);
     assert.ok(f.sent.some(x=>x.text?.includes('не удалось отправить файл')));
   } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test("image-only final has a media receipt, no caption or extra text, and deduplicates", async () => {
+ const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'image-only-'));
+ try {
+  writeFileSync(join(dir,'a.png'),'image');f.sdk.environments.get=async()=>({path:dir});
+  await f.bridge.handle(f.input('bind')); await f.bridge.flush(); f.sent.length=0;
+  const args={threadId:'thr_one',topicId:100,text:`![a.png](${dir}/a.png)`,deliveryId:'image_only_001'};
+  f.bridge.sendExplicit(args);await f.bridge.flush();
+  const photos=f.sent.filter(x=>x.method==='sendPhoto');assert.equal(photos.length,1);
+  assert.equal(photos[0].caption,undefined);
+  assert.equal(f.sent.filter(x=>x.method==='sendMessage').length,0);
+  const receipt=f.bridge.explicitDeliveryStatus(args.deliveryId);
+  assert.equal(receipt.state,'delivered');assert.ok(receipt.messageId!>0);
+  f.bridge.sendExplicit(args);await f.bridge.flush();
+  assert.equal(f.sent.filter(x=>x.method==='sendPhoto').length,1);
+  assert.deepEqual(f.bridge.explicitDeliveryStatus(args.deliveryId),receipt);
+ } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+
+test("multiple images use Russian link captions; document image retains explicit format", async () => {
+ const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'image-captions-'));
+ try {
+  for(const name of ['a.png','b.png','c.png'])writeFileSync(join(dir,name),'image');
+  f.sdk.environments.get=async()=>({path:dir});await f.bridge.handle(f.input('bind'));
+  const text=`[Зелёный треугольник](${dir}/a.png)\n[b.png](${dir}/b.png)\n[Вариант с рамкой](<${dir}/c.png> "telegram:document")`;
+  f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text,deliveryId:'image_many_001'});await f.bridge.flush();
+  assert.deepEqual(f.sent.filter(x=>x.method==='sendPhoto').map(x=>x.caption),['Зелёный треугольник','Вариант 2']);
+  assert.equal(f.sent.find(x=>x.method==='sendDocument').caption,'Вариант с рамкой');
+  assert.equal(f.bridge.explicitDeliveryStatus('image_many_001').state,'delivered');
+ } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
 });
