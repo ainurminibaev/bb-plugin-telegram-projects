@@ -9,6 +9,42 @@ Use `bb telegram-projects status --json` and `chat-status --json` for diagnostic
 
 The owner's Telegram menu supports /project, /projects, /menu, /chats, /new, /model, /section, /history, /stop, /disconnect and /tasks. Additional Telegram topics bind through /project. A new session starts on its first text/voice message; existing sessions connect explicitly and remain visible in BB. Only bound threads and Tasks are observed. Do not attach unrelated or hidden chats automatically.
 
+## Continue with another provider
+
+`/model` → «Другой агент → сохранить историю» uses the installed native
+`handoff` plugin, then changes this Telegram chat's binding. The similarly named
+«Другой агент → новый чат» intentionally starts an empty conversation.
+
+Choose a provider/model and confirm once. The source, workers and descendants
+must be idle, without pending questions, background work or queued tasks.
+The bridge keeps incoming Telegram messages in its existing durable inbox while
+switching; BB requests are held in native queues. A fresh target reads the native
+handoff and returns a per-transfer acknowledgement without replaying old work.
+Existing children keep IDs, projects, environments, models and notification
+settings; only their parent changes. Returning to Claude creates a fresh Claude
+coordinator with the latest history, not the earlier Claude snapshot. Old
+coordinators are preserved. BB may deliver its ordinary ownership notices to
+them; this does not send replies to Telegram.
+
+Never retry `startHandoff` after a timeout: creation has no idempotency key.
+The bridge reconciles its journal with native handoff history. Unknown or
+conflicting creation remains held until reconciled or cancelled. `/status` or
+`/menu` shows progress and a cancel button. Cancellation restores partial child
+moves before releasing the inbox; it does not delete the new or old thread.
+Provider retries remain native BB retries, with the actual scheduled time shown.
+
+Administrative RPCs (use only for a user-requested switch or acceptance test):
+- `providerHandoffStatus`: `{topicId}`; sanitized journal summary, no messages.
+- `startProviderHandoff`: `{confirm:true, topicId, sourceThreadId, providerId, model}`.
+  The expected source must match the binding. A receipt is not completion; inspect
+  status until `done`, then independently verify the binding and worker parents.
+- `cancelProviderHandoff`: `{confirm:true, topicId, id}` for the current operation.
+
+Do not remove/replace this plugin during an active handoff. Reload/restart keeps
+the durable journal and dispatch hold. Never manually force-send held rows or
+change bindings/parents during a transfer: native manual overrides can defeat
+the hold, and the bridge will refuse to commit if state no longer matches.
+
 Settings chatEnabled and richReplies control conversations and native Rich Messages. Incoming text/voice uses the existing owner-only companion, a durable local spool, and BB SDK. It is the only Telegram poller: never start another getUpdates/webhook receiver with the token. Voice uses BB system.transcribeVoice; do not request separate credentials. Questions depend on provider support; complex forms link to BB.
 
 Personal host paths and IDs remain fixed; token stays in the private config. Keep plugin storage on updates. Unknown mutation outcomes must be checked, not automatically replayed. Read README.md and docs/usage.md in the source repository for limits and recovery. Never print token values or private message queues.

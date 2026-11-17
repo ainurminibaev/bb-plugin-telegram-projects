@@ -8,6 +8,7 @@ import {
   diagnose,
 } from "./settings";
 import { ChatBridge } from "./chat";
+import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
 import { routeUpdate } from "./ingress";
 import { menuCommands } from "./commands";
@@ -89,7 +90,18 @@ const statusSchema = z.object({
   ),
   tasks: z.number(),
 });
+const handoffStatusSchema = z.object({id: z.string(), phase: z.string(), sourceThreadId: z.string(), targetThreadId: z.string().nullable(), error: z.string().nullable()});
 export const rpcContract = defineRpcContract({
+  providerHandoffStatus: {
+    input: z.object({topicId: z.number().int().nonnegative()}).strict(), output: handoffStatusSchema.nullable(),
+  },
+  startProviderHandoff: {
+    input: z.object({confirm: z.literal(true), topicId: z.number().int().nonnegative(), sourceThreadId: z.string().min(1),
+      providerId: z.string().min(1), model: z.string().min(1)}).strict(), output: handoffStatusSchema,
+  },
+  cancelProviderHandoff: {
+    input: z.object({confirm: z.literal(true), topicId: z.number().int().nonnegative(), id: z.string().uuid()}).strict(), output: handoffStatusSchema,
+  },
   exportPrivateState: {
     input: z.object({confirm: z.literal(true)}).strict(),
     output: z.object({id: z.string(), sha256: z.string(), rows: z.number()}),
@@ -345,7 +357,8 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const lifetime = new AbortController();
   let bridge: ChatBridge | undefined;
-  bb.experimental_hooks.on("message.dispatch", ctx => bridge?.admitDispatch(ctx) ?? {action: "proceed"});
+  bb.experimental_hooks.on("message.dispatch", ctx =>
+    handoffDispatch(store, ctx) ?? bridge?.admitDispatch(ctx) ?? {action: "proceed"});
   let flight: Promise<void> | null = null;
   let lastError: string | null = null;
   let topicsEnabled = false;
@@ -1011,6 +1024,15 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const agency=agencyIntegration(store);
   bb.rpc.register(rpcContract, {
+    providerHandoffStatus: ({topicId}) => bridge?.providerHandoffStatus(topicId) ?? null,
+    startProviderHandoff: async ({topicId, sourceThreadId, providerId, model}) => {
+      if (!bridge) throw Error("chat_bridge_unavailable");
+      return bridge.beginProviderHandoff(topicId, sourceThreadId, providerId, model);
+    },
+    cancelProviderHandoff: async ({topicId, id}) => {
+      if (!bridge) throw Error("chat_bridge_unavailable");
+      return bridge.cancelProviderHandoff(topicId, id);
+    },
     exportPrivateState: async () => {
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
       const c = await settings.get();

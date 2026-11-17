@@ -198,6 +198,37 @@ test("new message creates visible BB chat; subsequent message reuses it", async 
     f.cleanup();
   }
 });
+
+test("Telegram message stays durable during handoff and resumes once under the new binding after reload", async () => {
+  const f = fixture();
+  try {
+    f.store.put("chat:binding:100", {topicId: 100, projectId: "proj_one", threadId: "thr_one", revision: "before", ready: false, cursor: 0});
+    const job = {id: "test-handoff", binding: {topicId: 100, projectId: "proj_one", threadId: "thr_one", revision: "before"},
+      source: "thr_one", sourceSeq: 99, environmentId: "env_one", frozen: ["thr_one"], priorTargets: [],
+      providerId: "claude-code", model: "model-a", at: Date.now(), phase: "uncertain"};
+    f.store.put("chat:handoff:test-handoff", job);
+    f.sdk.plugins.callRpc = async () => ({handoffs: []});
+    const incoming = f.input("Поручение во время переключения");
+    f.bridge.accept(incoming);
+    await f.bridge.tick();
+    await f.bridge.dispose();
+    assert.equal(f.store.get<any>("chat:in:" + incoming.updateId)?.state, "pending");
+    assert.equal(f.calls.filter(c => c[0] === "send" || c[0] === "spawn").length, 0);
+    f.store.put("chat:binding:100", {topicId: 100, projectId: "proj_one", threadId: "thr_successor", revision: "after", ready: false, cursor: 99});
+    f.store.put("chat:handoff:test-handoff", {...job, phase: "done"});
+    const restored = new ChatBridge({store: f.store, sdk: f.sdk, owner: () => OWNER_ID,
+      signal: new AbortController().signal, baseUrl: "https://bb.example", rich: () => false,
+      tg: async () => ({message_id: 900}) as any});
+    restored.recover();
+    await restored.tick();
+    await restored.dispose();
+    const sends = f.calls.filter(c => c[0] === "send");
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0][1].threadId, "thr_successor");
+    assert.equal(sends[0][1].input[0].text, incoming.text);
+    assert.equal(f.store.get<any>("chat:in:" + incoming.updateId)?.state, "done");
+  } finally {f.cleanup();}
+});
 test("custom Telegram topic can bind a project before sending", async () => {
   const f = fixture();
   try {

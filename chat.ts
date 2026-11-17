@@ -1,4 +1,5 @@
 import { ReplyRoutes } from "./reply-routing";
+import { TelegramHandoff, type HandoffJob } from "./handoff";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
 import { markdownExcerpt } from "./events";
@@ -156,6 +157,9 @@ export class ChatBridge {
   private work = new Set<Promise<void>>();
   private observed = false;
   private flushing = false;
+  private handoffPolling = false;
+  private nextHandoffPoll = 0;
+  private readonly handoffs: TelegramHandoff;
   constructor(
     private d: {
       store: Store;
@@ -175,12 +179,47 @@ export class ChatBridge {
         path: string; name: string; bytes: number; sha256: string;
       }>;
     },
-  ) {}
+  ) {
+    this.handoffs = new TelegramHandoff({store: d.store, sdk: d.sdk,
+      binding: topic => this.binding(topic),
+      assertDeliveryDrained: (_source, topic) => {
+        if (this.s.list<Outbox>("chat:out:").some(r => r.value.topicId === topic && !r.value.sentId && !r.key.startsWith("chat:out:handoff:")))
+          throw Error("handoff_delivery_pending");
+      },
+      commit: (job, cursor) => {
+        const b = this.binding(job.binding.topicId);
+        if (!b || b.threadId !== job.source || b.revision !== job.binding.revision || !job.target)
+          throw Error("handoff_binding_changed");
+        this.save({...b, threadId: job.target, providerId: job.providerId, model: job.model,
+          revision: fresh(), cursor, ready: false, profileId: undefined, profileTarget: undefined,
+          status: undefined, progressId: undefined, progressText: undefined, activity: undefined, toolActivity: undefined});
+      },
+      notify: job => this.handoffStatus(job),
+    });
+  }
   private get s() {
     return this.d.store;
   }
   private get routes() { return new ReplyRoutes(this.s); }
+  providerHandoffStatus(topicId: number) {
+    const j = this.handoffs.jobs().filter(j => j.binding.topicId === topicId).sort((a,b) => b.at - a.at)[0];
+    return j ? {id: j.id, phase: j.phase, sourceThreadId: j.source, targetThreadId: j.target ?? null, error: j.error ?? null} : null;
+  }
+  async beginProviderHandoff(topicId: number, sourceThreadId: string, providerId: string, model: string) {
+    const b = this.binding(topicId);
+    if (!b || b.threadId !== sourceThreadId) throw Error("handoff_binding_changed");
+    if (this.lanes.has(topicId)) throw Error("handoff_input_busy");
+    await this.handoffs.begin(b, providerId, model);
+    return this.providerHandoffStatus(topicId)!;
+  }
+  async cancelProviderHandoff(topicId: number, id: string) {
+    if (this.handoffs.active(topicId)?.id !== id) throw Error("handoff_operation_changed");
+    await this.handoffs.cancel(topicId);
+    return this.providerHandoffStatus(topicId)!;
+  }
   async admitDispatch(ctx: MessageDispatchHookContext): Promise<MessageDispatchHookDecision> {
+    const handoff = this.handoffs.dispatch(ctx);
+    if (handoff) return handoff;
     const managed = ctx.originPluginId === "telegram-projects" ||
       this.deliveryWatches().some(w => w.threadId === ctx.thread.id) ||
       this.bindings().some(b => b.threadId === ctx.thread.id);
@@ -554,6 +593,15 @@ export class ChatBridge {
   async tick() {
     if (this.disposed || this.d.signal.aborted) return;
     this.ingestFiles();
+    if (!this.handoffPolling && Date.now() >= this.nextHandoffPoll && this.handoffs.jobs().some(j => !["done", "cancelled"].includes(j.phase))) {
+      this.nextHandoffPoll = Date.now() + 2000;
+      this.handoffPolling = true;
+      const work = this.handoffs.poll().finally(() => {
+        this.handoffPolling = false;
+        this.work.delete(work);
+      });
+      this.work.add(work);
+    }
     for (const { key, value: r } of this.s
       .list<Inbox>("chat:in:")
       .sort((a, b) => a.value.input.updateId - b.value.input.updateId)) {
@@ -563,6 +611,13 @@ export class ChatBridge {
         this.lanes.size >= 4
       )
         continue;
+      if (this.handoffs.active(r.input.topicId)) {
+        const action = r.input.callback?.startsWith("bb:")
+          ? this.s.get<Action>("chat:button:" + r.input.callback.slice(3)) : undefined;
+        // Leave actual messages in the existing durable ingress spool. Do not
+        // mark them claimed, acknowledge a send, or lose their original route.
+        if (!/^\/(status|menu)(?:@\w+)?$/.test(r.input.text?.trim() ?? "") && action?.kind !== "handoffCancel") continue;
+      }
       this.lanes.add(r.input.topicId);
       this.s.put(key, { ...r, state: "claimed" });
       const p = this.handle(r.input)
@@ -939,10 +994,11 @@ export class ChatBridge {
       this.enqueue(
         b.topicId,
         this.tr(
-          "Модель текущего чата можно выбрать ниже. Другой агент выбирается для нового чата.",
+          "Можно сменить модель или продолжить эту переписку с другим агентом.",
         ),
         [
           [this.button(b, "models", this.tr("Модель текущего чата"))],
+          [this.button(b, "handoffProviders", this.tr("Другой агент → сохранить историю"))],
           [this.button(b, "newAgent", this.tr("Другой агент → новый чат"))],
           [this.button(b, "menu", this.tr("В меню"))],
         ],
@@ -964,6 +1020,46 @@ export class ChatBridge {
       this.tr("🤖 Агент для нового чата. Его модели берутся из настроек BB."),
       [...rows, [this.button(b, "menu", this.tr("В меню"))]],
     );
+  }
+  private handoffStatus(job: HandoffJob, force = false) {
+    const b = this.binding(job.binding.topicId);
+    const text = job.phase === "done" ? "Помощник переключён. История передана, рабочие подтреды сохранены. Продолжай писать здесь." :
+      job.phase === "cancelled" ? "Переключение отменено. Прежний помощник остаётся подключён; сообщения из очереди будут переданы ему." :
+      job.cancelRequested ? "Отмена запрошена. Дожидаюсь результата текущего шага, чтобы безопасно вернуть прежнюю привязку. Сообщения сохранены в очереди." :
+      job.phase === "uncertain" ? "Не удалось подтвердить создание нового треда. Повторно его не создаю. Можно отменить переключение и продолжить с прежним помощником." :
+      job.phase === "rollback" ? "Переключение не завершилось. Восстанавливаю прежнюю привязку; сообщения сохранены в очереди." :
+      "Передаю историю новому агенту. Рабочие подтреды останутся прежними и появятся под новым помощником. Новые сообщения пока сохраняются в очереди.";
+    const reason = job.error === "handoff_thread_busy" || job.error === "handoff_thread_queued" ? " Есть выполняющаяся задача, вопрос или ожидающее поручение." :
+      job.error === "handoff_source_changed" ? " Во время переключения исходная переписка изменилась." :
+      job.error === "handoff_pickup_unconfirmed" ? " Новый агент не подтвердил приём истории." : "";
+    const retry = job.retryAt && job.retryAt > Date.now() ? " Следующая попытка BB: " +
+      new Date(job.retryAt).toLocaleString("ru-RU", {timeZone: "Europe/Moscow"}) + " МСК. Можно отменить переключение." : "";
+    this.enqueue(job.binding.topicId, text + reason + retry,
+      b && !["done", "cancelled"].includes(job.phase) ? [[this.button(b, "handoffCancel", "Отменить переключение")]] : undefined,
+      "handoff:" + job.id + ":" + job.phase + (job.retryAt ? ":retry:" + job.retryAt : "") + (job.cancelRequested ? ":cancel" : "") + (force ? ":" + fresh() : ""));
+  }
+  private async handoffProviders(b: Binding) {
+    if (!b.threadId) throw Error("handoff_source_missing");
+    const t = await this.validThread(b, b.threadId);
+    if (!t.environmentId) throw Error("handoff_source_missing");
+    const providers = await this.d.sdk.providers.list({environmentId: t.environmentId});
+    this.enqueue(b.topicId, "Продолжить с историей. Выбери агента:",
+      [...providers.filter(p => p.available && p.id !== t.providerId).map(p =>
+        [this.button(b, "handoffModels", label(p.displayName), p.id)]),
+      [this.button(b, "menu", "В меню")]]);
+  }
+  private async handoffModels(b: Binding, providerId: string, offset = 0) {
+    if (!b.threadId) throw Error("handoff_source_missing");
+    const t = await this.validThread(b, b.threadId);
+    if (!t.environmentId) throw Error("handoff_source_missing");
+    const catalog = await this.d.sdk.providers.models({environmentId: t.environmentId, providerId});
+    if (catalog.modelLoadError) throw Error("handoff_models_unavailable");
+    const keys = catalog.models.slice(offset, offset + 8).map(m =>
+      [this.button(b, "handoffConfirm", label(m.displayName), m.model, providerId)]);
+    if (offset > 0) keys.push([this.button(b, "handoffModels", "← Назад", providerId, String(offset - 8))]);
+    if (catalog.models.length > offset + 8) keys.push([this.button(b, "handoffModels", "Далее →", providerId, String(offset + 8))]);
+    keys.push([this.button(b, "menu", "В меню")]);
+    this.enqueue(b.topicId, "Выбери модель для продолжения переписки:", keys);
   }
   private async profileTarget(b: Binding) {
     if (b.folderId) {
@@ -1163,6 +1259,7 @@ export class ChatBridge {
       "profiles",
       "profile",
       "stopConfirm",
+      "handoffProviders", "handoffModels", "handoffConfirm", "handoffStart", "handoffCancel",
     ];
     if (a && menus.includes(a.kind))
       return this.navigation.run(
@@ -1173,6 +1270,11 @@ export class ChatBridge {
   }
   private async handleInput(input: ChatInput) {
     let b = this.binding(input.topicId);
+    const moving = this.handoffs.active(input.topicId);
+    if (moving && /^\/(status|menu)(?:@\w+)?$/.test(input.text?.trim() ?? "")) {
+      this.handoffStatus(moving, true);
+      return;
+    }
     if (input.callback) {
       const id = input.callback.replace(/^bb:/, "");
       const a = this.s.get<Action>("chat:button:" + id);
@@ -1623,6 +1725,19 @@ export class ChatBridge {
         };
         this.save(b);
         return this.providers(b);
+      case "handoffProviders": return this.handoffProviders(b);
+      case "handoffModels": return this.handoffModels(b, a.arg!, Number(a.extra) || 0);
+      case "handoffConfirm":
+        this.enqueue(b.topicId, "Создам новый тред с историей и перенесу под него прежние рабочие подтреды. Telegram-чат останется тем же. Старый тред сохранится. Переключение начнётся, только когда помощник и его задачи свободны.",
+          [[this.button(b, "handoffStart", "Продолжить с " + label(a.extra!) + " / " + label(a.arg!), a.arg, a.extra)],
+            [this.button(b, "menu", "Отмена")]]);
+        return;
+      case "handoffStart":
+        await this.handoffs.begin(b, a.extra!, a.arg!);
+        return;
+      case "handoffCancel":
+        await this.handoffs.cancel(b.topicId);
+        return;
       case "providers":
         return this.providers(b);
       case "provider":
