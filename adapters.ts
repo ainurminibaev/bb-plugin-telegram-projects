@@ -173,6 +173,7 @@ export async function transcribeTelegramVoice(
   signal: AbortSignal,
   apiRoot: ApiRootSource = async () => "https://api.telegram.org",
   localFiles?: () => Promise<{ localRoot: string; inboxRoot: string }>,
+  transcribe?: (audio: File) => Promise<string>,
 ): Promise<string> {
   if (voice.size > 15_000_000 || voice.duration > 600)
     throw Error("voice_too_large");
@@ -187,7 +188,8 @@ export async function transcribeTelegramVoice(
       updateId: 0, fileId: voice.fileId, name: "voice.ogg", expectedBytes: voice.size || undefined,
       maxBytes: 15_000_000, signal });
     const bytes = await readFile(saved.path);
-    const result = await sdk.system.transcribeVoice({ file: new File([bytes], "voice.ogg", {type: voice.mime}), signal });
+    const audio = new File([bytes], "voice.ogg", {type: voice.mime});
+    const result = transcribe ? {text: await transcribe(audio)} : await sdk.system.transcribeVoice({ file: audio, signal });
     const text = (result as {text?:string}).text;
     if (!text?.trim() || text.length > 16000) throw Error("voice_transcription_empty");
     return text;
@@ -223,10 +225,8 @@ export async function transcribeTelegramVoice(
     chunks.push(value);
   }
   const bytes = Buffer.concat(chunks);
-  const result = await sdk.system.transcribeVoice({
-    file: new File([bytes], "voice.ogg", { type: voice.mime }),
-    signal,
-  });
+  const audio = new File([bytes], "voice.ogg", {type: voice.mime});
+  const result = transcribe ? {text: await transcribe(audio)} : await sdk.system.transcribeVoice({file: audio, signal});
   const text = (result as { text?: string }).text;
   if (!text?.trim() || text.length > 16000)
     throw Error("voice_transcription_empty");

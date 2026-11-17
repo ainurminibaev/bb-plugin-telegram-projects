@@ -70,7 +70,7 @@ export const english: Record<string, string> = {
     "Unknown command. /menu — controls; /say /command — send a command as text to the agent.",
   "Транскрибация сейчас недоступна. Отправь текст.":
     "Transcription is currently unavailable. Send text.",
-  "Не удалось распознать голос. Отправь текст или проверь транскрибацию в настройках BB. Ограничение: 10 минут и 15 МБ.":
+  "Не удалось распознать голос. Сообщение не передано помощнику. Можно отправить текст. Ограничение голосовых: 10 минут и 15 МБ.":
     "Could not transcribe the recording. Send text or check BB transcription settings. Limit: 10 minutes and 15 MB.",
   "🎙 Распознано:\n": "🎙 Transcribed:\n",
   "Отправь текст или голосовое сообщение. Вложения пока открывай в BB.":

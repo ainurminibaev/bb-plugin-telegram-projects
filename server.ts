@@ -1,3 +1,4 @@
+import { transcribeWithVoiceRouter } from "./voice-router";
 import { saveLocalTelegramFile, telegramApiRoot as checkedApiRoot } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
 import { translate } from "./locale";
@@ -246,6 +247,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     telegramInboxRoot: {
       type: "string", label: "Private received-file directory", default: "",
+    },
+    voiceRouterPath: {
+      type: "string", label: "Local voice router executable (empty: BB transcription)", default: "",
     },
     telegramFileHostId: {
       type: "string", label: "BB machine holding received files", default: "",
@@ -1446,8 +1450,11 @@ export default async function plugin(bb: BbPluginApi) {
                 rich: () => rich,
                 language: () => language,
                 wake: wakeChat,
-                transcribe: (v) =>
-                  transcribeTelegramVoice(botToken, bb.sdk, v, bridgeSignal, apiRoot, localFiles),
+                transcribe: async (v) => {
+                  const {voiceRouterPath} = await settings.get();
+                  return transcribeTelegramVoice(botToken, bb.sdk, v, bridgeSignal, apiRoot, localFiles,
+                    voiceRouterPath ? audio => transcribeWithVoiceRouter(voiceRouterPath, audio, bridgeSignal) : undefined);
+                },
                 receiveAttachment: async (input, threadId) => {
                   const c = await settings.get();
                   if (checkedApiRoot(c.telegramApiRoot) === "https://api.telegram.org" ||

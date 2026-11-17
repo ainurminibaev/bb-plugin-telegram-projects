@@ -31,3 +31,20 @@ for (const local of [false, true]) test(`voice preserves filename through SDK mu
     assert.equal(result,'Распознано');
   } finally { globalThis.fetch = original; await rm(root,{recursive:true,force:true}); }
 });
+
+for (const fail of [false,true]) test(`configured bot-only transcription ${fail?'failure':'success'} never calls BB ASR`,async()=>{
+ const original=globalThis.fetch;
+ let bbCalls=0,routerCalls=0;
+ globalThis.fetch=async(url)=>String(url).endsWith('/getFile')
+  ? Response.json({ok:true,result:{file_path:'voice/sample.ogg'}})
+  :new Response('fixture');
+ try {
+  const sdk={system:{transcribeVoice:async()=>{bbCalls++;throw Error('unexpected_bb_asr');}}} as unknown as Parameters<typeof transcribeTelegramVoice>[1];
+  const run=transcribeTelegramVoice(async()=>'fixture',sdk,
+   {fileId:'id',mime:'audio/ogg',size:7,duration:1},new AbortController().signal,
+   undefined,undefined,async audio=>{routerCalls++;assert.equal(audio.name,'voice.ogg');if(fail)throw Error('local_asr_down');return 'Татарча';});
+  if(fail)await assert.rejects(run,{message:'local_asr_down'});
+  else assert.equal(await run,'Татарча');
+  assert.equal(routerCalls,1);assert.equal(bbCalls,0);
+ } finally {globalThis.fetch=original;}
+});

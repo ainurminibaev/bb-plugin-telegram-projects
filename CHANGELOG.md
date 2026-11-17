@@ -1,3 +1,9 @@
+# 0.9.1-personal.10
+
+- Optional bot-only local voice router via voiceRouterPath. Empty keeps the BB ASR service; configuring it never changes global BB voice settings.
+- Private temporary recordings, bounded output and timeout, cancellation, cleanup, and sanitized failures. No external ASR fallback on local-router failure.
+- Voice failure text explicitly states that the message was not sent to the assistant.
+
 # 0.9.1-personal.9
 
 - Fix Telegram voice transcription: preserve voice.ogg filename in BB multipart upload.

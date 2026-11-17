@@ -137,3 +137,14 @@ markers as captions. The bridge supplies a neutral numbered caption when a label
 is unsuitable. Document mode remains per-artifact and requires an explicit user
 request. A successful image-only response has the image's delivery receipt;
 never send an extra message merely to make it count as delivered.
+
+## Bot-only multilingual voice router
+
+`voiceRouterPath` is an optional absolute executable path on the BB server.
+Empty preserves BB's configured transcription service. A configured router receives
+`<private-audio-file> --lang auto` and must print only recognized text to stdout.
+It replaces transcription only in this Telegram bridge, never BB's global voice
+setting. It must exist and pass local language/fallback tests before enabling it.
+Failures do not silently send the recording to an external transcription service.
+Temporary audio is private and removed after success/failure; cancellation is passed
+to the child process. The Telegram voice limits remain 10 minutes and 15 MB.
