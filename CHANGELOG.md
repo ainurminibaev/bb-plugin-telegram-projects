@@ -1,3 +1,9 @@
+# 0.9.1-personal.15
+
+- Cancelling or rolling back a handoff removes its pending native pickup retries by exact request identity; unrelated queued work is preserved.
+- Reconcile a lost deletion response by rereading the queue, without replaying a turn or clearing other messages.
+- Validation: 165 tests and TypeScript pass. This cleans up pending retries; it does not interrupt an already running target turn.
+
 # 0.9.1-personal.14
 
 - Leave inline retries of failed handoff pickups to BB's native scheduler, avoiding a short bridge wait replacing the provider reset deadline on BB 0.49.

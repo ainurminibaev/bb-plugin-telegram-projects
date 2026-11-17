@@ -42,6 +42,10 @@ that provisional target, its request history invalidates the handoff; the
 source remains connected and the target's work is preserved. A provider limit
 with no pending native retry is reported explicitly; no custom retry timer or
 automatic recreation of the target is used.
+Cancellation removes pending native retries belonging to this pickup, verified
+against its request history; other queued work is preserved. It does not stop
+an already running target turn. If cancellation races a running turn, inspect
+the target afterwards for a newly scheduled retry before archiving it.
 
 Administrative RPCs (use only for a user-requested switch or acceptance test):
 - `providerHandoffStatus`: `{topicId}`; sanitized journal summary, no messages.

@@ -15,6 +15,8 @@ function fixture() {
   const seqs = new Map<string, number>([["source", 10]]), outputs = new Map<string, string>();
   const providerErrors = new Map<string, any>();
   const extraRequests = new Map<string, any[]>();
+  const extraQueue = new Map<string, any[]>(), deletedQueue: string[] = [];
+  let loseDelete = false;
   let lostCreate = false, noCreate = false, lostUpdate = false, queueAfterUpdate = false, ownershipOnUpdate = false;
   const ownershipQueues = new Set<string>();
   const environment = {managed: false, isWorktree: false};
@@ -44,9 +46,16 @@ function fixture() {
       get: async ({threadId}: any) => structuredClone(rows.find(r => r.id === threadId)) as any,
       defaultExecutionOptions: async ({threadId}: any) => ({model: rows.find(r => r.id === threadId)!.model}) as any,
       queuedMessages: {list: async ({threadId}: any) => [
-        ...(queues.has(threadId) ? [{payload: {kind: "retry", retryOfTurnRequestId: "request-" + threadId}}] : []),
+        ...(queues.has(threadId) ? [{id: "retry-" + threadId, payload: {kind: "retry", retryOfTurnRequestId: "request-" + threadId}}] : []),
         ...(ownershipQueues.has(threadId) ? [{initiator: "system", payload: {kind: "inline"}, systemNotice: {kind: "ownership-batch"}}] : []),
-      ] as any},
+        ...(extraQueue.get(threadId) ?? []),
+      ] as any,
+      delete: async ({threadId, queuedMessageId}: any) => {
+        assert.equal(queuedMessageId, "retry-" + threadId);
+        queues.delete(threadId); deletedQueue.push(queuedMessageId);
+        if (loseDelete) {loseDelete = false; throw Error("delete_response_lost");}
+        return {ok: true as const};
+      }},
       events: {list: async ({threadId, afterSeq, types}: any) => types?.includes("provider/error") ?
         (providerErrors.has(threadId) ? [{seq: 30, type: "provider/error", data: providerErrors.get(threadId)}] : []) :
         afterSeq && Number(afterSeq) >= (seqs.get(threadId) ?? 0) ? [] : [{seq: seqs.get(threadId) ?? 0, type: "client/turn/requested",
@@ -89,7 +98,8 @@ function fixture() {
     sourceRetired: job => retired.push(job.source),
     sourceIsBound: threadId => binding().threadId === threadId,
   });
-  return {create, binding, rows, queues, calls, histories, notices, seqs, outputs, providerErrors, extraRequests, harness, retired, environment, cascadeIds,
+  return {create, binding, rows, queues, calls, histories, notices, seqs, outputs, providerErrors, extraRequests, extraQueue, deletedQueue,
+    loseDelete: () => {loseDelete = true;}, harness, retired, environment, cascadeIds,
     loseCreate: () => {lostCreate = true;}, unknownCreate: () => {noCreate = true;},
     loseUpdate: () => {lostUpdate = true;}, queueOnUpdate: () => {queueAfterUpdate = true;},
     enableOwnership: () => {ownershipOnUpdate = true;}};
@@ -295,6 +305,31 @@ test("provider quota without a pending retry preserves the source and reports th
     assert.equal(f.calls.length, 1);
   } finally {Date.now = realNow; await f.harness.lifecycle.dispose();}
 });
+
+for (const lostResponse of [false, true]) {
+  test(`cancel deletes only the owned pending retry; lost response=${lostResponse}`, async () => {
+    const f = fixture();
+    try {
+      await f.create().begin(f.binding(), "codex", "codex-model");
+      f.rows[2].status = "error";
+      f.queues.add("target-1");
+      const foreign = [
+        {id: "human-task", payload: {kind: "inline"}},
+        {id: "foreign-retry", payload: {kind: "retry", retryOfTurnRequestId: "foreign-request"}},
+      ];
+      f.extraQueue.set("target-1", foreign);
+      if (lostResponse) f.loseDelete();
+      await f.create().cancel(0);
+      assert.deepEqual(f.deletedQueue, ["retry-target-1"]);
+      assert.deepEqual(f.extraQueue.get("target-1"), foreign);
+      assert.equal(f.create().jobs()[0].phase, "cancelled");
+      assert.equal(f.binding().threadId, "source");
+      assert.equal(f.rows[1].parentThreadId, "source");
+      await f.create().poll();
+      assert.deepEqual(f.deletedQueue, ["retry-target-1"]);
+    } finally {await f.harness.lifecycle.dispose();}
+  });
+}
 
 test("busy worker prevents native creation", async () => {
   const f = fixture();

@@ -161,9 +161,38 @@ export class TelegramHandoff {
     return j;
   }
   dispatch(ctx: MessageDispatchHookContext): MessageDispatchHookDecision | undefined {
-    // The one native pickup turn (and its native retries) may run. Human work
-    // in the new coordinator must wait until its Telegram route is committed.
+    // Failed pickup retries keep core's deadline. Unrelated target requests
+    // invalidate pickup validation instead of inheriting the Telegram route.
     return handoffDispatch(this.d.store, ctx);
+  }
+  private async cancelPickupRetries(j: HandoffJob) {
+    if (!j.target) return;
+    const events = await this.d.sdk.threads.events.list({threadId: j.target,
+      types: ["client/turn/requested"], order: "asc", limit: "100"});
+    const owned = new Set<string>();
+    for (const e of events) {
+      if (e.type !== "client/turn/requested") continue;
+      const d = e.data;
+      const initial = owned.size === 0 && d.originPluginId === "handoff" &&
+        d.input?.some(b => b.type === "text" && b.text.includes(`HANDOFF-READY:${j.id}`));
+      if (!initial && (!d.retryOfRequestId || !owned.has(d.retryOfRequestId))) break;
+      owned.add(d.requestId);
+    }
+    if (!owned.size) return;
+    const queue = await this.d.sdk.threads.queuedMessages.list({threadId: j.target});
+    for (const q of queue) {
+      if (q.payload.kind !== "retry" || !owned.has(q.payload.retryOfTurnRequestId)) continue;
+      try {
+        await this.d.sdk.threads.queuedMessages.delete({threadId: j.target, queuedMessageId: q.id});
+      } catch (error) {
+        // A lost response is safe to reconcile, never a reason to delete a
+        // different row or clear the entire queue.
+        const remaining = await this.d.sdk.threads.queuedMessages.list({threadId: j.target});
+        if (remaining.some(r => r.id === q.id)) throw error;
+      }
+    }
+    j.retryAt = undefined;
+    this.save(j);
   }
   private transfer(j: HandoffJob, rollback = false) {
     return new HandoffChildren(this.d.store, this.d.sdk.threads, async () => {
@@ -189,6 +218,7 @@ export class TelegramHandoff {
       j.phase = "rollback";
       this.save(j);
       if (this.transfer(j).get(j.id)) await this.transfer(j, true).rollback(j.id);
+      await this.cancelPickupRetries(j);
       j.phase = "cancelled";
       this.save(j);
       this.d.notify(j);
@@ -212,6 +242,7 @@ export class TelegramHandoff {
         }
         if (j.phase === "rollback") {
           if (this.transfer(j).get(j.id)) await this.transfer(j, true).rollback(j.id);
+          await this.cancelPickupRetries(j);
           j.phase = "cancelled"; this.save(j); this.d.notify(j); continue;
         }
         const candidates = (await this.history()).filter(h => h.sourceThreadId === j.source &&
