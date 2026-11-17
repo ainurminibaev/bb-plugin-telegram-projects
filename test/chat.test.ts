@@ -229,6 +229,24 @@ test("Telegram message stays durable during handoff and resumes once under the n
     assert.equal(f.store.get<any>("chat:in:" + incoming.updateId)?.state, "done");
   } finally {f.cleanup();}
 });
+
+test("retired delivery watcher cannot leave a stale error on a healthy successor", async () => {
+  const f = fixture();
+  try {
+    f.store.put("chat:binding:100", {topicId: 100, projectId: "proj_one", threadId: "thr_one", revision: "current", ready: false, cursor: 99});
+    f.store.put("reply:watch:old", {owner: OWNER_ID, topicId: 100, projectId: "proj_one", threadId: "old", revision: "old", cursor: 99});
+    const original = f.sdk.threads.get;
+    f.sdk.threads.get = async (a: any) => {
+      if (a.threadId === "old") throw Error("archived");
+      return original(a);
+    };
+    await f.bridge.observe();
+    assert.equal(f.bridge.status().lastError, "bound_thread_unavailable");
+    f.store.del("reply:watch:old");
+    await f.bridge.observe();
+    assert.equal(f.bridge.status().lastError, null);
+  } finally {f.cleanup();}
+});
 test("custom Telegram topic can bind a project before sending", async () => {
   const f = fixture();
   try {

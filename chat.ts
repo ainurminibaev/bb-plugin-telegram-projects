@@ -2102,6 +2102,8 @@ export class ChatBridge {
       : result;
   }
   async observe() {
+    let bindingFailed = false;
+    let bindingChecked = false;
     await this.separateQueuedTasks();
     const watches = this.deliveryWatches().filter(w=>!w.questionOnly);
     const observedBindings = [...watches, ...this.bindings().filter(b =>
@@ -2124,6 +2126,7 @@ export class ChatBridge {
       this.s.del(downloadProgressKey);
       try {
         const t = await this.validThread(b, b.threadId);
+        bindingChecked = true;
         if (!await this.observeChildRoutes(b)) continue;
         const events = await this.d.sdk.threads.events.list({
           threadId: b.threadId,
@@ -2297,9 +2300,13 @@ export class ChatBridge {
         )
           this.save(b);
       } catch {
-        this.lastError = "bound_thread_unavailable";
+        if (this.binding(b.topicId)?.threadId === b.threadId || this.s.get("reply:watch:" + b.revision)) {
+          bindingFailed = true;
+          this.lastError = "bound_thread_unavailable";
+        }
       }
     }
+    if (bindingChecked && !bindingFailed && this.lastError === "bound_thread_unavailable") this.lastError = null;
   }
   private async clearProgress(topicId: number, revision: string) {
     for (const { key, value } of this.s.list<Outbox>("chat:out:progress:")) {
