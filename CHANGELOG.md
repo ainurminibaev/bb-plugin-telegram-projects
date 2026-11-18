@@ -1,3 +1,7 @@
+# 0.9.3
+
+- Return valid RPC receipts for queued, revoked, rejected and uncertain outcomes without a Telegram message ID.
+
 # 0.9.2
 
 - Return an approved text result from the paired owner's private Telegram request to the original group message. The bridge retains the destination, checks the current binding and records the delivery receipt. Interrupted sends with an unknown outcome stay available for reconciliation.

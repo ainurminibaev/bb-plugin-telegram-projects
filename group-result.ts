@@ -32,7 +32,7 @@ export function queueGroupResult(store:Store, owner:number, bot:number, taskId:s
     store.put("group:result-queue:"+taskId,true);
   });
   const {state,messageId}=store.get<Result>(key)!;
-  return {state,messageId};
+  return messageId===undefined ? {state} : {state,messageId};
 }
 
 // This runs on the bridge's serial receiver loop. Consume the queue entry and
@@ -47,7 +47,7 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     if (!result || result.state!=="queued") continue;
     const origin=store.get<GroupOrigin>("group:origin:"+taskId);
     const finish=(state:Status["state"],messageId?:number)=>store.atomic(()=>{
-      store.put(key,{...result,state,messageId});
+      store.put(key,messageId===undefined ? {text:result.text,state} : {text:result.text,state,messageId});
       store.del(row.key);
     });
     if (!origin) {finish("revoked");continue;}

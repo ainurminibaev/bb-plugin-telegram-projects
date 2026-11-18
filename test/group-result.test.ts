@@ -25,7 +25,7 @@ function fixture(snapshot?:string) {
 test("persisted group return goes only to the original message and replays its receipt",async()=>{
   const before=fixture();
   assert.throws(()=>queueGroupResult(before.store,9,1,"0","Approved"));
-  assert.equal(before.queue().state,"queued");
+  assert.deepEqual(before.queue(),{state:"queued"});
   const {store,sent,tick,queue}=fixture(before.snapshot());
   await tick();
   assert.deepEqual(queue(),{state:"sent",messageId:90});
@@ -36,7 +36,7 @@ test("persisted group return goes only to the original message and replays its r
 test("revocation after queuing suppresses delivery",async()=>{
   const {store,sent,tick,queue}=fixture();
   queue();store.del("group:policy:-1001:7");
-  await tick();assert.equal(queue().state,"revoked");assert.equal(sent.length,0);
+  await tick();assert.deepEqual(queue(),{state:"revoked"});assert.equal(sent.length,0);
 });
 test("restart across an ambiguous Telegram write leaves an unknown outcome",async()=>{
   const before=fixture();
@@ -45,5 +45,5 @@ test("restart across an ambiguous Telegram write leaves an unknown outcome",asyn
   await before.tick(async()=>{atSend=before.snapshot();throw Error("connection lost");});
   assert.ok(atSend);
   const after=fixture(atSend);
-  await after.tick();assert.equal(after.queue().state,"unknown");assert.equal(after.sent.length,0);
+  await after.tick();assert.deepEqual(after.queue(),{state:"unknown"});assert.equal(after.sent.length,0);
 });
