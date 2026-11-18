@@ -15,7 +15,7 @@ type GroupInput = Extract<Ingress,{kind:"group"}>;
 type Job = {
   route: GroupInput; ownerId:number; revision?:string;
   state:"pending"|"submitted"|"ready"|"sending"|"done"|"revoked";
-  progressId?:number|null;
+  taskId?:string; progressId?:number|null;
   executionToken?:string; executorRetryAt?:number;
   pdfIndex?:number; failedPdfs?:string[];
   cursor?:number; turnId?:string; answer?:string; part?:number;
@@ -241,13 +241,24 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       }
       store.put(key,job);
     }
+    if (job.state==="pending" && !job.taskId && !job.executionToken && policy.revision && policy.projectId) {
+      job.taskId=randomUUID();
+      if (executor) job.executionToken=randomUUID();
+      store.atomic(()=>{
+        store.put("group:origin:"+job.taskId,{owner,bot:botId,sender:r.senderId,chatId:r.chatId,
+          topicId:r.topicId,messageId:r.messageId,threadId:r.threadId,revision:policy.revision,projectId:policy.projectId,
+          executionToken:job.executionToken});
+        store.put(key,job);
+      });
+    }
+    const taskNote=job.taskId ? "Group taskId: "+job.taskId+". Include this ID in internal approval requests to the owner coordinator." : "";
     if (executor && (job.state==="pending" || job.state==="submitted")) {
       if ((job.executorRetryAt??0)>Date.now()) continue;
       try {
         if (job.state==="pending") {
           job.executionToken ??= randomUUID();
           store.put(key,job);
-          await executor.submit(job.executionToken,r.text,signal);
+          await executor.submit(job.executionToken,[r.text,taskNote].filter(Boolean).join("\n"),signal);
           job.state="submitted";
           store.put(key,job);
         }
@@ -274,7 +285,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       job.state="submitted";
       store.put(key,job);
       await sdk.threads.send({threadId:r.threadId,mode:"queue-if-active",
-        input:[{type:"text",text:r.text,mentions:[]},marker]});
+        input:[{type:"text",text:r.text,mentions:[]},marker,...(taskNote ? [{type:"text" as const,visibility:"agent-only" as const,text:taskNote,mentions:[]}] : [])]});
     }
     if (job.state==="submitted") {
       const events=await sdk.threads.events.list({threadId:r.threadId,afterSeq:String(job.cursor??0),limit:"100",signal,

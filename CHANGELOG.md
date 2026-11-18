@@ -1,3 +1,7 @@
+# 0.9.2
+
+- Return an approved text result from the paired owner's private Telegram request to the original group message. The bridge retains the destination, checks the current binding and records the delivery receipt. Interrupted sends with an unknown outcome stay available for reconciliation.
+
 # 0.9.1-personal.29
 
 - Isolated workers receive the PDF output directory and link format with each group request. A reply requesting changes produces a separate file.

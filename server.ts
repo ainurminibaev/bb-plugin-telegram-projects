@@ -1,3 +1,4 @@
+import {deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult} from "./group-result";
 import {groupExecutor} from "./isolated-client";
 import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf} from "./isolated-group";
 import {cleanInbox} from "./inbox-retention";
@@ -103,6 +104,7 @@ export const rpcContract = defineRpcContract({
   submitIsolatedGroup:{input:isolatedGroupInput,output:isolatedGroupResult},
   inspectChannelRights:{input:z.object({channelId:z.number().int().negative()}).strict(),
     output:z.object({publish:z.boolean(),editOthers:z.boolean(),deleteOthers:z.boolean()})},
+  returnGroupResult:{input:groupResultInput,output:groupResultStatus},
   channelPost:{input:channelPostSchema,output:z.object({messageId:z.number().int().positive()})},
   bindGroupTopic: {
     input: z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative(),
@@ -1129,6 +1131,17 @@ export default async function plugin(bb: BbPluginApi) {
       await checkBot(tg,bot);
       return inspectChannelRights(tg,channelId,owner,bot);
     },
+    returnGroupResult: async args=>{
+      const owner=ownerId(), bot=botId();
+      if (!bridge || !owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
+      await bridge.validateOwnerAction(args.threadId,args.routeToken,owner);
+      const cfg=await settings.get();
+      if (!cfg.enabled || !cfg.chatEnabled || owner!==ownerId() || bot!==botId() || stateTransferBusy)
+        throw Error("bot_unavailable");
+      const status=queueGroupResult(store,owner,bot,args.taskId,args.text);
+      chatWake?.();
+      return status;
+    },
     channelPost: async args=>{
       const owner=ownerId(), bot=botId();
       if (!bridge || !owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
@@ -1672,6 +1685,8 @@ export default async function plugin(bb: BbPluginApi) {
             if (owner && bot) {
               try {
                 void typing?.();
+                await deliverGroupResults(store,bb.sdk,o=>o.owner===ownerId() && o.bot===botId() && !stateTransferBusy,
+                  chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal);
                 await processGroupInputs(store,bb.sdk,owner,bot,
                   chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
