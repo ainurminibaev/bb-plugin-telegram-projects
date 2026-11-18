@@ -202,3 +202,62 @@ test("stock child receipt survives restart and never adopts a BB run or a differ
   assert.equal(resumed.inheritOutcomes("parent","late-stock",[{threadId:"child",status:"completed"}]),false);
   assert.equal(resumed.inheritOutcomes("parent","late-patched",[{threadId:"child",turnId:"target",status:"completed"}]),false);
 });
+
+// 18.11.2026: a delegated worker spawned its own helpers; their stock
+// completion notices were steered into its running Telegram turn, which was
+// then marked ambiguous and its final result never returned to Telegram.
+test("worker's own child notices and coordinator messages keep a delegated turn routed", () => {
+  const {routes,store} = fixture();
+  const parentMarker = routes.ingress("parent",tg);
+  const token = parentMarker.text.match(/route:([^\]]+)/)![1];
+  routes.requested("parent",{requestId:"original",originPluginId:"telegram-projects",input:[parentMarker]});
+  const forwarded = routes.delegatedIngress("parent",token,"child");
+  routes.requested("child",{requestId:"work",originPluginId:"telegram-projects",input:[forwarded]});
+  routes.accept("child","t7","work");
+  for (const id of ["grandchild-1","grandchild-2","grandchild-3"]) {
+    routes.requested("child",{requestId:id,initiator:"system",systemMessageKind:"child-completed",senderThreadId:null});
+    routes.accept("child","t7",id);
+  }
+  routes.requested("child",{requestId:"coordinator",initiator:"agent",senderThreadId:"parent"});
+  routes.accept("child","t7","coordinator");
+  assert.deepEqual(routes.destination("child","t7"),tg);
+  routes.complete("child","t7","completed");
+  const reports = routes.reserveChildReports("parent",tg.chatId,tg.topicId);
+  assert.equal(reports.length,1);
+  assert.equal(reports[0].value.turnId,"t7");
+  assert.equal(reports[0].value.mixed,undefined);
+  assert.deepEqual(reports[0].value.route,tg);
+  // A message from an unrelated thread or the owner typing in BB still conflicts.
+  const other = fixture();
+  other.routes.record("w","tg",tg); other.routes.accept("w","t","tg");
+  other.routes.requested("w",{requestId:"stranger",initiator:"agent",senderThreadId:"elsewhere"});
+  other.routes.accept("w","t","stranger");
+  assert.equal(other.routes.destination("w","t"),undefined);
+  void store;
+});
+
+test("a mixed delegated turn is reported to its coordinator explicitly instead of being lost", () => {
+  const {routes} = fixture();
+  const parentMarker = routes.ingress("parent",tg);
+  const token = parentMarker.text.match(/route:([^\]]+)/)![1];
+  routes.requested("parent",{requestId:"original",originPluginId:"telegram-projects",input:[parentMarker]});
+  const first = routes.delegatedIngress("parent",token,"child");
+  routes.requested("child",{requestId:"work",originPluginId:"telegram-projects",input:[first]});
+  routes.accept("child","turn","work");
+  routes.requested("child",{requestId:"owner-in-bb",initiator:"user",input:[{type:"text",text:"also do this"}]});
+  routes.accept("child","turn","owner-in-bb");
+  assert.equal(routes.destination("child","turn"),undefined);
+  routes.complete("child","turn","completed");
+  const [report] = routes.reserveChildReports("parent",tg.chatId,tg.topicId);
+  assert.equal(report.value.mixed,true);
+  assert.deepEqual(report.value.route,tg);
+  // Cancelled tasks stay silent.
+  const c = fixture();
+  const m = c.routes.ingress("parent",tg); const tk = m.text.match(/route:([^\]]+)/)![1];
+  c.routes.requested("parent",{requestId:"original",originPluginId:"telegram-projects",input:[m]});
+  const f2 = c.routes.delegatedIngress("parent",tk,"child");
+  c.routes.requested("child",{requestId:"work",originPluginId:"telegram-projects",input:[f2]});
+  c.routes.accept("child","turn","work"); c.routes.record("child","bb",{kind:"bb"}); c.routes.accept("child","turn","bb");
+  c.routes.cancel(tg); c.routes.complete("child","turn","completed");
+  assert.equal(c.routes.reserveChildReports("parent",tg.chatId,tg.topicId).length,0);
+});

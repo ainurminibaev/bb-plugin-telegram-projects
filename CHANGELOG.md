@@ -1,3 +1,8 @@
+# 0.9.8
+
+- Return a delegated worker's result to Telegram when notices about the worker's own child threads, or a message from its coordinator, joined its running turn. These no longer make the turn's destination ambiguous.
+- When one delegated turn mixes separate submissions, still report it to the coordinator, marked as mixed, instead of dropping the Telegram return.
+
 # 0.9.7
 
 - Report each failed Telegram coordinator turn, including failures followed by another task before the bridge polls. Reply to the originating message for new requests.

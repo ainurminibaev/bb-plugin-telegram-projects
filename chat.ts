@@ -403,6 +403,8 @@ export class ChatBridge {
           input:[{type:"text",mentions:[],text:
             `Для итогового ответа по поручению из Telegram проверь конкретный ход ${value.turnId} ` +
             `в рабочем треде ${value.threadId} (статус ${value.status}). Сообщи результат этого хода. ` +
+            (value.mixed ? "В этот ход попали несколько отдельных сообщений, поэтому точный адресат не определён: " +
+              "ответь владельцу по каждому из них в этом ответе. " : "") +
             "Поручение уже завершилось. Не запускай его повторно."},value.marker]});
         if (this.s.get(key)) this.s.put(key,{...value,state:"submitted",startedAt});
       } catch (error) {
@@ -2343,7 +2345,10 @@ export class ChatBridge {
               const outcomes = subject.outcomes ?? (subject.kind === "thread" ? [{threadId:subject.threadId,
                 status:event.data.systemMessageKind === "child-completed" ? "completed" :
                   event.data.systemMessageKind === "child-failed" ? "failed" : "interrupted"}] : []);
-              this.routes.inheritOutcomes(b.threadId,event.data.requestId,outcomes);
+              // A notice that carries no Telegram task still continues a turn
+              // it is steered into; it must not make that turn ambiguous.
+              if (!this.routes.inheritOutcomes(b.threadId,event.data.requestId,outcomes))
+                this.routes.unroutedNotice(b.threadId,event.data.requestId);
               this.s.put("reply:notification-request:" + b.threadId + ":" + event.data.requestId, true);
             } else this.routes.requested(b.threadId, event.data);
             b.cursor = event.seq;

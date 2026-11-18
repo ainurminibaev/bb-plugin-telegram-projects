@@ -1905,3 +1905,64 @@ test("two rate-limited Telegram requests each get an addressed status; only the 
     assert.equal(f.calls.length,submittedCalls);
   } finally {f.cleanup();}
 });
+
+test("delegated worker result returns to Telegram after its own child notices and follow-ups join the turn", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Research"));
+    const marker = f.calls.find(c => c[0] === "spawn")[1].input[1];
+    const token = marker.text.match(/route:([^\]]+)/)[1];
+    const threadScope={kind:"thread"};
+    f.setEvents([
+      {seq:1,type:"client/turn/requested",scope:threadScope,data:{requestId:"original",originPluginId:"telegram-projects",input:[marker]}},
+      {seq:2,type:"turn/input/accepted",scope:{kind:"turn",turnId:"parent-turn"},data:{clientRequestId:"original"}},
+    ]);
+    await f.bridge.observe();
+    const child={...f.thread,id:"child",parentThreadId:"thr_one"};
+    f.sdk.threads.get=async ({threadId}:any)=>threadId==="child"?child:f.thread;
+    f.sdk.threads.events.list=async(q:any)=>q.threadId === "thr_one" ? [
+      {seq:1,type:"client/turn/requested",data:{requestId:"original",originPluginId:"telegram-projects",input:[marker]}}
+    ] : [];
+    const base={parentThreadId:"thr_one",threadId:"child",routeToken:token};
+    await f.bridge.sendDelegated({...base,text:"Research",deliveryId:"work-1"});
+    await f.bridge.sendDelegated({...base,text:"Addition A",deliveryId:"work-2"});
+    await f.bridge.sendDelegated({...base,text:"Addition B",deliveryId:"work-3"});
+    const sends=f.calls.filter(c=>c[0]==="send" && c[1].threadId==="child");
+    assert.equal(sends.length,3);
+    const m=(i:number)=>sends[i][1].input[1];
+    const grandchildNotice=(seq:number,id:string)=>({seq,type:"client/turn/requested",scope:threadScope,data:{requestId:id,
+      initiator:"system",systemMessageKind:"child-completed",senderThreadId:null,
+      systemMessageSubject:{kind:"thread",threadId:"helper-"+id,threadName:"Helper",outcomes:[{threadId:"helper-"+id,turnId:"h",status:"completed"}]}}});
+    f.sdk.threads.list=async()=>[child];
+    const t7={kind:"turn",turnId:"t7"};
+    const childEvents=[
+      {seq:1,type:"client/turn/requested",scope:threadScope,data:{requestId:"work",originPluginId:"telegram-projects",input:[m(0)]}},
+      {seq:2,type:"turn/input/accepted",scope:t7,data:{clientRequestId:"work"}},
+      grandchildNotice(3,"g1"),{seq:4,type:"turn/input/accepted",scope:t7,data:{clientRequestId:"g1"}},
+      grandchildNotice(5,"g2"),{seq:6,type:"turn/input/accepted",scope:t7,data:{clientRequestId:"g2"}},
+      {seq:7,type:"client/turn/requested",scope:threadScope,data:{requestId:"tell",initiator:"agent",senderThreadId:"thr_one",input:[{type:"text",text:"owner answered"}]}},
+      {seq:8,type:"turn/input/accepted",scope:t7,data:{clientRequestId:"tell"}},
+      {seq:9,type:"turn/completed",scope:t7,data:{status:"completed"}},
+      {seq:10,type:"client/turn/requested",scope:threadScope,data:{requestId:"add-a",originPluginId:"telegram-projects",input:[m(1)]}},
+      {seq:11,type:"turn/input/accepted",scope:{kind:"turn",turnId:"t25"},data:{clientRequestId:"add-a"}},
+      {seq:12,type:"turn/completed",scope:{kind:"turn",turnId:"t25"},data:{status:"completed"}},
+    ];
+    f.sdk.threads.events.list=async (q:any)=>(q.threadId==="child"?childEvents:[]).filter(e=>e.seq>Number(q.afterSeq??0));
+    await f.bridge.observe(); await f.bridge.observe(); await f.bridge.observe();
+    const reports = f.calls.filter(c => c[0] === "send" && c[1].threadId === "thr_one" && c[1].input[0].text.includes("конкретный ход"));
+    assert.deepEqual(reports.map(r => r[1].input[0].text.match(/ход (\S+)/)[1]).sort(), ["t25","t7"]);
+    assert.ok(reports.every(r => !r[1].input[0].text.includes("несколько отдельных сообщений")));
+    const receipt = reports.find(r => r[1].input[0].text.includes("ход t7"))[1].input[1];
+    const scope = {kind:"turn",turnId:"receipt-turn"};
+    const parentEvents = [
+      {seq:3,type:"client/turn/requested",scope:threadScope,data:{requestId:"receipt",originPluginId:"telegram-projects",input:[receipt]}},
+      {seq:4,type:"turn/input/accepted",scope,data:{clientRequestId:"receipt"}},
+      {seq:5,type:"item/completed",scope,data:{item:{type:"agentMessage",text:"WORKER-T7-RESULT"}}},
+      {seq:6,type:"turn/completed",scope,data:{status:"completed"}},
+    ];
+    f.sdk.threads.events.list=async(q:any)=>(q.threadId==="child"?childEvents:parentEvents).filter(e=>e.seq>Number(q.afterSeq??0));
+    await f.bridge.observe(); await f.bridge.flush();
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter(x=>x.text?.includes("WORKER-T7-RESULT")).length,1);
+  } finally {f.cleanup();}
+});
