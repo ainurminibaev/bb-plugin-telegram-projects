@@ -1570,7 +1570,9 @@ export default async function plugin(bb: BbPluginApi) {
             if (owner && bot) {
               try {
                 await processGroupInputs(store,bb.sdk,owner,bot,
-                  chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal);
+                  chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal,
+                  voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
+                    cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined));
               } catch (error) { ingressError = safeError(error); }
             }
           } else {

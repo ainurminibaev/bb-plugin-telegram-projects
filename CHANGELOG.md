@@ -1,3 +1,7 @@
+# 0.9.1-personal.19
+
+- Accept authorized voice corrections in group topics and preserve the target Telegram message of text and voice replies. Use the configured transcription service before dispatch.
+
 # 0.9.1-personal.18
 
 - Allow selected Telegram participants to invoke a dedicated group thread. Optionally collect recent text in one topic without starting the model until addressed. Verify group visibility before enabling context.

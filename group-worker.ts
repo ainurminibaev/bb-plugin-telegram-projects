@@ -38,7 +38,8 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
 
 // Called serially by the chat service. Never retry a send with an unknown outcome.
 export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
-  owner:number, botId:number, transport:(chatId:number)=>Telegram, signal:AbortSignal) {
+  owner:number, botId:number, transport:(chatId:number)=>Telegram, signal:AbortSignal,
+  transcribe?:(voice:NonNullable<GroupInput["voice"]>)=>Promise<string>) {
   const routes=new ReplyRoutes(store);
   const pending=store.list<Job>(`group:in:${botId}:`);
   pending.sort((a,b)=>a.value.route.updateId-b.value.route.updateId);
@@ -65,6 +66,20 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     };
     if (!allowed()) {finish("revoked");continue;}
     const dest={kind:"telegram" as const,chatId:r.chatId,topicId:r.topicId,updateId:r.updateId};
+    if (job.state==="pending" && r.voice) {
+      try {
+        const transcript = (await transcribe?.(r.voice))?.trim();
+        if (!transcript) throw Error("voice_unavailable");
+        r.text += "\nГолосовое обращение: " + transcript;
+        delete r.voice;
+      } catch {
+        if (signal.aborted) return;
+        job.answer = "Голосовое не удалось распознать. Пришлите правки текстом в ответ на исходное сообщение.";
+        job.state = "ready";
+      }
+      store.put(key,job);
+      if (!allowed()) {finish("revoked");continue;}
+    }
     if (job.state==="pending") {
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
       if (!allowed()) continue;

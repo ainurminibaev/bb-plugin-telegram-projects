@@ -23,7 +23,7 @@ export function canInvokeGroup(policy: GroupTopicPolicy, owner: number, sender: 
 type TopicLine = {id:number; sender:number; name:string; date:number; replyTo?:number; text:string};
 
 export type Ingress =
-  | {kind: "group"; chatId: number; topicId: number; senderId: number; threadId: string; messageId: number; updateId: number; text: string}
+  | {kind: "group"; chatId: number; topicId: number; senderId: number; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
   | { kind: "tasks"; topicId: number }
   | { kind: "pair"; userId: number }
@@ -48,8 +48,10 @@ export function routeUpdate(
         !group.threadId || !Number.isSafeInteger(from?.id) || from.id <= 0 ||
         from.is_bot || m.sender_chat || !canInvokeGroup(group, owner, from.id))
       return {kind: "ignore"};
-    const text = m.text ?? m.caption;
-    if (typeof text !== "string" || !text.trim()) return {kind: "ignore"};
+    const text = m.text ?? m.caption ?? "";
+    const v = m.voice;
+    const voice = v?.file_id ? {fileId:v.file_id, mime:v.mime_type ?? "audio/ogg", size:v.file_size ?? 0, duration:v.duration ?? 0} : undefined;
+    if (typeof text !== "string" || (!text.trim() && !voice)) return {kind: "ignore"};
     const entities = m.entities ?? m.caption_entities ?? [];
     const username = "@" + group.botUsername.toLowerCase();
     const addressed = m.reply_to_message?.from?.id === group.botId || entities.some((e: any) => {
@@ -59,8 +61,15 @@ export function routeUpdate(
         (e.type === "bot_command" && value.split("@")[1] === username.slice(1));
     });
     if (group.requireMention && !addressed) return {kind: "ignore"};
+    const reply = m.reply_to_message;
+    const sameTopic = reply?.chat?.id === group.chatId && (reply.message_thread_id ?? 0) === topicId;
+    const target = sameTopic && Number.isSafeInteger(reply.message_id) ? {
+      messageId:reply.message_id, fileName:reply.document?.file_name,
+      excerpt:String(reply.text ?? reply.caption ?? "").slice(0,600)
+    } : undefined;
+    const prompt = target ? "Ответ на сообщение в этой теме: " + JSON.stringify(target) + "\n" + text : text;
     return {kind: "group", chatId: group.chatId, topicId, senderId: from.id,
-      threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text};
+      threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice})};
   }
   if (!m || m.chat?.type !== "private" || from?.id !== m.chat?.id)
     return { kind: "ignore", callbackId };
@@ -158,7 +167,7 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     const route = routeUpdate(update, owner, undefined, policy);
     if (policy.includeTopicContext) {
       const sender = message.from;
-      const body = message.text ?? message.caption;
+      const body = message.text ?? message.caption ?? (route.kind === "group" && route.voice ? "[Голосовое обращение]" : undefined);
       if (!sender || sender.is_bot || message.sender_chat || !Number.isSafeInteger(sender.id) ||
           sender.id <= 0 || typeof body !== "string" || !Number.isSafeInteger(message.date)) return;
       const key = `group:context:${chatId}:${topicId}`;

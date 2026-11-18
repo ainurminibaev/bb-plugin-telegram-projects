@@ -101,3 +101,28 @@ test("topic context is passive, scoped, editable and usable only by selected cal
   assert.equal(rows.has("group:context:-1001:3"),false);
   assert.equal(post(45,9,"дальше без контекста"),false);
 });
+
+test("only an authorized voice reply is transcribed and queued with the chosen Telegram message",async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v);},
+  del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
+  list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,value])=>({key,value:value as T}))};
+ const chat={id:-111,type:"supergroup"};
+ store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
+  ownerOnly:true,allowedSenderIds:[8],requireMention:true,includeTopicContext:true,ownerId:7});
+ const reply={message_id:12,message_thread_id:3,from:{id:5},chat,document:{file_name:"first.pdf"}};
+ function voice(id:number,user:number,target?:typeof reply) {
+  return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:3,
+   from:{id:user},reply_to_message:target,voice:{file_id:"audio",duration:3,file_size:30}}},7,5);
+ }
+ assert.equal(voice(20,9,reply),false);
+ assert.equal(voice(21,8),false);
+ assert.ok(voice(22,8,reply));
+ let calls=0;const sent:any[]=[];
+ const sdk={threads:{events:{list:async()=>[]},send:async(q:any)=>{sent.push(q);}}};
+ for(let i=0;i<2;i++)await processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},
+  new AbortController().signal,async v=>{assert.equal(v.fileId,"audio");calls++;return "убери третий пункт";});
+ assert.equal(calls,1);assert.equal(sent.length,1);assert.equal(sent[0].threadId,"group");
+ assert.match(sent[0].input[0].text,/first.pdf/);assert.match(sent[0].input[0].text,/"messageId":12/);
+ assert.match(sent[0].input[0].text,/убери третий пункт/);
+});
