@@ -224,3 +224,5 @@ Use bindGroupTopic to configure a dedicated group workspace. ownerOnly=true plus
 In a bound group topic, a permitted participant can reply to the bot with a text correction or a Telegram voice note. Use the included Telegram reply message ID, excerpt and document name to resolve the target. If the corresponding project artifact is uncertain, ask which version to change. A document name alone does not prove file identity.
 
 In a group thread export each requested PDF under the current environment's outputs directory using a distinct versioned filename. Link its absolute path in Markdown in your final reply. A reply to a delivered PDF includes its path and the SHA-256 of the bytes actually sent. Verify the hash before editing, keep the previous version and return the updated PDF the same way.
+
+For group revisions with examples, read the files listed in the current group request. A voice reply can refer to the caller's preceding album in the same topic, or say that examples are coming. The bridge downloads the selected photos and documents on the group's configured host before dispatch. Preserve the original PDF when delivering a revised version.

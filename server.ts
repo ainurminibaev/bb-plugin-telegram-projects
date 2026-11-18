@@ -348,8 +348,10 @@ export default async function plugin(bb: BbPluginApi) {
   try { history=openTopicSearch(db); } catch(error) {
     if (!String(error).includes("no such module: fts5")) throw error;
   }
-  history?.prune();
-  const historyTimer=setInterval(()=>history?.prune(),3600_000);
+  const forgetExamples=db.prepare("DELETE FROM state WHERE key GLOB 'group:recent-files:*' AND json_extract(value,'$.expiresAt')<=?");
+  const purgeHistory=()=>{history?.prune();forgetExamples.run(Date.now());};
+  purgeHistory();
+  const historyTimer=setInterval(purgeHistory,3600_000);
   const store: Store = {
     findTopicHistory:history?.find,
     get<T>(key: string) {
@@ -478,6 +480,25 @@ export default async function plugin(bb: BbPluginApi) {
     throw new Error("bot_configuration_unavailable");
   }
   const apiRoot = async () => (await settings.get()).telegramApiRoot;
+  async function receiveLocalFile(incoming:{fileId:string;name:string;size:number},updateId:number,
+    threadId:string,fileSignal:AbortSignal,scope?:string[]) {
+    const c = await settings.get();
+    if (checkedApiRoot(c.telegramApiRoot) === "https://api.telegram.org" ||
+        !c.telegramLocalRoot || !c.telegramInboxRoot)
+      throw Error("attachment_local_api_required");
+    const thread = await bb.sdk.threads.get({threadId});
+    if (!thread.environmentId || !c.telegramFileHostId) throw Error("attachment_wrong_host");
+    const env = await bb.sdk.environments.get({environmentId:thread.environmentId});
+    if (env.hostId !== c.telegramFileHostId) throw Error("attachment_wrong_host");
+    if (incoming.size > 2 * 1024 * 1024 * 1024) throw Error("attachment_too_large");
+    const tg = telegram(botToken, fileSignal, 30 * 60 * 1000, ownerId, apiRoot);
+    const file = await tg("getFile", {file_id:incoming.fileId});
+    if (typeof file.file_path !== "string") throw Error("attachment_file_invalid");
+    return saveLocalTelegramFile({sourcePath:file.file_path,
+      localRoot:c.telegramLocalRoot, inboxRoot:scope ? join(c.telegramInboxRoot,...scope) : c.telegramInboxRoot,
+      updateId:updateId, fileId:incoming.fileId, name:incoming.name,
+      expectedBytes:incoming.size || undefined, signal:fileSignal});
+  }
   const localFiles = async () => {
     const c = await settings.get();
     return {localRoot:c.telegramLocalRoot, inboxRoot:c.telegramInboxRoot};
@@ -1093,8 +1114,10 @@ export default async function plugin(bb: BbPluginApi) {
     unbindGroupTopic: ({chatId,topicId})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
       const key=`group:policy:${chatId}:${topicId}`;
-      const removed=!!store.get(key);
-      store.atomic(()=>{for (const row of store.list(historyPrefix(chatId,topicId))) store.del(row.key);store.del(key);store.del(`group:context:${chatId}:${topicId}`);});
+      const previous=store.get<{botId:number}>(key);
+      const removed=!!previous;
+      store.atomic(()=>{if (previous) for (const row of store.list(`group:recent-files:${previous.botId}:${chatId}:${topicId}:`)) store.del(row.key);
+        for (const row of store.list(historyPrefix(chatId,topicId))) store.del(row.key);store.del(key);store.del(`group:context:${chatId}:${topicId}`);});
       return {removed};
     },
     providerHandoffStatus: ({topicId}) => bridge?.providerHandoffStatus(topicId) ?? null,
@@ -1552,23 +1575,7 @@ export default async function plugin(bb: BbPluginApi) {
                     voiceRouterPath ? audio => transcribeWithVoiceRouter(voiceRouterPath, audio, bridgeSignal) : undefined);
                 },
                 receiveAttachment: async (input, threadId) => {
-                  const c = await settings.get();
-                  if (checkedApiRoot(c.telegramApiRoot) === "https://api.telegram.org" ||
-                      !c.telegramLocalRoot || !c.telegramInboxRoot)
-                    throw Error("attachment_local_api_required");
-                  const thread = await bb.sdk.threads.get({threadId});
-                  if (!thread.environmentId || !c.telegramFileHostId) throw Error("attachment_wrong_host");
-                  const env = await bb.sdk.environments.get({environmentId:thread.environmentId});
-                  if (env.hostId !== c.telegramFileHostId) throw Error("attachment_wrong_host");
-                  const incoming = input.attachment!;
-                  if (incoming.size > 2 * 1024 * 1024 * 1024) throw Error("attachment_too_large");
-                  const tg = telegram(botToken, bridgeSignal, 30 * 60 * 1000, ownerId, apiRoot);
-                  const file = await tg("getFile", {file_id:incoming.fileId});
-                  if (typeof file.file_path !== "string") throw Error("attachment_file_invalid");
-                  return saveLocalTelegramFile({sourcePath:file.file_path,
-                    localRoot:c.telegramLocalRoot, inboxRoot:c.telegramInboxRoot,
-                    updateId:input.updateId, fileId:incoming.fileId, name:incoming.name,
-                    expectedBytes:incoming.size || undefined, signal:bridgeSignal});
+                  return receiveLocalFile(input.attachment!,input.updateId,threadId,bridgeSignal);
                 },
               });
               bridge.recover();
@@ -1581,7 +1588,8 @@ export default async function plugin(bb: BbPluginApi) {
                 await processGroupInputs(store,bb.sdk,owner,bot,
                   chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
-                    cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined),cfg.telegramFileHostId);
+                    cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined),cfg.telegramFileHostId,
+                  (file,r)=>receiveLocalFile(file,r.updateId,r.threadId,signal,["groups",String(bot),String(r.chatId),String(r.topicId),String(r.senderId)]));
               } catch (error) { ingressError = safeError(error); }
             }
           } else {

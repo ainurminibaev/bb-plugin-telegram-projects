@@ -24,8 +24,26 @@ export function canInvokeGroup(policy: GroupTopicPolicy, owner: number, sender: 
 
 type TopicLine = {id:number; sender:number; name:string; date:number; replyTo?:number; text:string};
 
+export function promisesExamples(text:string) {
+  return /(?:сейчас|счас|щас|ещ[её]|потом|следом|тебе|я)?\s*(?:пришлю|скину|отправлю|прикреплю|перешлю|подожди|жди).{0,60}(?:пример|образец|фото|файл|картин|скрин|референс)/iu.test(text);
+}
+
+export function refersToExamples(text:string) {
+  return /(?:^|[^\p{L}])(?:использу[йе]|возьми|прочита[йе]|посмотри|учти|на основе|из|по|как|эти|этом|этой|мо[ий]|присланн|скинул|отправил).{0,40}(?:пример|образц|фото|файл|картин|скрин|референс)|(?:пример|образц|фото|файл|картин|скрин|референс).{0,25}(?:выше|прислал|скинул|отправил)/iu.test(text);
+}
+
+export type GroupExample = {fileId:string; name:string; size:number; messageId:number; album?:string};
+
+function groupExample(message:any):GroupExample|undefined {
+  const photo=Array.isArray(message?.photo) ? message.photo.at(-1) : undefined;
+  const file=message?.document ?? photo;
+  if (!file?.file_id || !Number.isSafeInteger(message.message_id)) return;
+  return {fileId:file.file_id, name:file.file_name ?? `photo-${message.message_id}.jpg`,
+    size:file.file_size ?? 0, messageId:message.message_id, ...(message.media_group_id && {album:String(message.media_group_id)})};
+}
+
 export type Ingress =
-  | {kind: "group"; chatId: number; topicId: number; senderId: number; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]; searchBefore?:number}
+  | {kind: "group"; chatId: number; topicId: number; senderId: number; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
   | { kind: "tasks"; topicId: number }
   | { kind: "pair"; userId: number }
@@ -53,10 +71,10 @@ export function routeUpdate(
     const text = m.text ?? m.caption ?? "";
     const v = m.voice;
     const voice = v?.file_id ? {fileId:v.file_id, mime:v.mime_type ?? "audio/ogg", size:v.file_size ?? 0, duration:v.duration ?? 0} : undefined;
-    if (typeof text !== "string" || (!text.trim() && !voice)) return {kind: "ignore"};
+    if (typeof text !== "string" || (!text.trim() && !voice && !groupExample(m))) return {kind: "ignore"};
     const entities = m.entities ?? m.caption_entities ?? [];
     const username = "@" + group.botUsername.toLowerCase();
-    const addressed = m.reply_to_message?.from?.id === group.botId || entities.some((e: any) => {
+    const addressed = (m.reply_to_message?.from?.id === group.botId && (!topicId || m.reply_to_message.message_id!==topicId)) || entities.some((e: any) => {
       const value = text.slice(e.offset, e.offset + e.length).toLowerCase();
       return (e.type === "mention" && value === username) ||
         (e.type === "text_mention" && e.user?.id === group.botId) ||
@@ -69,9 +87,11 @@ export function routeUpdate(
       messageId:reply.message_id, fileName:reply.document?.file_name,
       excerpt:String(reply.text ?? reply.caption ?? "").slice(0,600)
     } : undefined;
+    const examples=[groupExample(m), sameTopic && reply?.from?.id===from.id ? groupExample(reply) : undefined]
+      .filter((file):file is GroupExample=>!!file);
     const prompt = target ? "Ответ на сообщение в этой теме: " + JSON.stringify(target) + "\n" + text : text;
     return {kind: "group", chatId: group.chatId, topicId, senderId: from.id,
-      threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice})};
+      threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice}), ...(examples.length && {examples})};
   }
   if (!m || m.chat?.type !== "private" || from?.id !== m.chat?.id)
     return { kind: "ignore", callbackId };
@@ -167,9 +187,64 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       return;
     }
     const route = routeUpdate(update, owner, undefined, policy);
+    if (route.kind==="group" && (route.voice || promisesExamples(message.text ?? message.caption ?? "")))
+      route.waitUntil=Date.now()+90_000;
+    const file=!edit && groupExample(message);
+    const senderFiles=`group:recent-files:${botId}:${chatId}:${topicId}:${message.from?.id}`;
+    type RecentFiles={revision?:string;files:(GroupExample & {at:number})[]};
+    const remembered=store.get<RecentFiles>(senderFiles);
+    const recent=remembered?.revision===policy.revision ? (remembered?.files??[]).filter(f=>Date.now()-f.at<=120_000) : [];
+    if (route.kind==="group" && !route.examples?.length && recent.length &&
+        (route.voice || refersToExamples(message.text ?? message.caption ?? ""))) {
+      route.precedingExamples=recent.map(({at,...file})=>file);
+    }
+    if (route.kind==="group" && recent.length && route.examples?.some(f=>f.album)) {
+      const selected=route.examples;
+      const albums=new Set(selected.map(f=>f.album).filter(Boolean));
+      const ids=new Set(selected.map(f=>f.messageId));
+      route.examples=[...selected,...recent.filter(f=>f.album && albums.has(f.album) && !ids.has(f.messageId))]
+        .sort((a,b)=>a.messageId-b.messageId);
+    }
+    const done=!edit && typeof message.text==="string" && /^\s*(?:вс[её][,.! ]+)?(?:готово|делай|начинай)[.! ]*$/iu.test(message.text);
+    if ((file || done) && !message.sender_chat && !message.from?.is_bot &&
+        Number.isSafeInteger(message.from?.id) && canInvokeGroup(policy,owner,message.from.id)) {
+      type Waiting = {route:Extract<Ingress,{kind:"group"}>;revision?:string;ownerId:number;state:string};
+      const parent=message.reply_to_message?.message_id;
+      const replyId=parent===topicId ? undefined : parent;
+      const candidates=store.list<Waiting>(`group:in:${botId}:`).filter(({value:j})=>
+        j.state==="pending" && j.ownerId===owner && j.revision===policy.revision &&
+        j.route.threadId===policy.threadId && j.route.chatId===chatId && j.route.topicId===topicId &&
+        j.route.senderId===message.from.id && j.route.messageId<message.message_id &&
+        j.route.waitUntil!==undefined && j.route.waitUntil>=Date.now() &&
+        !store.get<{closed?:boolean}>(`group:examples:${botId}:${j.route.updateId}`)?.closed &&
+        (replyId===undefined || replyId===j.route.messageId));
+      const explicitlyAddressed=replyId!==undefined || !!(message.caption_entities??[]).some((e:any)=>
+        ["mention","text_mention","bot_command"].includes(e.type));
+      if (candidates.length===1 && (!explicitlyAddressed || replyId===candidates[0].value.route.messageId)) {
+        const anchor=candidates[0].value.route;
+        const key=`group:examples:${botId}:${anchor.updateId}`;
+        const bag=store.get<{files:GroupExample[];last:number;closed?:boolean}>(key) ?? {files:[],last:0};
+        if (done) {bag.closed=true;store.put(key,bag);}
+        if (file && !bag.closed && !bag.files.some(f=>f.messageId===file.messageId)) {
+          bag.files.push(file);
+          bag.last=Date.now();
+          store.put(key,bag);
+        }
+        store.put("ingress:offset",update.update_id+1);
+        accepted=true;
+        return;
+      }
+      const standalone=file && !explicitlyAddressed && !message.caption?.trim();
+      if (file && policy.includeTopicContext && (route.kind==="ignore" || standalone)) {
+        store.put(senderFiles,{revision:policy.revision,expiresAt:Date.now()+120_000,files:[...recent.filter(f=>f.messageId!==file.messageId),{...file,at:Date.now()}].slice(-10)});
+        store.put("ingress:offset",update.update_id+1);
+        accepted=true;
+        return;
+      }
+    }
     if (policy.includeTopicContext) {
       const sender = message.from;
-      const body = message.text ?? message.caption ?? (route.kind === "group" && route.voice ? "[Голосовое обращение]" : undefined);
+      const body = message.text ?? message.caption ?? (route.kind === "group" ? (route.voice ? "[Голосовое обращение]" : route.examples?.[0]?.name) : undefined);
       if (!sender || sender.is_bot || message.sender_chat || !Number.isSafeInteger(sender.id) ||
           sender.id <= 0 || typeof body !== "string" || !Number.isSafeInteger(message.date)) return;
       const key = `group:context:${chatId}:${topicId}`;
@@ -210,6 +285,7 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
         route.text += "\nОтправленная версия PDF: "+JSON.stringify({path:pdf.path,sha256:pdf.sha256})+
           ". Сверь SHA-256 исходника перед правками и сохрани новую версию отдельным файлом.";
     }
+    store.del(senderFiles);
     const key = `group:in:${botId}:${route.updateId}`;
     if (!store.get(key) && !store.get(`group:receipt:${botId}:${route.updateId}`)) store.put(key, { route, ownerId: owner, revision: policy.revision, state: "pending" });
     const nextOffset = Math.max(store.get<number>("ingress:offset") ?? 0, route.updateId + 1);

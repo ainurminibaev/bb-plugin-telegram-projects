@@ -4,7 +4,9 @@ import {localArtifacts} from "./telegram-ux";
 import {readGroupPdf} from "./group-pdf";
 import {splitText} from "./chat";
 import {ReplyRoutes} from "./reply-routing";
-import {canInvokeGroup, type GroupTopicPolicy, type Ingress} from "./ingress";
+import {refersToExamples, promisesExamples, canInvokeGroup, type GroupTopicPolicy, type Ingress} from "./ingress";
+import type {SavedTelegramFile} from "./telegram-files";
+import type {GroupExample} from "./ingress";
 import type {Store, Telegram} from "./model";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
@@ -34,6 +36,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
         !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
         JSON.stringify(prev.allowedSenderIds??[])===JSON.stringify(policy.allowedSenderIds??[]) &&
         prev.ownerId===policy.ownerId && prev.botUsername===policy.botUsername) return;
+    if (prev) for (const row of store.list(`group:recent-files:${prev.botId}:${chatId}:${topicId}:`)) store.del(row.key);
     for (const row of store.list(historyPrefix(chatId,topicId))) store.del(row.key);
     store.del(`group:context:${chatId}:${topicId}`);
     store.put("group:thread:"+threadId,key);
@@ -44,7 +47,8 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
 // Called serially by the chat service. Never retry a send with an unknown outcome.
 export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   owner:number, botId:number, transport:(chatId:number)=>Telegram, signal:AbortSignal,
-  transcribe?:(voice:NonNullable<GroupInput["voice"]>)=>Promise<string>, fileHostId?:string) {
+  transcribe?:(voice:NonNullable<GroupInput["voice"]>)=>Promise<string>, fileHostId?:string,
+  receiveExample?:(example:GroupExample,route:GroupInput)=>Promise<SavedTelegramFile>) {
   const routes=new ReplyRoutes(store);
   const pending=store.list<Job>(`group:in:${botId}:`);
   pending.sort((a,b)=>a.value.route.updateId-b.value.route.updateId);
@@ -57,6 +61,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         // An interrupted Telegram send requires the original payload for reconciliation.
         store.put(receiptKey,state==="sending"?job:{state,chatId:r.chatId,topicId:r.topicId,
           messageId:r.messageId,threadId:r.threadId,turnId:job.turnId,sentId});
+        store.del(`group:examples:${botId}:${r.updateId}`);
         store.del(key);
       });
     };
@@ -81,6 +86,15 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           r.text=topicPassages(matches,r.chatId)+r.text;
         }
         r.text += "\nГолосовое обращение: " + transcript;
+        const mentionsFiles=refersToExamples(transcript);
+        if (!mentionsFiles) delete r.precedingExamples;
+        if (!promisesExamples(transcript)) {
+          if (mentionsFiles && !r.precedingExamples?.length && !r.examples?.length) {
+            r.waitUntil=Date.now()+4_000;
+          } else {
+            delete r.waitUntil;
+          }
+        }
         delete r.voice;
       } catch {
         if (signal.aborted) return;
@@ -89,6 +103,45 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       }
       store.put(key,job);
       if (!allowed()) {finish("revoked");continue;}
+    }
+    if (job.state==="pending") {
+      if (r.precedingExamples && r.waitUntil===undefined) {
+        const sets=new Set(r.precedingExamples.map(f=>f.album ? "album:"+f.album : "file:"+f.messageId));
+        if (sets.size===1) r.examples=r.precedingExamples;
+        else {
+          job.answer="Вижу несколько наборов примеров. Ответьте на нужный файл или фотоальбом и отметьте бота.";
+          job.state="ready";
+        }
+      }
+      delete r.precedingExamples;
+      const bag=store.get<{files:GroupExample[];last:number;closed?:boolean}>(`group:examples:${botId}:${r.updateId}`);
+      if (r.waitUntil!==undefined && Date.now()<r.waitUntil && !bag?.closed &&
+          (!bag || Date.now()<bag.last+4_000)) continue;
+      if (bag?.files.length && r.waitUntil!==undefined) {
+        r.examples=[...(r.examples??[]),...bag.files];
+      } else if (r.waitUntil!==undefined && !r.examples?.length) {
+        job.answer="Пока не вижу примеров для этой правки. Ответьте на это сообщение с материалами и правками.";
+        job.state="ready";
+      }
+      if (r.waitUntil!==undefined) {delete r.waitUntil;store.put(key,job);}
+    }
+    if (job.state==="pending" && r.examples?.length) {
+      try {
+        if (!receiveExample) throw Error("missing_receiver");
+        const files=[];
+        for (const example of r.examples) {
+          if (!allowed()) break;
+          files.push(await receiveExample(example,r));
+        }
+        if (!allowed()) {finish("revoked");continue;}
+        r.text += "\nМатериалы к этому поручению. Прочитай файлы по указанным путям:\n"+JSON.stringify(files);
+        delete r.examples;
+      } catch {
+        if (signal.aborted) return;
+        job.answer="Не удалось получить все файлы с примерами. Ответьте на исходное сообщение и приложите материалы ещё раз.";
+        job.state="ready";
+      }
+      store.put(key,job);
     }
     if (job.state==="pending") {
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});

@@ -1,3 +1,7 @@
+# 0.9.1-personal.22
+
+- Collect example photos and documents for an addressed group request, including voice replies to a PDF. Match the sender, topic and pending request. Reuse the local Bot API file receiver on the bound host.
+
 # 0.9.1-personal.21
 
 - Optionally search up to 30 days of received text in the addressed group topic. Include up to five matched passages with links for authorized text and transcribed voice requests.

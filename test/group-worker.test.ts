@@ -1,3 +1,7 @@
+import {mkdtemp, mkdir, readFile, rm, writeFile} from "node:fs/promises";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
+import {saveLocalTelegramFile} from "../telegram-files";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {acceptGroupUpdate} from "../ingress";
@@ -125,4 +129,90 @@ test("only an authorized voice reply is transcribed and queued with the chosen T
  assert.equal(calls,1);assert.equal(sent.length,1);assert.equal(sent[0].threadId,"group");
  assert.match(sent[0].input[0].text,/first.pdf/);assert.match(sent[0].input[0].text,/"messageId":12/);
  assert.match(sent[0].input[0].text,/убери третий пункт/);
+});
+
+for (const transcript of ["Сейчас скину примеры","Возьми эти фото для обложки"]) test(`voice with arriving examples: ${transcript}`,async()=>{
+ const rows=new Map<string,unknown>();
+ const store={get:<T>(k:string)=>structuredClone(rows.get(k)) as T,put:(k:string,v:unknown)=>{rows.set(k,structuredClone(v));},
+  del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
+  list:<T>(prefix:string)=>Array.from(rows).filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:structuredClone(v) as T}))};
+ const chat={id:-111,type:"supergroup"};
+ store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
+  ownerOnly:true,allowedSenderIds:[8],requireMention:true,includeTopicContext:true});
+ function post(id:number,user:number,m:object,topic=3){
+  return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:topic,from:{id:user},...m}},7,5);
+ }
+ const calls:string[]=[];const sent:string[]=[];
+ const sdk={threads:{events:{list:async()=>[]},send:async(q:any)=>{sent.push(q.input[0].text);}}};
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},
+  new AbortController().signal,async()=>transcript,"host",async(f)=>{
+   calls.push(f.fileId);return {path:"/inbox/"+f.name,name:f.name,bytes:12,sha256:"hash"};
+  });
+ post(10,8,{voice:{file_id:"voice"},reply_to_message:{message_id:9,chat,message_thread_id:3,from:{id:5}}});
+ const photo=(id:string)=>({photo:[{file_id:id}],media_group_id:"sample"});
+ post(11,8,photo("one")); post(12,7,photo("other sender"));post(13,8,photo("other topic"),4);
+ await tick();assert.deepEqual(sent,[]);
+ post(14,8,photo("two"));post(15,8,{text:"Всё, делай!"});await tick();await tick();
+ assert.deepEqual(calls,["one","two"]);assert.equal(sent.length,1);
+ assert.ok(sent[0].includes(transcript));assert.match(sent[0],/photo-14.jpg/);
+});
+
+for (const requireMention of [true,false]) test(`voice correction selects its sender’s earlier album (requireMention=${requireMention})`,async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>structuredClone(rows.get(k)) as T,put:(k:string,v:unknown)=>{rows.set(k,structuredClone(v));},
+  del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
+  list:<T>(prefix:string)=>Array.from(rows).filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:structuredClone(v) as T}))};
+ const chat={id:-111,type:"supergroup"};
+ store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
+  ownerOnly:true,allowedSenderIds:[8],requireMention,includeTopicContext:true});
+ function post(id:number,user:number,m:object){
+  return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:3,from:{id:user},...m}},7,5);
+ }
+ post(11,8,{photo:[{file_id:"p1"}],media_group_id:"a"});
+ post(12,7,{photo:[{file_id:"private"}],media_group_id:"a"});
+ post(13,8,{photo:[{file_id:"p2"}],media_group_id:"a"});
+ post(14,8,{voice:{file_id:"voice"},reply_to_message:{message_id:7,chat,message_thread_id:3,from:{id:5},document:{file_name:"one.pdf"}}});
+ const files:string[]=[],turns:string[]=[];
+ const directory=await mkdtemp(join(tmpdir(),"group-example-"));
+ try {
+  const source=join(directory,"api");
+  await mkdir(source);
+  await writeFile(join(source,"p1"),"first example");
+  await writeFile(join(source,"p2"),"second example");
+  const sdk={threads:{events:{list:async()=>[]},send:async(q:any)=>{
+   const text=q.input[0].text;
+   const saved=JSON.parse(text.split("\n").at(-1)) as {path:string}[];
+   assert.deepEqual(await Promise.all(saved.map(f=>readFile(f.path,"utf8"))),["first example","second example"]);
+   turns.push(text);
+  }}};
+  const signal=new AbortController().signal;
+  await processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},signal,
+   async()=>"Используй эти примеры для обложки","host",async(f,r)=>{
+    files.push(f.fileId);return saveLocalTelegramFile({sourcePath:join(source,f.fileId),localRoot:source,
+     inboxRoot:join(directory,"inbox"),updateId:r.updateId,fileId:f.fileId,name:f.name,signal});
+   });
+  assert.deepEqual(files,["p1","p2"]);assert.equal(turns.length,1);assert.match(turns[0],/one.pdf/);
+ } finally {await rm(directory,{recursive:true,force:true});}
+});
+
+test("parallel requests accept explicit replies and skip closed collections",()=>{
+ const rows=new Map<string,unknown>();
+ const store={get:<T>(k:string)=>structuredClone(rows.get(k)) as T,put:(k:string,v:unknown)=>{rows.set(k,structuredClone(v));},
+  del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
+  list:<T>(prefix:string)=>Array.from(rows).filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:structuredClone(v) as T}))};
+ const chat={id:-111,type:"supergroup"};
+ store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
+  ownerOnly:true,requireMention:true,includeTopicContext:true});
+ const post=(id:number,body:object)=>acceptGroupUpdate(store,{update_id:id,message:{chat,date:50,message_id:id,message_thread_id:3,from:{id:7},...body}},7,5);
+ const request={text:"@bot сейчас скину примеры",entities:[{type:"mention",offset:0,length:4}]};
+ post(20,request);post(21,request);
+ const photo=(file_id:string)=>({photo:[{file_id}]});
+ post(22,photo("ambiguous"));
+ assert.equal(store.list("group:examples:").length,0);
+ const reply={message_id:21,message_thread_id:3,chat,from:{id:7}};
+ post(23,{...photo("second"),reply_to_message:reply});
+ post(24,{text:"Всё, делай",reply_to_message:reply});
+ post(25,photo("first"));post(25,photo("first"));
+ const bag=(id:number)=>store.get<{files:{fileId:string}[]}>(`group:examples:5:${id}`).files.map(f=>f.fileId);
+ assert.deepEqual(bag(20),["first"]);assert.deepEqual(bag(21),["second"]);
 });
