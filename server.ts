@@ -1516,6 +1516,7 @@ export default async function plugin(bb: BbPluginApi) {
                 lifetime.signal,
               ]);
               bridge = new ChatBridge({
+                collectMs: 4000,
                 store,
                 sdk: bb.sdk,
                 tg: telegram(botToken, bridgeSignal, 15_000, ownerId, apiRoot),

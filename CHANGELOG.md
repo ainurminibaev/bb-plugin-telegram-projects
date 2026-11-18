@@ -1,3 +1,9 @@
+# 0.9.1-personal.17
+
+- Collect nearby private Telegram messages into one ordered BB request after four seconds of quiet. Preserve forwarded text, files, photos, transcribed voice and reply excerpts. An explicit request to wait for material extends the window to 90 seconds.
+- Preserve a multipart request across a restart during attachment or voice preparation.
+- Tie confirmed stop actions to the observed turn. Suppress delayed results and unsent queued answers belonging to the cancelled Telegram request while allowing subsequent tasks to complete.
+
 # 0.9.1-personal.16
 
 - On stock BB, route delegated results using the child's own run events. A worker can handle successive Telegram requests while each result keeps its original destination.

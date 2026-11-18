@@ -79,6 +79,12 @@ export function routeUpdate(
     return { kind: "tasks", topicId };
   if (!callback && !text && !m.voice && !m.audio && !m.document && !m.photo && !m.video)
     return { kind: "ignore" };
+  const replied = m.reply_to_message;
+  const sameTopic = replied?.chat?.id === m.chat.id && (replied.message_thread_id ?? 0) === topicId;
+  const replyExcerpt = !callback && sameTopic
+    ? (m.quote?.text || replied.text || replied.caption || replied.document?.file_name || replied.audio?.file_name || "")
+      .slice(0, 2000)
+    : "";
   const v = m.voice && (m.voice.file_size ?? 0) <= 15_000_000 &&
     (m.voice.duration ?? 0) <= 600 ? m.voice : undefined;
   const photo = Array.isArray(m.photo) ? m.photo.at(-1) : undefined;
@@ -95,6 +101,8 @@ export function routeUpdate(
       topicId,
       messageId: m.message_id,
       text: callback ? undefined : text?.slice(0, 16000),
+      ...(Number.isInteger(m.date) && {sentAt:m.date}),
+      ...((m.forward_origin || m.forward_date) && {forwarded:true}),
       callback,
       attachment: !callback && attached ? {
         fileId: attached.file_id,
@@ -104,6 +112,7 @@ export function routeUpdate(
         kind,
       } : undefined,
       replyTo: m.reply_to_message?.message_id,
+      ...(replyExcerpt && {replyExcerpt}),
       voice: v
         ? {
             fileId: v.file_id,

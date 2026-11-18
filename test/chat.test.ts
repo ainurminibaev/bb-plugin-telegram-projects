@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { ChatBridge, inputSchema, splitText, type ChatInput } from "../chat";
 import { TelegramFailure, type Store } from "../model";
 const OWNER_ID = 259034221;
-function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{path: string; name: string; bytes: number; sha256: string}>, transcribe?: () => Promise<string>) {
+function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{path: string; name: string; bytes: number; sha256: string}>, transcribe?: () => Promise<string>, collectMs = 0) {
   const data = new Map<string, any>();
   const calls: any[] = [];
   const sent: any[] = [];
@@ -127,6 +127,7 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
       return { message_id: ++message } as any;
     },
     spool: dir,
+    collectMs,
     owner: () => OWNER_ID,
     baseUrl: "https://bb.example",
     signal: controller.signal,
@@ -1091,6 +1092,50 @@ test("late child acknowledgement is silent until it actually performs work", asy
   assert.equal(f.sent.filter(x=>x.text==="FOLLOW-UP-RESULT").length,1);
  }finally{f.cleanup();}
 });
+test("confirmed stop suppresses a delayed child result only for the stopped Telegram request", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Research"));
+    f.acceptTelegramTurn("parent");
+    f.acceptTelegramTurn("work", "child");
+    await f.bridge.handle(f.input("/stop"));
+    await f.press("stop");
+    const routes = new ReplyRoutes(f.store);
+    routes.complete("child", "work", "completed");
+    routes.inheritOutcomes("thr_one", "notice", [{threadId:"child", turnId:"work", status:"completed"}]);
+    routes.accept("thr_one", "late", "notice");
+    routes.record("thr_one", "next", {kind:"telegram", chatId:OWNER_ID, topicId:100, updateId:42});
+    routes.accept("thr_one", "fresh", "next");
+    const events = ["late", "fresh"].flatMap((turnId, i) => [
+      {seq:2*i+1,type:"item/completed",scope:{kind:"turn",turnId},data:{item:{type:"agentMessage",text:turnId}}},
+      {seq:2*i+2,type:"turn/completed",scope:{kind:"turn",turnId},data:{status:"completed"}},
+    ]);
+    f.setEvents(events);
+    await f.bridge.observe();
+    await f.bridge.flush();
+    assert.deepEqual(f.sent.filter(m => ["late","fresh"].includes(m.text)).map(m => m.text), ["fresh"]);
+  } finally { f.cleanup(); }
+});
+
+test("stop before flush suppresses a queued result", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Research"));
+    f.acceptTelegramTurn("parent");
+    const scope = {kind:"turn", turnId:"parent"};
+    f.setEvents([
+      {seq:1,type:"item/completed",scope,data:{item:{type:"agentMessage",text:"queued final"}}},
+      {seq:2,type:"turn/completed",scope,data:{status:"completed"}},
+    ]);
+    await f.bridge.observe();
+    assert.ok(f.store.list("chat:out:event:").some(row => row.value.text === "queued final"));
+    await f.bridge.handle(f.input("/stop"));
+    await f.press("stop");
+    await f.bridge.flush();
+    assert.equal(f.sent.filter(row => row.text === "queued final").length, 0);
+  } finally { f.cleanup(); }
+});
+
 test("delegated spawn uses native project/environment and keeps one worker on RPC replay", async () => {
   const f=fixture();
   try {
@@ -1691,5 +1736,114 @@ test("private project picker rejects a former group project even through a previ
     await f.bridge.handle(f.input("вопрос из личного чата",100));
     assert.equal(f.store.get("chat:binding:100"),undefined);
     assert.equal(f.calls.length,0);
+  } finally {f.cleanup();}
+});
+
+for (const forwardFirst of [false,true]) test("quiet window bundles calendar request and forward: " + forwardFirst, async () => {
+  const f=fixture(undefined,undefined,4000);
+  try {
+    const parts=forwardFirst ? ["Объявление 24 ноября","Поставь в календарь"] : ["Поставь в календарь","Объявление 24 ноября"];
+    for (const text of parts) {
+      const part={...f.input(text),forwarded:text.startsWith("Объявление")};
+      f.bridge.accept(part);
+      f.bridge.accept(part);
+      await f.bridge.tick();
+      assert.equal(f.calls.length,0);
+    }
+    for (const row of f.store.list<any>("chat:in:")) f.store.put(row.key,{...row.value,at:Date.now()-4100});
+    await f.bridge.tick(); await f.bridge.dispose();
+    const tasks=f.calls.filter(c=>c[0]==="spawn");
+    assert.equal(tasks.length,1);
+    const prompt=tasks[0][1].input[0].text;
+    assert.ok(prompt.includes("[Пересланное сообщение]"));
+    assert.ok(prompt.indexOf(parts[0])<prompt.indexOf(parts[1]));
+  } finally {f.cleanup();}
+});
+
+test("photos, files and recorded comment are prepared before a single agent request", async () => {
+  const f=fixture(async input=>({path:"/inbox/"+input.attachment!.name,name:input.attachment!.name,bytes:8,sha256:"a".repeat(64)}),
+    async()=>"Сравни оба материала",4000);
+  try {
+    await f.bridge.handle(f.input("start"));
+    for (const name of ["photo.jpg","notes.pdf"])
+      f.bridge.accept({...f.input(""),attachment:{fileId:name,name,mime:"application/octet-stream",size:8,kind:name==="photo.jpg"?"photo":"document"}});
+    f.bridge.accept({...f.input(""),voice:{fileId:"v",mime:"audio/ogg",size:10,duration:60}});
+    for (const row of f.store.list<any>("chat:in:")) f.store.put(row.key,{...row.value,at:Date.now()-4100});
+    await f.bridge.tick(); await f.bridge.dispose();
+    const sends=f.calls.filter(c=>c[0]==="send");
+    assert.equal(sends.length,1);
+    assert.match(sends[0][1].input[0].text,/photo\.jpg[\s\S]*notes\.pdf[\s\S]*Сравни оба материала/);
+  } finally {f.cleanup();}
+});
+
+for (const explicit of [false,true]) test("minute-late follow-up joins only after an explicit wait: " + explicit, async () => {
+  const f=fixture(undefined,async()=>"Комментарий к посту",4000);
+  try {
+    await f.bridge.handle(f.input("start"));
+    const first={...f.input(explicit ? "Подожди, сейчас пришлю аудио" : "Ссылка на материал"),sentAt:100};
+    f.bridge.accept(first);
+    const key="chat:in:"+first.updateId;
+    f.store.put(key,{...f.store.get<any>(key),at:Date.now()-65_000});
+    await f.bridge.tick();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(f.calls.filter(c=>c[0]==="send").length,explicit ? 0 : 1);
+    const next={...f.input(""),voice:{fileId:"voice",mime:"audio/ogg",size:20,duration:60},sentAt:160};
+    f.bridge.accept(next);
+    const nextKey="chat:in:"+next.updateId;
+    f.store.put(nextKey,{...f.store.get<any>(nextKey),at:Date.now()-4100});
+    await f.bridge.tick(); await f.bridge.dispose();
+    const sends=f.calls.filter(c=>c[0]==="send");
+    assert.equal(sends.length,explicit ? 1 : 2);
+    assert.ok(sends.every(s=>s[1].threadId==="thr_one"));
+    assert.ok(sends.at(-1)[1].input[0].text.includes("Комментарий к посту"));
+  } finally {f.cleanup();}
+});
+
+test("restart during batched voice preparation keeps both inputs and dispatches once", async () => {
+  let release!: (value:string) => void;
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => {entered=resolve;});
+  const paused = new Promise<string>(resolve => {release=resolve;});
+  const save = async () => ({path:"/inbox/p.jpg",name:"p.jpg",bytes:8,sha256:"a".repeat(64)});
+  const f=fixture(save, async () => {entered(); return paused;}, 4000);
+  const restored=fixture(save, async () => "Проверь фото",4000);
+  try {
+    await f.bridge.handle(f.input("start"));
+    const photo={...f.input(""),attachment:{fileId:"p",name:"p.jpg",kind:"photo" as const,mime:"image/jpeg",size:8}};
+    const voice={...f.input(""),voice:{fileId:"v",duration:60,size:10,mime:"audio/ogg"}};
+    f.bridge.accept(photo);
+    f.bridge.accept(voice);
+    for (const row of f.store.list<any>("chat:in:")) f.store.put(row.key,{...row.value,at:Date.now()-4100});
+    await f.bridge.tick();
+    await started;
+    f.abort(); release("Проверь фото");
+    await f.bridge.dispose();
+    assert.equal(f.calls.filter(c=>c[0]==="send").length,0);
+    for (const [k,v] of f.data) restored.store.put(k,v);
+    restored.bridge.recover();
+    restored.bridge.accept(voice);
+    await restored.bridge.tick(); await restored.bridge.dispose();
+    const tasks=restored.calls.filter(c=>c[0]==="send");
+    assert.equal(tasks.length,1);
+    assert.match(tasks[0][1].input[0].text,/p\.jpg[\s\S]*Проверь фото/);
+    assert.equal(restored.store.list("chat:out:transcript:").length,1);
+    assert.ok(restored.store.list<any>("chat:in:").every(row=>row.value.state==="done" && !row.value.parts));
+  } finally {f.cleanup();restored.cleanup();}
+});
+
+test("later reply carries the selected Telegram quote from its own topic", async () => {
+  const f=fixture();
+  try {
+    const chat={id:OWNER_ID,type:"private"};
+    const msg={message_id:55,chat,from:{id:OWNER_ID},message_thread_id:100,text:"Запомни дату",quote:{text:"24 ноября"},
+      reply_to_message:{message_id:32,chat,message_thread_id:100,text:"Вебинар 24 ноября в 19:30"}};
+    const routed=routeUpdate({update_id:100,message:msg},OWNER_ID);
+    assert.equal(routed.kind,"chat");
+    if (routed.kind!=="chat") throw Error("missing input");
+    await f.bridge.handle(routed.input);
+    const task=f.calls.find(c=>c[0]==="spawn")[1].input[0].text;
+    assert.ok(task.includes("Запомни дату") && task.includes("№ 32") && task.endsWith("24 ноября"));
+    const other=routeUpdate({update_id:101,message:{...msg,message_thread_id:200}},OWNER_ID);
+    assert.ok(other.kind==="chat" && !other.input.replyExcerpt);
   } finally {f.cleanup();}
 });

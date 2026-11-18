@@ -14,6 +14,15 @@ export class ReplyRoutes {
     return a?.kind === "telegram" && b?.kind === "telegram" &&
       a.chatId === b.chatId && a.topicId === b.topicId && a.updateId === b.updateId;
   }
+  private cancellationKey(route: Extract<ReplyRoute, {kind:"telegram"}>) {
+    return "reply:cancelled:" + JSON.stringify([route.chatId, route.topicId, route.updateId]);
+  }
+  cancel(route: Extract<ReplyRoute, {kind:"telegram"}>) {
+    this.store.put(this.cancellationKey(route), true);
+  }
+  cancelled(route?: ReplyRoute) {
+    return route?.kind === "telegram" && this.store.get<boolean>(this.cancellationKey(route)) === true;
+  }
   private requestKey(threadId: string, requestId: string) {
     return "reply:request:" + JSON.stringify([threadId, requestId]);
   }
@@ -32,7 +41,7 @@ export class ReplyRoutes {
     if (!parent || parent.threadId !== parentThreadId || !parent.requestId || parent.route.kind !== "telegram")
       throw Error("unproven_parent_request");
     const accepted = this.store.get<ReplyRoute>(this.requestKey(parentThreadId, parent.requestId));
-    if (!this.sameTask(accepted, parent.route)) throw Error("parent_route_conflict");
+    if (this.cancelled(parent.route) || !this.sameTask(accepted, parent.route)) throw Error("parent_route_conflict");
     return this.ingress(childThreadId, parent.route, parentThreadId);
   }
   assertCurrentDelegation(parentThreadId: string, token: string, currentRequestId: string) {
@@ -64,6 +73,10 @@ export class ReplyRoutes {
       if (value.route.chatId !== chatId || value.route.topicId !== topicId) continue;
       const outcomeKey = "reply:outcome:" + JSON.stringify([value.threadId,value.turnId]);
       const row = this.store.get<{consumedBy:string|null}>(outcomeKey);
+      if (this.cancelled(value.route)) {
+        this.store.del(key);
+        continue;
+      }
       if (!row || row.consumedBy !== null) continue;
       this.store.atomic(() => {
         const reportKey = "reply:child-report:" + JSON.stringify([parent,value.threadId,value.turnId]);
@@ -74,7 +87,7 @@ export class ReplyRoutes {
       });
     }
     return this.store.list<Report & {marker:ReturnType<ReplyRoutes["ingress"]>;state:string; startedAt?:number}>("reply:child-report:" + parentPrefix)
-      .filter(({value}) => value.route.chatId === chatId && value.route.topicId === topicId &&
+      .filter(({value}) => !this.cancelled(value.route) && value.route.chatId === chatId && value.route.topicId === topicId &&
         (value.state === "reserved" || (["submitting","submitted","uncertain"].includes(value.state) &&
           value.startedAt !== undefined && Date.now() - value.startedAt > 60_000)));
   }
@@ -173,6 +186,7 @@ export class ReplyRoutes {
   destination(threadId: string, turnId: string): ReplyRoute | undefined {
     const turn = this.store.get<TurnRoutes>(this.turnKey(threadId, turnId));
     if (!turn || turn.ambiguous || !turn.requestIds.length) return undefined;
-    return this.store.get<ReplyRoute>(this.requestKey(threadId, turn.requestIds[0]));
+    const route = this.store.get<ReplyRoute>(this.requestKey(threadId, turn.requestIds[0]));
+    return this.cancelled(route) ? undefined : route;
   }
 }
