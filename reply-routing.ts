@@ -228,6 +228,9 @@ export class ReplyRoutes {
       return !(aux?.kind === "child-notice" || (aux?.kind === "agent" && delegatedBy && aux.senderThreadId === delegatedBy));
     });
   }
+  routeOf(threadId: string, requestId: string) {
+    return this.store.get<ReplyRoute>(this.requestKey(threadId, requestId));
+  }
   destination(threadId: string, turnId: string): ReplyRoute | undefined {
     const turn = this.store.get<TurnRoutes>(this.turnKey(threadId, turnId));
     if (!turn || turn.ambiguous || !turn.requestIds.length) return undefined;

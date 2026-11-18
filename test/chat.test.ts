@@ -1750,13 +1750,12 @@ for (const forwardFirst of [false,true]) test("quiet window bundles calendar req
       await f.bridge.tick();
       assert.equal(f.calls.length,0);
     }
-    for (const row of f.store.list<any>("chat:in:")) f.store.put(row.key,{...row.value,at:Date.now()-4100});
+    for (const row of f.store.list<any>("chat:in:")) f.store.put(row.key,{...row.value,at:Date.now()-10_100});
     await f.bridge.tick(); await f.bridge.dispose();
     const tasks=f.calls.filter(c=>c[0]==="spawn");
     assert.equal(tasks.length,1);
     const prompt=tasks[0][1].input[0].text;
-    assert.ok(prompt.includes("[Пересланное сообщение]"));
-    assert.ok(prompt.indexOf(parts[0])<prompt.indexOf(parts[1]));
+    assert.match(prompt,/^Пересланное:\nОбъявление 24 ноября\n\nВопрос пользователя:\nПоставь в календарь$/);
   } finally {f.cleanup();}
 });
 
@@ -1964,5 +1963,73 @@ test("delegated worker result returns to Telegram after its own child notices an
     await f.bridge.observe(); await f.bridge.flush();
     await f.bridge.observe(); await f.bridge.flush();
     assert.equal(f.sent.filter(x=>x.text?.includes("WORKER-T7-RESULT")).length,1);
+  } finally {f.cleanup();}
+});
+
+for (const order of ["forward-first","question-first"]) test("forwarded photo post and the owner's question typed 5 s later form one task: " + order, async () => {
+  const f=fixture(async input=>({path:"/inbox/"+input.attachment!.name,name:input.attachment!.name,bytes:8,sha256:"a".repeat(64)}),undefined,4000);
+  try {
+    await f.bridge.handle(f.input("start"));
+    const forward={...f.input("Новость канала о бета-версии"),forwarded:true,sentAt:order==="forward-first"?100:105,
+      attachment:{fileId:"p",name:"photo-1.jpg",mime:"image/jpeg",size:8,kind:"photo" as const}};
+    const question={...f.input("Как это попробовать?"),sentAt:order==="forward-first"?105:100};
+    const [a,b]=order==="forward-first"?[forward,question]:[question,forward];
+    f.bridge.accept(a);
+    // 4.1 s after a forward the bridge still waits for the owner's comment.
+    f.store.put("chat:in:"+a.updateId,{...f.store.get<any>("chat:in:"+a.updateId),at:Date.now()-4100});
+    await f.bridge.tick();
+    if (order==="forward-first") assert.equal(f.calls.filter(c=>c[0]==="send").length,0);
+    if (order==="forward-first") {
+      f.bridge.accept(b);
+      for (const row of f.store.list<any>("chat:in:")) if (row.value.state==="pending") f.store.put(row.key,{...row.value,at:Date.now()-4100});
+      await f.bridge.tick(); await f.bridge.dispose();
+      const sends=f.calls.filter(c=>c[0]==="send");
+      assert.equal(sends.length,1);
+      assert.match(sends[0][1].input[0].text,/^Пересланное:\nНовость канала о бета-версии[\s\S]*photo-1\.jpg[\s\S]*\n\nВопрос пользователя:\nКак это попробовать\?$/);
+    } else {
+      // The question went alone after its 4 s window; the forward arrives while
+      // that turn is running and joins it under the question's route.
+      await f.bridge.dispose();
+      const first=f.calls.filter(c=>c[0]==="send");
+      assert.equal(first.length,1);
+      assert.equal(first[0][1].mode,"queue-if-active");
+      const marker=first[0][1].input[1];
+      f.sdk.threads.events.list=async()=>[
+        {seq:12,type:"turn/input/accepted",scope:{kind:"turn",turnId:"q-turn"},data:{clientRequestId:"q-req"}},
+        {seq:11,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"q-req",originPluginId:"telegram-projects",input:[marker]}},
+      ];
+      await f.bridge.handle(b);
+      const sends=f.calls.filter(c=>c[0]==="send");
+      assert.equal(sends.length,2);
+      assert.equal(sends[1][1].mode,"steer-if-active");
+      assert.match(sends[1][1].input[0].text,/^Пересланное \(дополнение к сообщению пользователя выше, это одно поручение\):\n/);
+      const id=sends[1][1].input[1].text.match(/route:([^\]]+)/)[1];
+      assert.equal(f.store.get<any>("reply:ingress:"+id).route.updateId,question.updateId);
+    }
+  } finally {f.cleanup();}
+});
+
+for (const running of [true,false]) test("late question joins the running forward turn only while it runs: " + running, async () => {
+  const f=fixture();
+  try {
+    await f.bridge.handle(f.input("start"));
+    const forward={...f.input("Пост канала"),forwarded:true,sentAt:200};
+    await f.bridge.handle(forward);
+    const marker=f.calls.filter(c=>c[0]==="send").at(-1)[1].input[1];
+    f.sdk.threads.events.list=async()=>[
+      {seq:21,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"f-req",originPluginId:"telegram-projects",input:[marker]}},
+      {seq:22,type:"turn/input/accepted",scope:{kind:"turn",turnId:"f-turn"},data:{clientRequestId:"f-req"}},
+      ...(running ? [] : [{seq:23,type:"turn/completed",scope:{kind:"turn",turnId:"f-turn"},data:{status:"completed"}}]),
+    ];
+    const question={...f.input("Как это попробовать?"),sentAt:215};
+    await f.bridge.handle(question);
+    const send=f.calls.filter(c=>c[0]==="send").at(-1)[1];
+    assert.equal(send.mode,running ? "steer-if-active" : "queue-if-active");
+    assert.equal(send.input[0].text.startsWith("Вопрос пользователя к пересланному выше"),running);
+    const id=send.input[1].text.match(/route:([^\]]+)/)[1];
+    assert.equal(f.store.get<any>("reply:ingress:"+id).route.updateId,running ? forward.updateId : question.updateId);
+    // An unrelated message long after the forward is never merged.
+    await f.bridge.handle({...f.input("Другая задача"),sentAt:400});
+    assert.equal(f.calls.filter(c=>c[0]==="send").at(-1)[1].mode,"queue-if-active");
   } finally {f.cleanup();}
 });
