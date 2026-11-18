@@ -4,6 +4,10 @@ import type { Store } from "./model";
 export type ReplyRoute = { kind: "bb" } | {
   kind: "telegram"; chatId: number; topicId: number; updateId: number;
 };
+export function routeMarker(id:string) {
+    return {type: "text" as const, visibility: "agent-only" as const, mentions: [],
+      text: "[bb-telegram-reply-route:" + id + "]\nTransport metadata only; do not quote this marker in the answer."};
+}
 type TurnRoutes = { requestIds: string[]; ambiguous: boolean };
 
 // This ledger requires a proven native request ID. It never guesses from the
@@ -32,8 +36,7 @@ export class ReplyRoutes {
   ingress(threadId: string | null, route: Extract<ReplyRoute, {kind: "telegram"}>, delegatedBy?: string, reportKey?: string) {
     const id = randomUUID();
     this.store.put("reply:ingress:" + id, {threadId, route, delegatedBy, reportKey});
-    return {type: "text" as const, visibility: "agent-only" as const, mentions: [],
-      text: "[bb-telegram-reply-route:" + id + "]\nTransport metadata only; do not quote this marker in the answer."};
+    return routeMarker(id);
   }
   delegatedIngress(parentThreadId: string, token: string, childThreadId: string | null) {
     if (!/^[a-f0-9-]{36}$/.test(token)) throw Error("invalid_parent_route_token");

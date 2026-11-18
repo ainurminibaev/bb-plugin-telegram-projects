@@ -1,3 +1,9 @@
+# 0.9.1-personal.28
+
+- Run participant tasks in a separately configured BB instance. The personal bridge keeps the bot token, sender permissions and original Telegram destination. The group worker receives the task and selected attachments. A PDF linked in its final answer returns to the originating message.
+- Before enabling a participant allowlist or invoking the assistant as any group member, follow [isolated group setup](docs/isolated-groups.md) and bind the topic again. Existing participant jobs in local queues are revoked. Local group invocations by the paired owner and private chat bindings continue to work.
+- Verified a real test-group document and PDF reply with an isolated Mac Docker runtime and deterministic model fixture. Online provider sign-in and independent onboarding remain under acceptance.
+
 # 0.9.1-personal.27
 
 - Group topic bindings record their BB project. The bridge checks the thread before submission and before delivering a prepared reply or opening a PDF.

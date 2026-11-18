@@ -1,3 +1,5 @@
+import {randomUUID} from "node:crypto";
+import {groupExecutor} from "./isolated-client";
 import {historyPrefix,topicPassages} from "./topic-search";
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {localArtifacts} from "./telegram-ux";
@@ -14,6 +16,7 @@ type Job = {
   route: GroupInput; ownerId:number; revision?:string;
   state:"pending"|"submitted"|"ready"|"sending"|"done"|"revoked";
   progressId?:number|null;
+  executionToken?:string; executorRetryAt?:number;
   pdfIndex?:number; failedPdfs?:string[];
   cursor?:number; turnId?:string; answer?:string; part?:number;
 };
@@ -32,7 +35,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     if (claim && claim!==key) throw Error("thread_belongs_to_other_topic");
     store.put("group:project:"+projectId,true);
     const prev=store.get<GroupTopicPolicy>(key);
-    if (prev && prev.projectId === projectId && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly &&
+    if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly &&
         prev.requireMention===policy.requireMention && prev.botId===policy.botId &&
         !!prev.retainFullHistory===!!policy.retainFullHistory && !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
         JSON.stringify(prev.allowedSenderIds??[])===JSON.stringify(policy.allowedSenderIds??[]) &&
@@ -78,7 +81,7 @@ export function groupTyping(store:Store, owner:()=>number|undefined, bot:()=>num
       const key=`group:policy:${r.chatId}:${r.topicId}`;
       const policy=store.get<GroupTopicPolicy>(key);
       if (policy?.botId===botId && job.ownerId===ownerId && (policy.ownerId===undefined || policy.ownerId===ownerId) &&
-          policy.revision===job.revision && policy.threadId===r.threadId && canInvokeGroup(policy,ownerId,r.senderId))
+          policy.revision===job.revision && policy.threadId===r.threadId && (r.senderId===ownerId || policy.isolated===true) && canInvokeGroup(policy,ownerId,r.senderId))
         topics.set(key,r);
     }
     if (!topics.size) return;
@@ -139,10 +142,15 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     const allowed=()=>{
       const p=store.get<GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`);
       return p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && p.threadId===r.threadId &&
-        owner===job.ownerId && canInvokeGroup(p,owner,r.senderId);
+        owner===job.ownerId && (r.senderId===owner || p.isolated===true) && canInvokeGroup(p,owner,r.senderId);
     };
     if (!allowed()) {finish("revoked");continue;}
     const topicKey = `group:policy:${r.chatId}:${r.topicId}`;
+    const policy=store.get<GroupTopicPolicy>(topicKey)!;
+    const executor=policy.isolated ? groupExecutor(r.chatId,r.topicId) : undefined;
+    if (policy.isolated && (!executor || executor.projectId!==policy.projectId || executor.threadId!==r.threadId)) {
+      finish("revoked");continue;
+    }
     const belongsToGroup = (thread: Awaited<ReturnType<typeof sdk.threads.get>>) => {
       const binding = store.get<GroupTopicPolicy>(topicKey);
       return allowed() && thread.id === r.threadId && !thread.archivedAt && !thread.deletedAt &&
@@ -219,7 +227,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         const files=[];
         for (const example of r.examples) {
           if (!allowed()) break;
-          files.push(await receiveExample(example,r));
+          const cached=await receiveExample(example,r);
+          if (!allowed()) break;
+          files.push(executor ? await executor.upload(cached,signal) : cached);
         }
         if (!allowed()) {finish("revoked");continue;}
         r.text += "\nМатериалы к этому поручению. Прочитай файлы по указанным путям:\n"+JSON.stringify(files);
@@ -230,6 +240,29 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         job.state="ready";
       }
       store.put(key,job);
+    }
+    if (executor && (job.state==="pending" || job.state==="submitted")) {
+      if ((job.executorRetryAt??0)>Date.now()) continue;
+      try {
+        if (job.state==="pending") {
+          job.executionToken ??= randomUUID();
+          store.put(key,job);
+          await executor.submit(job.executionToken,r.text,signal);
+          job.state="submitted";
+          store.put(key,job);
+        }
+        if (!job.executionToken) {finish("revoked");continue;}
+        const result=await executor.read(job.executionToken,signal);
+        if (result.state==="waiting") continue;
+        job.answer=result.state==="finished" ? result.text : "Исполнитель потерял квитанцию. Проверьте задачу перед повтором.";
+        job.state="ready";
+        store.put(key,job);
+      } catch {
+        if (signal.aborted) return;
+        job.executorRetryAt=Date.now()+15000;
+        store.put(key,job);
+        continue;
+      }
     }
     if (job.state==="pending") {
       const thread = await sdk.threads.get({threadId:r.threadId,signal});
@@ -269,19 +302,24 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     }
     if (job.state==="ready") {
       // Ready jobs may be resumed long after submission, including between reply parts.
-      const thread = await sdk.threads.get({threadId:r.threadId,signal});
-      if (!belongsToGroup(thread)) {finish("revoked");continue;}
+      if (!allowed()) {finish("revoked");continue;}
+      if (!executor && !belongsToGroup(await sdk.threads.get({threadId:r.threadId,signal}))) {finish("revoked");continue;}
       let text=job.answer!;
       const links=localArtifacts(text).filter(link=>/\.pdf$/i.test(link.path));
       const paths=[...new Set(links.map(link=>link.path))];
       for (let i=job.pdfIndex??0;i<paths.length;i++) {
         let pdf;
         try {
-          const thread=await sdk.threads.get({threadId:r.threadId,signal});
-          if (!belongsToGroup(thread) || !fileHostId || !thread.environmentId) throw Error("missing_environment");
-          const env=await sdk.environments.get({environmentId:thread.environmentId,signal});
-          if (!env.path || env.hostId!==fileHostId) throw Error("group_export_host_mismatch");
-          pdf=await readGroupPdf(env.path,paths[i]);
+          if (executor) {
+            if (!job.executionToken) throw Error("missing_isolated_receipt");
+            pdf=await executor.pdf(job.executionToken,paths[i],signal);
+          } else {
+            const thread=await sdk.threads.get({threadId:r.threadId,signal});
+            if (!belongsToGroup(thread) || !fileHostId || !thread.environmentId) throw Error("missing_environment");
+            const env=await sdk.environments.get({environmentId:thread.environmentId,signal});
+            if (!env.path || env.hostId!==fileHostId) throw Error("group_export_host_mismatch");
+            pdf=await readGroupPdf(env.path,paths[i]);
+          }
         } catch {
           if (signal.aborted) return;
           job.failedPdfs=[...(job.failedPdfs??[]),paths[i]];

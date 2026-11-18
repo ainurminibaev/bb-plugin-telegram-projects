@@ -88,13 +88,13 @@ test("topic context is passive, scoped, editable and usable only by selected cal
     del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
     list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,value])=>({key,value:value as T}))};
   const policy={chatId:-1001,topicId:3,threadId:"group",botId:5,botUsername:"bot",ownerOnly:true,
-    allowedSenderIds:[8],requireMention:true,includeTopicContext:true,revision:"one",ownerId:7};
+    allowedSenderIds:[],requireMention:true,includeTopicContext:true,revision:"one",ownerId:8};
   bindGroupTopic(store,policy,"group-project");
   let updateId=0;
   function post(id:number,sender:number,text:string,topic=3,edit=false) {
     return acceptGroupUpdate(store,{update_id:++updateId,[edit?"edited_message":"message"]:{message_id:id,
       date:Math.floor(Date.now()/1000)+2,from:{id:sender},chat:{id:-1001,type:"supergroup"},message_thread_id:topic,
-      text,entities:text.startsWith("@bot")?[{type:"mention",offset:0,length:4}]:[]}},7,5);
+      text,entities:text.startsWith("@bot")?[{type:"mention",offset:0,length:4}]:[]}},8,5);
   }
   assert.equal(post(1,9,"другая тема",4),false);
   post(2,9,"встреча в три");post(2,9,"встреча в четыре",3,true);post(3,9,"@bot вопрос");
@@ -102,7 +102,7 @@ test("topic context is passive, scoped, editable and usable only by selected cal
   post(4,8,"@bot когда встреча?");
   const sent:any[]=[];
   const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{sent.push(q);}}};
-  await processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},new AbortController().signal);
+  await processGroupInputs(store,sdk as any,8,5,()=>async()=>{throw Error("unexpected delivery");},new AbortController().signal);
   assert.equal(sent.length,1);
   assert.equal(sent[0].threadId,"group");
   assert.match(sent[0].input[0].text,/встреча в четыре/);
@@ -123,18 +123,18 @@ test("only an authorized voice reply is transcribed and queued with the chosen T
  store.put("group:project:group-project",true);
  store.put("group:thread:group","group:policy:-111:3");
  store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
-  ownerOnly:true,allowedSenderIds:[8],requireMention:true,includeTopicContext:true,ownerId:7});
+  ownerOnly:true,allowedSenderIds:[],requireMention:true,includeTopicContext:true,ownerId:8});
  const reply={message_id:12,message_thread_id:3,from:{id:5},chat,document:{file_name:"first.pdf"}};
  function voice(id:number,user:number,target?:typeof reply) {
   return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:3,
-   from:{id:user},reply_to_message:target,voice:{file_id:"audio",duration:3,file_size:30}}},7,5);
+   from:{id:user},reply_to_message:target,voice:{file_id:"audio",duration:3,file_size:30}}},8,5);
  }
  assert.equal(voice(20,9,reply),false);
  assert.equal(voice(21,8),false);
  assert.ok(voice(22,8,reply));
  let calls=0;const sent:any[]=[];
  const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{sent.push(q);}}};
- for(let i=0;i<2;i++)await processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},
+ for(let i=0;i<2;i++)await processGroupInputs(store,sdk as any,8,5,()=>async()=>{throw Error("unexpected delivery");},
   new AbortController().signal,async v=>{assert.equal(v.fileId,"audio");calls++;return "убери третий пункт";});
  assert.equal(calls,1);assert.equal(sent.length,1);assert.equal(sent[0].threadId,"group");
  assert.match(sent[0].input[0].text,/first.pdf/);assert.match(sent[0].input[0].text,/"messageId":12/);
@@ -150,13 +150,13 @@ for (const transcript of ["Сейчас скину примеры","Возьми
  store.put("group:project:group-project",true);
  store.put("group:thread:group","group:policy:-111:3");
  store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
-  ownerOnly:true,allowedSenderIds:[8],requireMention:true,includeTopicContext:true});
+  ownerOnly:true,allowedSenderIds:[],requireMention:true,includeTopicContext:true});
  function post(id:number,user:number,m:object,topic=3){
-  return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:topic,from:{id:user},...m}},7,5);
+  return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:topic,from:{id:user},...m}},8,5);
  }
  const calls:string[]=[];const sent:string[]=[];
  const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{sent.push(q.input[0].text);}}};
- const tick=()=>processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},
+ const tick=()=>processGroupInputs(store,sdk as any,8,5,()=>async()=>{throw Error("unexpected delivery");},
   new AbortController().signal,async()=>transcript,"host",async(f)=>{
    calls.push(f.fileId);return {path:"/inbox/"+f.name,name:f.name,bytes:12,sha256:"hash"};
   });
@@ -178,9 +178,9 @@ for (const requireMention of [true,false]) test(`voice correction selects its se
  store.put("group:project:group-project",true);
  store.put("group:thread:group","group:policy:-111:3");
  store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
-  ownerOnly:true,allowedSenderIds:[8],requireMention,includeTopicContext:true});
+  ownerOnly:true,allowedSenderIds:[],requireMention,includeTopicContext:true});
  function post(id:number,user:number,m:object){
-  return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:3,from:{id:user},...m}},7,5);
+  return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:3,from:{id:user},...m}},8,5);
  }
  post(11,8,{photo:[{file_id:"p1"}],media_group_id:"a"});
  post(12,7,{photo:[{file_id:"private"}],media_group_id:"a"});
@@ -200,7 +200,7 @@ for (const requireMention of [true,false]) test(`voice correction selects its se
    turns.push(text);
   }}};
   const signal=new AbortController().signal;
-  await processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},signal,
+  await processGroupInputs(store,sdk as any,8,5,()=>async()=>{throw Error("unexpected delivery");},signal,
    async()=>"Используй эти примеры для обложки","host",async(f,r)=>{
     files.push(f.fileId);return saveLocalTelegramFile({sourcePath:join(source,f.fileId),localRoot:source,
      inboxRoot:join(directory,"inbox"),updateId:r.updateId,fileId:f.fileId,name:f.name,signal});
@@ -269,4 +269,34 @@ test("a prepared answer stays private when the group thread has moved before del
   const sdk={threads:{get:async()=>({id:"t",projectId:"personal-project",visibility:"visible"})}};
   await processGroupInputs(store,sdk as any,7,5,()=>{throw Error("unexpected Telegram delivery");},new AbortController().signal);
   assert.equal(rows.get("group:receipt:5:43").state,"revoked");
+});
+
+test("removing an isolated executor does not dispatch queued group work to the personal BB",async()=>{
+  const rows=new Map<string,any>();
+  const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v);},
+    del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
+    list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,value])=>({key,value:value as T}))};
+  bindGroupTopic(store,{chatId:-345678,topicId:7,threadId:"isolated",botId:5,botUsername:"bot",
+    ownerOnly:true,requireMention:false,revision:"r",isolated:true},"group-project");
+  store.put("group:in:5:24",{route:{chatId:-345678,topicId:7,threadId:"isolated",messageId:24,updateId:24,senderId:7},
+    ownerId:7,revision:"r",state:"pending"});
+  await processGroupInputs(store,{} as any,7,5,()=>{throw Error("unexpected Telegram delivery")},new AbortController().signal);
+  assert.equal(rows.get("group:receipt:5:24").state,"revoked");
+});
+
+test("work queued by a participant under an old local policy is revoked before any tool or model call", async()=>{
+  const rows=new Map<string,any>();
+  const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v);},
+    del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
+    list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,value])=>({key,value:value as T}))};
+  for(const local of [{ownerOnly:false},{ownerOnly:true,allowedSenderIds:[8]}]){
+    const chatId=-333,topicId=3,threadId="group";
+    store.put("group:policy:-333:3",{...local,chatId,topicId,threadId,botId:5,revision:"old"});
+    store.put("group:in:5:2",{route:{chatId,topicId,threadId,senderId:8,messageId:2,updateId:2,
+      voice:{fileId:"fixture"}},ownerId:7,revision:"old",state:"pending"});
+    await processGroupInputs(store,{} as any,7,5,()=>{throw Error("unexpected delivery");},new AbortController().signal,
+      async()=>{throw Error("unexpected transcription");});
+    assert.equal(rows.get("group:receipt:5:2").state,"revoked");
+    assert.equal(rows.has("group:in:5:2"),false);
+  }
 });

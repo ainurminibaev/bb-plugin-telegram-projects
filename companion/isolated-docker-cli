@@ -1,0 +1,30 @@
+#!/bin/sh
+# Install one administrator-owned copy per worker, then set these three values.
+set -eu
+container=bb-group-worker
+bb=/usr/local/bin/bb
+receiver=/opt/telegram-bridge/companion/isolated-inbox.mjs
+
+case "${1:-}" in
+  isolated-upload)
+    [ "$#" -eq 6 ] || exit 2
+    shift
+    exec docker exec -i "$container" node "$receiver" "$@"
+    ;;
+  plugin)
+    [ "$#" -eq 8 ] && [ "$2" = rpc ] && [ "$3" = call ] &&
+      [ "$4" = telegram-projects ] && [ "$6" = --input-file ] && [ "$8" = --json ] || exit 2
+    case "$5" in
+      submitIsolatedGroup|readIsolatedGroup|readIsolatedPdf) ;;
+      *) exit 2 ;;
+    esac
+    exec docker exec -i "$container" sh -ec '
+      umask 077
+      f=$(mktemp)
+      trap '\''rm -f "$f"'\'' EXIT
+      cat > "$f"
+      "$1" plugin rpc call telegram-projects "$2" --input-file "$f" --json
+    ' sh "$bb" "$5" < "$7"
+    ;;
+  *) exit 2 ;;
+esac

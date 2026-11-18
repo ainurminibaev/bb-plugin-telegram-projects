@@ -1,3 +1,5 @@
+import {groupExecutor} from "./isolated-client";
+import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf} from "./isolated-group";
 import {cleanInbox} from "./inbox-retention";
 import {openTopicSearch,historyPrefix,topicPassages} from "./topic-search";
 import { transcribeWithVoiceRouter } from "./voice-router";
@@ -96,6 +98,9 @@ const statusSchema = z.object({
 });
 const handoffStatusSchema = z.object({id: z.string(), phase: z.string(), sourceThreadId: z.string(), targetThreadId: z.string().nullable(), error: z.string().nullable(), retirement: z.string().nullable(), retirementReason: z.string().nullable()});
 export const rpcContract = defineRpcContract({
+  readIsolatedPdf:{input:isolatedPdfInput,output:isolatedPdfPart},
+  readIsolatedGroup:{input:isolatedLookup,output:isolatedAnswer},
+  submitIsolatedGroup:{input:isolatedGroupInput,output:isolatedGroupResult},
   inspectChannelRights:{input:z.object({channelId:z.number().int().negative()}).strict(),
     output:z.object({publish:z.boolean(),editOthers:z.boolean(),deleteOthers:z.boolean()})},
   channelPost:{input:channelPostSchema,output:z.object({messageId:z.number().int().positive()})},
@@ -221,6 +226,8 @@ export const rpcContract = defineRpcContract({
 });
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
+    isolatedGroupProject:{type:"string",label:"Проект отдельного группового исполнителя",default:""},
+    isolatedFileHost:{type:"string",label:"Машина с рабочими файлами группового исполнителя",default:""},
     agencyEnabled: {type:"boolean",label:"Уведомления из Агентства",default:false},
     language: {
       type: "select",
@@ -484,22 +491,24 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const apiRoot = async () => (await settings.get()).telegramApiRoot;
   async function receiveLocalFile(incoming:{fileId:string;name:string;size:number},updateId:number,
-    threadId:string,fileSignal:AbortSignal,scope?:string[]) {
+    threadId:string,fileSignal:AbortSignal,scope?:string[],isolated=false) {
     const c = await settings.get();
     if (checkedApiRoot(c.telegramApiRoot) === "https://api.telegram.org" ||
         !c.telegramLocalRoot || !c.telegramInboxRoot)
       throw Error("attachment_local_api_required");
-    const thread = await bb.sdk.threads.get({threadId});
-    if (!thread.environmentId || !c.telegramFileHostId) throw Error("attachment_wrong_host");
-    const env = await bb.sdk.environments.get({environmentId:thread.environmentId});
-    if (env.hostId !== c.telegramFileHostId) throw Error("attachment_wrong_host");
+    if (!isolated) {
+      const thread = await bb.sdk.threads.get({threadId});
+      if (!thread.environmentId || !c.telegramFileHostId) throw Error("attachment_wrong_host");
+      const env = await bb.sdk.environments.get({environmentId:thread.environmentId});
+      if (env.hostId !== c.telegramFileHostId) throw Error("attachment_wrong_host");
+    }
     if (incoming.size > 2 * 1024 * 1024 * 1024) throw Error("attachment_too_large");
     const tg = telegram(botToken, fileSignal, 30 * 60 * 1000, ownerId, apiRoot);
     const file = await tg("getFile", {file_id:incoming.fileId});
     if (typeof file.file_path !== "string") throw Error("attachment_file_invalid");
     return saveLocalTelegramFile({sourcePath:file.file_path,
       localRoot:c.telegramLocalRoot, inboxRoot:scope ? join(c.telegramInboxRoot,...scope) : c.telegramInboxRoot,
-      threadId, updateId:updateId, fileId:incoming.fileId, name:incoming.name,
+      threadId:isolated ? "isolated:"+threadId : threadId, updateId:updateId, fileId:incoming.fileId, name:incoming.name,
       expectedBytes:incoming.size || undefined, signal:fileSignal});
   }
   let cleaning=false;
@@ -508,8 +517,12 @@ export default async function plugin(bb: BbPluginApi) {
     cleaning=true;
     try {
       const cfg=await settings.get();
-      if(!cfg.enabled || !cfg.telegramInboxRoot || !existsSync(cfg.telegramInboxRoot))return;
+      if((!cfg.enabled && !cfg.isolatedGroupProject) || !cfg.telegramInboxRoot || !existsSync(cfg.telegramInboxRoot))return;
       await cleanInbox(cfg.telegramInboxRoot,async id=>{
+        if (id.startsWith("isolated:")) {
+          const remoteId=id.slice("isolated:".length);
+          return !store.list<{route?:{threadId?:string}}>("group:in:").some(row=>row.value.route?.threadId===remoteId);
+        }
         const queue=[id], seen=new Set<string>();
         while(queue.length){
           const threadId=queue.pop()!;
@@ -1095,7 +1108,18 @@ export default async function plugin(bb: BbPluginApi) {
     return flight;
   }
   const agency=agencyIntegration(store);
+  async function isolatedProject() {
+    const config=await settings.get();
+    const project=config.isolatedGroupProject;
+    if (!project || ownerId() || botId()) throw Error("isolated_executor_required");
+    if (config.enabled || config.chatEnabled || config.botToken || await tokenSource() !== "none")
+      throw Error("isolated_executor_required");
+    return project;
+  }
   bb.rpc.register(rpcContract, {
+    submitIsolatedGroup: async args => submitIsolatedGroup(bb.sdk,store,await isolatedProject(),args),
+    readIsolatedPdf: async args => readIsolatedPdf(bb.sdk,store,await isolatedProject(),(await settings.get()).isolatedFileHost,args),
+    readIsolatedGroup: async args => readIsolatedGroup(bb.sdk,store,await isolatedProject(),args),
     inspectChannelRights: async ({channelId})=>{
       const owner=ownerId(), bot=botId();
       if (!owner || !bot) throw Error("bot_unavailable");
@@ -1140,11 +1164,16 @@ export default async function plugin(bb: BbPluginApi) {
           throw Error("Для контекста темы включите получение обычных сообщений Telegram в этой группе.");
         }
       }
-      const thread=await bb.sdk.threads.get({threadId});
-      if (!thread.projectId || thread.archivedAt || thread.deletedAt || thread.visibility==="hidden") throw Error("thread_unavailable");
+      const executor=groupExecutor(chatId,topicId);
+      if (!executor && (!ownerOnly || allowedSenderIds?.some(id=>id!==owner)))
+        throw Error("Настройте изолированный BB для участников группы и повторите привязку темы.");
+      if (executor && executor.threadId!==threadId) throw Error("isolated_thread_required");
+      const thread=executor ?? await bb.sdk.threads.get({threadId});
+      if (!thread.projectId || ("visibility" in thread && (thread.archivedAt || thread.deletedAt || thread.visibility==="hidden")))
+        throw Error("thread_unavailable");
       if (owner!==ownerId() || bot!==botId() || stateTransferBusy) throw Error("bot_changed");
       if (!ownerOnly && allowedSenderIds?.length) throw Error("allowlist_requires_owner_only");
-      bindGroupTopic(store,{searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
+      bindGroupTopic(store,{isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},thread.projectId);
       return {bound:true as const};
     },
@@ -1647,7 +1676,8 @@ export default async function plugin(bb: BbPluginApi) {
                   chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined),cfg.telegramFileHostId,
-                  (file,r)=>receiveLocalFile(file,r.updateId,r.threadId,signal,["groups",String(bot),String(r.chatId),String(r.topicId),String(r.senderId)]),true);
+                  (file,r)=>receiveLocalFile(file,r.updateId,r.threadId,signal,["groups",String(bot),String(r.chatId),String(r.topicId),String(r.senderId)],
+                    store.get<import("./ingress").GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`)?.isolated===true),true);
               } catch (error) { ingressError = safeError(error); }
             }
           } else {
