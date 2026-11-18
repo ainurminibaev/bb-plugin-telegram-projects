@@ -1866,7 +1866,7 @@ export default async function plugin(bb: BbPluginApi) {
             updates = await tg<any[]>("getUpdates", {
               offset: store.get<number>("ingress:offset") ?? 0,
               timeout: 25,
-              allowed_updates: ["message", "edited_message", "callback_query"],
+              allowed_updates: ["message", "edited_message", "callback_query", ...(process.env.BB_TELEGRAM_GUEST_TOPICS ? ["guest_message"] : [])],
             });
           } finally { ingressPolling = false; }
           ingressError = null;

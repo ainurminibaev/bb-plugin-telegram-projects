@@ -201,3 +201,22 @@ test("a forum root supplies no reply content to a command", () => {
     }
   }
 });
+
+test("guest mentions require the assigned topic and sender; ordinary replay creates no second job",()=>{
+  const rows=new Map<string,any>();
+  const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v);},
+    del:(k:string)=>{rows.delete(k);},list:()=>[],atomic:(fn:()=>void)=>fn()};
+  const policy={chatId:-1001,topicId:3,botId:55,ownerOnly:true,requireMention:true,botUsername:"test_bot",threadId:"team"};
+  const message={message_id:42,chat:{type:"supergroup",id:-1001},message_thread_id:3,is_topic_message:true,
+    from:{id:7},text:"Привет, @test_bot",entities:[{type:"mention",offset:8,length:9}],guest_query_id:"fixture"};
+  store.put("group:policy:-1001:3",policy);
+  const prior=process.env.BB_TELEGRAM_GUEST_TOPICS;
+  try {
+    process.env.BB_TELEGRAM_GUEST_TOPICS="-1001:3";
+    for(const change of [{message_thread_id:4},{from:{id:9}},{forward_origin:{}},{entities:[]}])
+      assert.equal(acceptGroupUpdate(store,{update_id:5,guest_message:{...message,...change}},7,55),false);
+    assert.equal(acceptGroupUpdate(store,{update_id:5,guest_message:message},7,55),true);
+    assert.equal(acceptGroupUpdate(store,{update_id:6,message},7,55),true);
+    assert.equal([...rows.keys()].filter(k=>k.startsWith("group:in:")).length,1);
+  } finally {if (prior===undefined) delete process.env.BB_TELEGRAM_GUEST_TOPICS; else process.env.BB_TELEGRAM_GUEST_TOPICS=prior;}
+});

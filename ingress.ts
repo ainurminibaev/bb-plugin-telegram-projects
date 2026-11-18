@@ -171,6 +171,16 @@ export function routeUpdate(
 
 /** A receipt pins the original destination even if the topic is rebound before processing. */
 export function acceptGroupUpdate(store: Store, update: any, owner: number | undefined, botId: number | undefined): boolean {
+  const guest=update?.guest_message;
+  if (guest) {
+    const topics=(process.env.BB_TELEGRAM_GUEST_TOPICS??"").split(",");
+    if (!guest.guest_query_id || guest.chat?.type!=="supergroup" || !guest.is_topic_message ||
+        !Number.isSafeInteger(guest.message_thread_id) || guest.message_thread_id<=0 ||
+        !topics.includes(guest.chat.id+":"+guest.message_thread_id) || typeof guest.text!=="string" ||
+        guest.from?.is_bot || guest.sender_chat || guest.forward_origin || guest.via_bot ||
+        guest.business_connection_id || guest.guest_bot_caller_user || guest.guest_bot_caller_chat) return false;
+    update={update_id:update.update_id,message:guest};
+  }
   const edit = update?.edited_message;
   const message = update?.message ?? edit;
   if (!owner || !botId || !Number.isSafeInteger(update?.update_id) || update.update_id < 0 ||
@@ -192,6 +202,9 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       return;
     }
     const route = routeUpdate(update, owner, undefined, policy);
+    if (guest && (!policy.requireMention || route.kind!=="group" ||
+        !message.entities?.some((e:any)=>e.type==="mention" &&
+          message.text.slice(e.offset,e.offset+e.length).toLowerCase()==="@"+policy.botUsername.toLowerCase()))) return;
     if (route.kind==="group" && (route.voice || promisesExamples(message.text ?? message.caption ?? "")))
       route.waitUntil=Date.now()+90_000;
     const file=!edit && groupExample(message);
@@ -302,6 +315,16 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     }
     store.del(senderFiles);
     const key = `group:in:${botId}:${route.updateId}`;
+    // Telegram can publish the same source through ordinary and guest updates.
+    if (!edit && (process.env.BB_TELEGRAM_GUEST_TOPICS??"").split(",").includes(chatId+":"+topicId)) {
+      const sourceKey=`group:accepted-message:${botId}:${chatId}:${topicId}:${message.message_id}`;
+      if (store.get(sourceKey)) {
+        store.put("ingress:offset",update.update_id+1);
+        accepted=true;
+        return;
+      }
+      store.put(sourceKey,true);
+    }
     if (!store.get(key) && !store.get(`group:receipt:${botId}:${route.updateId}`)) store.put(key, { route, ownerId: owner, revision: policy.revision, state: "pending" });
     const nextOffset = Math.max(store.get<number>("ingress:offset") ?? 0, route.updateId + 1);
     store.put("ingress:offset", nextOffset);

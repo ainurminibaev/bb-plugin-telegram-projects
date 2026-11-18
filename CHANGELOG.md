@@ -1,3 +1,7 @@
+# 0.9.18
+
+- Receive explicitly addressed guest text messages in assigned forum topics.
+
 # 0.9.17
 
 - Include the original forum message, task ID and revision in automatically presented proposals.
