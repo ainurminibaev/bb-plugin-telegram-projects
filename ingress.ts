@@ -193,6 +193,16 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     if (route.kind==="group" && (route.voice || promisesExamples(message.text ?? message.caption ?? "")))
       route.waitUntil=Date.now()+90_000;
     const file=!edit && groupExample(message);
+    const replyId=message.reply_to_message?.message_id;
+    if (file && message.document?.mime_type==="application/pdf" && Number.isSafeInteger(replyId) &&
+        replyId!==topicId && Number.isSafeInteger(message.from?.id) && !message.from.is_bot &&
+        !message.sender_chat && canInvokeGroup(policy,owner,message.from.id)) {
+      const task=store.get<string>(`group:task-message:${botId}:${chatId}:${topicId}:${replyId}`);
+      const origin=task && store.get<{revision:string;owner:number;sender:number}>("group:origin:"+task);
+      if (origin && origin.revision===policy.revision && origin.owner===owner &&
+          (message.from.id===origin.sender || message.from.id===owner))
+        store.put("group:completed-pdf:"+task,message.message_id);
+    }
     const senderFiles=`group:recent-files:${botId}:${chatId}:${topicId}:${message.from?.id}`;
     type RecentFiles={revision?:string;files:(GroupExample & {at:number})[]};
     const remembered=store.get<RecentFiles>(senderFiles);

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {deliverGroupResults, queueGroupResult, type GroupOrigin} from "../group-result";
+import {deliverGroupResults, queueGroupResult, queueGroupReminder, type GroupOrigin} from "../group-result";
 import type {Store, Telegram} from "../model";
 
 function fixture(snapshot?:string) {
@@ -46,4 +46,47 @@ test("restart across an ambiguous Telegram write leaves an unknown outcome",asyn
   assert.ok(atSend);
   const after=fixture(atSend);
   await after.tick();assert.deepEqual(after.queue(),{state:"unknown"});assert.equal(after.sent.length,0);
+});
+
+test("due reminders use the original group and survive restart without duplicate sends",async()=>{
+  const f=fixture();
+  const args={taskId:"0",text:"Still need the PDF?",dueAt:1,waitingFor:"pdf" as const,threadId:"dm",routeToken:"fixture"};
+  assert.equal(queueGroupReminder(f.store,2,1,args).state,"queued");
+  const restored=fixture(f.snapshot());
+  await restored.tick();await restored.tick();
+  assert.equal(restored.sent.length,1);
+  assert.deepEqual(queueGroupReminder(restored.store,2,1,args),{state:"sent",messageId:90});
+  assert.equal(restored.sent[0].chat_id,-1001);
+  assert.equal(restored.sent[0].message_thread_id,7);
+});
+
+test("a PDF receipt or a decision cancels only the matching reminder",async()=>{
+  for (const waitingFor of ["pdf","decision"] as const) {
+    const f=fixture();
+    const args={taskId:"0",text:"Reminder",dueAt:1,waitingFor,routeToken:"fixture",threadId:"dm"};
+    queueGroupReminder(f.store,2,1,args);
+    f.store.put(waitingFor==="pdf"?"group:completed-pdf:0":"group:result:0",waitingFor==="pdf"?91:{text:"Approved",state:"sent",messageId:92});
+    await f.tick();
+    assert.equal(queueGroupReminder(f.store,2,1,args).state,"cancelled");assert.equal(f.sent.length,0);
+  }
+});
+
+test("a future reminder waits, and withdrawn access stops a due reminder",async()=>{
+  const f=fixture(),args={taskId:"0",text:"Reminder",dueAt:Date.now()+60000,waitingFor:"pdf" as const,routeToken:"fixture",threadId:"dm"};
+  queueGroupReminder(f.store,2,1,args);await f.tick();assert.equal(f.sent.length,0);
+  const other={...args,taskId:"1",dueAt:1};
+  queueGroupReminder(f.store,2,1,other);f.store.del("group:policy:-1002:7");await f.tick();
+  assert.equal(queueGroupReminder(f.store,2,1,other).state,"revoked");assert.equal(f.sent.length,0);
+});
+
+test("an identical reminder can be retried but its condition, text and deadline cannot change", () => {
+  const {store}=fixture();
+  const args={taskId:"0",threadId:"dm",routeToken:"fixture",waitingFor:"pdf" as const,text:"PDF pending",dueAt:10};
+  assert.throws(()=>queueGroupReminder(store,3,1,args),/group_task_unavailable/);
+  assert.deepEqual(queueGroupReminder(store,2,1,args),{state:"queued"});
+  assert.deepEqual(queueGroupReminder(store,2,1,args),{state:"queued"});
+  for (const change of [{text:"Another message"},{dueAt:11},{waitingFor:"decision" as const}]) {
+    assert.throws(()=>queueGroupReminder(store,2,1,{...args,...change}),/group_reminder_conflict/);
+  }
+  assert.equal(store.list("group:reminder-queue:").length,1);
 });

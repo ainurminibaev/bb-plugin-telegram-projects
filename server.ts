@@ -1,4 +1,4 @@
-import {deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult} from "./group-result";
+import {deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
 import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf} from "./isolated-group";
 import {cleanInbox} from "./inbox-retention";
@@ -104,6 +104,7 @@ export const rpcContract = defineRpcContract({
   submitIsolatedGroup:{input:isolatedGroupInput,output:isolatedGroupResult},
   inspectChannelRights:{input:z.object({channelId:z.number().int().negative()}).strict(),
     output:z.object({publish:z.boolean(),editOthers:z.boolean(),deleteOthers:z.boolean()})},
+  scheduleGroupReminder:{input:groupReminderInput,output:groupResultStatus},
   returnGroupResult:{input:groupResultInput,output:groupResultStatus},
   channelPost:{input:channelPostSchema,output:z.object({messageId:z.number().int().positive()})},
   bindGroupTopic: {
@@ -1130,6 +1131,17 @@ export default async function plugin(bb: BbPluginApi) {
       const tg=telegram(botToken,lifetime.signal,15000,()=>channelId,apiRoot);
       await checkBot(tg,bot);
       return inspectChannelRights(tg,channelId,owner,bot);
+    },
+    scheduleGroupReminder: async args=>{
+      const owner=ownerId(), bot=botId();
+      if (!bridge || !owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
+      await bridge.validateOwnerAction(args.threadId,args.routeToken,owner);
+      const cfg=await settings.get();
+      if (!cfg.enabled || !cfg.chatEnabled || owner!==ownerId() || bot!==botId() || stateTransferBusy)
+        throw Error("bot_unavailable");
+      const status=queueGroupReminder(store,owner,bot,args);
+      chatWake?.();
+      return status;
     },
     returnGroupResult: async args=>{
       const owner=ownerId(), bot=botId();

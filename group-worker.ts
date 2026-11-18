@@ -245,6 +245,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       job.taskId=randomUUID();
       if (executor) job.executionToken=randomUUID();
       store.atomic(()=>{
+        store.put(`group:task-message:${botId}:${r.chatId}:${r.topicId}:${r.messageId}`,job.taskId);
         store.put("group:origin:"+job.taskId,{owner,bot:botId,sender:r.senderId,chatId:r.chatId,
           topicId:r.topicId,messageId:r.messageId,threadId:r.threadId,revision:policy.revision,projectId:policy.projectId,
           executionToken:job.executionToken});
@@ -345,6 +346,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (!Number.isSafeInteger(sent?.message_id) || !sent.document?.file_id) throw Error("missing_document_receipt");
         job.pdfIndex=i+1;
         store.atomic(()=>{
+          if (job.taskId) store.put("group:completed-pdf:"+job.taskId,sent.message_id);
           store.put(`group:pdf:${botId}:${r.chatId}:${r.topicId}:${sent.message_id}`,{
             owner,threadId:r.threadId,path:pdf.path,sha256:pdf.sha256,fileId:sent.document.file_id});
           store.put(key,job);
@@ -360,6 +362,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         store.put(key,{...job,state:"sending",part:i});
         const sent=await transport(r.chatId)("sendMessage",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
           reply_parameters:{message_id:r.messageId},text:parts[i]});
+        if (job.taskId && Number.isSafeInteger(sent?.message_id))
+          store.put(`group:task-message:${botId}:${r.chatId}:${r.topicId}:${sent.message_id}`,job.taskId);
         if (i+1===parts.length) finish("done",sent?.message_id);
         else store.put(key,{...job,state:"ready",part:i+1});
       }

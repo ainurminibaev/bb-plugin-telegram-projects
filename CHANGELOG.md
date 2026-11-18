@@ -1,3 +1,8 @@
+# 0.9.4
+
+- The paired owner can schedule a reminder about a group task from the private bot chat. A PDF received in reply to the task, a PDF delivered by the bot, or a registered decision can satisfy its matching reminder.
+- Pending reminders survive restarts. Before sending, the bridge rechecks the group binding and sender permissions. After an uncertain Telegram send, it retains the receipt for reconciliation.
+
 # 0.9.3
 
 - Return valid RPC receipts for queued, revoked, rejected and uncertain outcomes without a Telegram message ID.

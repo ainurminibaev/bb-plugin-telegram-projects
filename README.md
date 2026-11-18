@@ -4,6 +4,12 @@ Send a file or a follow-up from Telegram to a BB thread and receive the result i
 
 **Русский.** Telegram-мост для BB связывает личный чат с рабочим тредом. Отправь документ боту с телефона, получи результат в Telegram и продолжи тот же разговор в BB. Для группы можно подключить отдельную тему. Условия установки и отличия форка описаны в [FORK.md](FORK.md).
 
+### Follow up on a group task
+
+In the private bot chat, ask the assistant to remind the group at a specific time if a requested PDF or an owner decision is still outstanding. The reminder replies to the original task. To fulfil a PDF request, the requester or owner can use Telegram’s Reply on the task or on the bot’s response and attach the PDF. The bridge checks the current permissions before sending a reminder.
+
+В личном чате можно попросить «Если к пяти PDF ещё не пришёл, напомни в группе». Автор поручения или владелец может приложить PDF ответом на исходное сообщение или ответ бота. В назначенное время мост проверит именно это поручение и права в теме. Если файл уже пришёл, группа не получит лишнее сообщение.
+
 ## Upstream Telegram Projects documentation
 
 [![BB](https://img.shields.io/badge/BB-%3E%3D0.43-blue.svg)](https://getbb.app)

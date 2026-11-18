@@ -166,3 +166,20 @@ test("accepted group input keeps its first binding and offset on replay", () => 
   assert.equal(rows.get("group:in:55:10").route.threadId,"thread-A");
   assert.equal([...rows.keys()].filter(k=>k.startsWith("group:in:")).length,1);
 });
+
+test("only a PDF reply tied to this task, sender and binding satisfies its reminder",()=>{
+  const rows=new Map<string,unknown>();
+  const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},
+    atomic:(fn:()=>void)=>fn(),del:(k:string)=>{rows.delete(k)},list:()=>[]};
+  const policy={chatId:-1001,topicId:3,botId:55,botUsername:"test_bot",ownerOnly:true,requireMention:true,threadId:"thread-A",revision:"v1"};
+  store.put("group:policy:-1001:3",policy);
+  store.put("group:task-message:55:-1001:3:12","task");
+  store.put("group:origin:task",{owner:123,sender:123,revision:"v1"});
+  const message={message_id:20,chat:{id:-1001,type:"supergroup"},from:{id:123},message_thread_id:3,
+    reply_to_message:{message_id:12},document:{file_id:"fixture",mime_type:"application/pdf",file_name:"report.pdf"}};
+  for (const [i,payload] of [{...message,from:{id:999}},{...message,message_thread_id:4},
+      {...message,reply_to_message:{message_id:13}},message].entries()) {
+    acceptGroupUpdate(store,{update_id:100+i,message:payload},123,55);
+    assert.equal(store.get("group:completed-pdf:task"),i===3?20:undefined);
+  }
+});

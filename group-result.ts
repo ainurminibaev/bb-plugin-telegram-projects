@@ -9,7 +9,7 @@ export const groupResultInput = z.object({
   text:z.string().trim().min(1).max(4096),
 }).strict();
 export const groupResultStatus = z.object({
-  state:z.enum(["queued","sent","revoked","unknown","rejected"]), messageId:z.number().optional(),
+  state:z.enum(["queued","sent","revoked","unknown","rejected","cancelled"]), messageId:z.number().optional(),
 });
 type Status = z.infer<typeof groupResultStatus>;
 type Result = Status & {text:string};
@@ -35,19 +35,48 @@ export function queueGroupResult(store:Store, owner:number, bot:number, taskId:s
   return messageId===undefined ? {state} : {state,messageId};
 }
 
+export const groupReminderInput=groupResultInput.extend({
+  dueAt:z.number().int().positive().safe(),
+  waitingFor:z.enum(["pdf","decision"]),
+});
+type Reminder = Result & Pick<z.infer<typeof groupReminderInput>,"dueAt"|"waitingFor">;
+
+export function queueGroupReminder(store:Store,owner:number,bot:number,args:z.infer<typeof groupReminderInput>):Status {
+  const origin=store.get<GroupOrigin>("group:origin:"+args.taskId);
+  if (!origin || origin.owner!==owner || origin.bot!==bot) throw Error("group_task_unavailable");
+  const key="group:reminder:"+args.taskId;
+  store.atomic(()=>{
+    const old=store.get<Reminder>(key);
+    if (old) {
+      if (old.text!==args.text || old.dueAt!==args.dueAt || old.waitingFor!==args.waitingFor)
+        throw Error("group_reminder_conflict");
+      return;
+    }
+    store.put(key,{state:"queued",text:args.text,dueAt:args.dueAt,waitingFor:args.waitingFor});
+    store.put("group:reminder-queue:"+args.taskId,true);
+  });
+  const {state,messageId}=store.get<Reminder>(key)!;
+  return messageId===undefined ? {state} : {state,messageId};
+}
+
 // This runs on the bridge's serial receiver loop. Consume the queue entry and
 // record uncertainty together before the request can reach Telegram.
 export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
   current:(origin:GroupOrigin)=>boolean, transport:(chatId:number)=>Telegram, signal:AbortSignal) {
-  for (const row of store.list("group:result-queue:")) {
+  for (const row of [...store.list("group:result-queue:"), ...store.list("group:reminder-queue:")]) {
     if (signal.aborted) return;
-    const taskId=row.key.slice("group:result-queue:".length);
-    const key="group:result:"+taskId;
+    const reminder=row.key.startsWith("group:reminder-queue:");
+    const taskId=row.key.split(":")[2];
+    const key=(reminder?"group:reminder:":"group:result:")+taskId;
     const result=store.get<Result>(key);
     if (!result || result.state!=="queued") continue;
+    const scheduled=reminder ? store.get<Reminder>(key) : undefined;
+    if (scheduled && scheduled.dueAt>Date.now()) continue;
+    const satisfied=()=>scheduled && (scheduled.waitingFor==="pdf"
+      ? !!store.get("group:completed-pdf:"+taskId) : !!store.get("group:result:"+taskId));
     const origin=store.get<GroupOrigin>("group:origin:"+taskId);
     const finish=(state:Status["state"],messageId?:number)=>store.atomic(()=>{
-      store.put(key,messageId===undefined ? {text:result.text,state} : {text:result.text,state,messageId});
+      store.put(key,messageId===undefined ? {...result,state} : {...result,state,messageId});
       store.del(row.key);
     });
     if (!origin) {finish("revoked");continue;}
@@ -80,6 +109,7 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     }
     if (signal.aborted) return;
     if (!allowed()) {finish("revoked");continue;}
+    if (satisfied()) {finish("cancelled");continue;}
     finish("unknown");
     try {
       const sent=await transport(chatId)("sendMessage",{chat_id:chatId,message_thread_id:topicId||undefined,
