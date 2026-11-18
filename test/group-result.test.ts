@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {isDirectOwnerRequest,inspectGroupTask,deliverGroupResults, queueGroupResult, queueGroupReminder, type GroupOrigin} from "../group-result";
+import {isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults, queueGroupResult, queueGroupReminder, type GroupOrigin} from "../group-result";
 import type {Store, Telegram} from "../model";
 
 function fixture(snapshot?:string) {
@@ -162,4 +162,21 @@ test("a source-only revocation survives restart and suppresses all queued payloa
     else process.env.BB_TELEGRAM_SOURCE_GRANTS=previous;
     await rm(dir,{recursive:true,force:true});
   }
+});
+
+test("private forum links identify only an active original message for this owner and bot",()=>{
+  const {store}=fixture();
+  for (const [i,chat] of ["1","2"].entries()) {
+    store.put(`group:task-message:1:-100${chat}:7:42`,String(i));
+    assert.deepEqual(resolveGroupMessage(store,2,1,`https://t.me/c/${chat}/7/42`),{taskId:String(i),projectId:"team"});
+  }
+  const link="https://t.me/c/1/7/42";
+  for (const input of [link+"?x",link.replace("/7/","/8/"),link.replace("/42","/43")])
+    assert.throws(()=>resolveGroupMessage(store,2,1,input));
+  assert.throws(()=>resolveGroupMessage(store,3,1,link));
+  assert.throws(()=>resolveGroupMessage(store,2,3,link));
+  store.put("group:task-message:1:-1001:7:43","0");
+  assert.throws(()=>resolveGroupMessage(store,2,1,link.replace("/42","/43")));
+  store.del("group:policy:-1001:7");
+  assert.throws(()=>resolveGroupMessage(store,2,1,link));
 });

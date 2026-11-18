@@ -39,6 +39,20 @@ export function inspectGroupTask(store:Store,owner:number,bot:number,taskId:stri
     ...(receipt?.messageId && {messageId:receipt.messageId})} as const;
 }
 
+// Resolve a private forum message link from the paired owner's current turn.
+export function resolveGroupMessage(store:Store,owner:number,bot:number,link:string) {
+  const match=/^https:\/\/t\.me\/c\/([1-9]\d*)\/([1-9]\d*)\/([1-9]\d*)$/.exec(link);
+  if (!match) throw Error("group_task_unavailable");
+  const chatId=Number("-100"+match[1]),topicId=Number(match[2]),messageId=Number(match[3]);
+  if (![chatId,topicId,messageId].every(Number.isSafeInteger)) throw Error("group_task_unavailable");
+  const taskId=store.get<string>(`group:task-message:${bot}:${chatId}:${topicId}:${messageId}`);
+  const origin=taskId && store.get<GroupOrigin>("group:origin:"+taskId);
+  if (!taskId || !origin || origin.chatId!==chatId || origin.topicId!==topicId ||
+      origin.messageId!==messageId || inspectGroupTask(store,owner,bot,taskId).binding!=="active")
+    throw Error("group_task_unavailable");
+  return {taskId,projectId:origin.projectId};
+}
+
 export function queueGroupResult(store:Store, owner:number, bot:number, taskId:string, text:string):Status {
   const origin=store.get<GroupOrigin>("group:origin:"+taskId);
   if (!origin || origin.owner!==owner || origin.bot!==bot) throw Error("group_task_unavailable");

@@ -50,3 +50,5 @@ Synthetic acceptance from the bridge checkout:
 ```sh
 node_modules/.bin/tsx --test test/owner-selection.test.ts
 ```
+
+During a current paired owner turn, resolveOwnerGroupMessage accepts threadId, routeToken and the original message link in the form https://t.me/c/CHAT/TOPIC/MESSAGE. It returns taskId and projectId after checking the active binding. Use the returned task for inspectGroupTask or presentOwnerProposal. The lookup performs no delivery.

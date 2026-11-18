@@ -1,3 +1,7 @@
+# 0.9.14
+
+- Resolve an original private forum message link to its active group task from a verified owner turn.
+
 # 0.9.13
 
 - Accept ordinary Russian replies to numbered proposals and ask which items to execute when a reply only confirms a multi-item list.

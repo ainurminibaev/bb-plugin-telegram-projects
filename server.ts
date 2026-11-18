@@ -1,5 +1,5 @@
 import {proposalInput,presentProposal,handleOwnerSelection} from "./owner-selection";
-import {bbReminderInput,isDirectOwnerRequest,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
+import {bbReminderInput,isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
 import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf} from "./isolated-group";
 import {cleanInbox} from "./inbox-retention";
@@ -107,6 +107,8 @@ export const rpcContract = defineRpcContract({
     output:z.object({publish:z.boolean(),editOthers:z.boolean(),deleteOthers:z.boolean()})},
   scheduleGroupReminder:{input:groupReminderInput,output:groupResultStatus},
   presentOwnerProposal:{input:proposalInput,output:z.object({messageId:z.number(),draftHash:z.string()})},
+  resolveOwnerGroupMessage:{input:groupResultInput.pick({threadId:true,routeToken:true}).extend({link:z.string().max(180)}),
+    output:z.object({taskId:z.string().uuid(),projectId:z.string()})},
   inspectGroupTask:{input:groupResultInput.omit({text:true}),output:z.object({
     binding:z.enum(["active","revoked"]),delivery:z.union([groupResultStatus.shape.state,z.literal("unsubmitted")]).optional(),
     messageId:z.number().optional(),
@@ -1180,6 +1182,15 @@ export default async function plugin(bb: BbPluginApi) {
       if(!cfg.enabled || !cfg.chatEnabled || owner!==ownerId() || bot!==botId() || stateTransferBusy)
         throw Error("bot_unavailable");
       return presentProposal(store,owner,bot,args,telegram(botToken,lifetime.signal,15000,ownerId,apiRoot));
+    },
+    resolveOwnerGroupMessage: async args=>{
+      const owner=ownerId(), bot=botId();
+      if (!bridge || !owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
+      await bridge.validateOwnerAction(args.threadId,args.routeToken,owner);
+      const cfg=await settings.get();
+      if (!cfg.enabled || !cfg.chatEnabled || owner!==ownerId() || bot!==botId() || stateTransferBusy)
+        throw Error("bot_unavailable");
+      return resolveGroupMessage(store,owner,bot,args.link);
     },
     inspectGroupTask: async args=>{
       const owner=ownerId(), bot=botId();
