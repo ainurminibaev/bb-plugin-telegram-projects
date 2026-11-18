@@ -26,7 +26,7 @@ test("SQLite topic search isolates topics, old revisions, time and future messag
 import {acceptGroupUpdate,type GroupTopicPolicy} from "../ingress";
 import type {Store} from "../model";
 
-test("a permitted mention gets an older passage from its topic, with no ambient model work",()=>{
+for (const topicId of [0,3]) test("permitted mention retrieves older context in group scope "+topicId,()=>{
  const db=new Database(":memory:");db.exec("CREATE TABLE state(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
  try {
   const history=openTopicSearch(db);
@@ -36,10 +36,10 @@ test("a permitted mention gets an older passage from its topic, with no ambient 
    del(k){db.prepare("DELETE FROM state WHERE key=?").run(k);},
    list(){throw Error("unexpected scan");},atomic(f){db.transaction(f)();},findTopicHistory:history.find,
   };
-  const p:GroupTopicPolicy={chatId:-100123,topicId:3,threadId:"t",ownerOnly:true,requireMention:true,includeTopicContext:true,searchableHistory:true,botId:1,botUsername:"bot"};
-  store.put("group:policy:-100123:3",p);
+  const p:GroupTopicPolicy={chatId:-100123,topicId,threadId:"t",ownerOnly:true,requireMention:true,includeTopicContext:true,searchableHistory:true,botId:1,botUsername:"bot"};
+  store.put(`group:policy:-100123:${topicId}`,p);
   function send(id:number,text:string,edit=false){
-   acceptGroupUpdate(store,{update_id:edit?32:id,[edit?"edited_message":"message"]:{chat:{type:"supergroup",id:p.chatId},message_id:id,message_thread_id:3,from:{id:2},
+   acceptGroupUpdate(store,{update_id:edit?32:id,[edit?"edited_message":"message"]:{chat:{type:topicId?"supergroup":"group",id:p.chatId},message_id:id,...(topicId?{message_thread_id:topicId}:{}),from:{id:2},
     date:Math.floor(Date.now()/1000),text,entities:text.startsWith("@bot")?[{type:"mention",offset:0,length:4}]:[]}},2,1);
   }
   send(1,"Смета Меркурий 3000");for(let id=2;id<=31;id++) send(id,"другой разговор");
