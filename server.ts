@@ -97,7 +97,8 @@ export const rpcContract = defineRpcContract({
   channelPost:{input:channelPostSchema,output:z.object({messageId:z.number().int().positive()})},
   bindGroupTopic: {
     input: z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative(),
-      threadId:z.string().min(1),ownerOnly:z.boolean(),requireMention:z.boolean()}).strict(),
+      threadId:z.string().min(1),ownerOnly:z.boolean(),requireMention:z.boolean(),
+      allowedSenderIds:z.array(z.number().int().positive().safe()).max(100).optional(),includeTopicContext:z.boolean().optional()}).strict(),
     output:z.object({bound:z.literal(true)}),
   },
   unbindGroupTopic: {
@@ -1056,7 +1057,7 @@ export default async function plugin(bb: BbPluginApi) {
       try { return await channelPost(store,tg,owner,bot,current.managedChannels,args); }
       finally { activeChannelWrites--; }
     },
-    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention})=>{
+    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,allowedSenderIds,includeTopicContext})=>{
       const owner=ownerId(), bot=botId();
       if (!owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
       const tg=telegram(botToken,lifetime.signal,15_000,()=>chatId,apiRoot);
@@ -1066,10 +1067,17 @@ export default async function plugin(bb: BbPluginApi) {
           (topicId>0 && !chat.is_forum)) throw Error("group_unavailable");
       const member=await tg("getChatMember",{chat_id:chatId,user_id:owner});
       if (!["creator","administrator"].includes(member.status)) throw Error("group_owner_required");
+      if (includeTopicContext && !me.readsAllGroups) {
+        const self=await tg("getChatMember",{chat_id:chatId,user_id:bot});
+        if (!["creator","administrator"].includes(self.status)) {
+          throw Error("Для контекста темы включите получение обычных сообщений Telegram в этой группе.");
+        }
+      }
       const thread=await bb.sdk.threads.get({threadId});
       if (!thread.projectId || thread.archivedAt || thread.deletedAt || thread.visibility==="hidden") throw Error("thread_unavailable");
       if (owner!==ownerId() || bot!==botId() || stateTransferBusy) throw Error("bot_changed");
-      bindGroupTopic(store,{chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
+      if (!ownerOnly && allowedSenderIds?.length) throw Error("allowlist_requires_owner_only");
+      bindGroupTopic(store,{includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},thread.projectId);
       return {bound:true as const};
     },
@@ -1077,7 +1085,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
       const key=`group:policy:${chatId}:${topicId}`;
       const removed=!!store.get(key);
-      store.del(key);
+      store.atomic(()=>{store.del(key);store.del(`group:context:${chatId}:${topicId}`);});
       return {removed};
     },
     providerHandoffStatus: ({topicId}) => bridge?.providerHandoffStatus(topicId) ?? null,
@@ -1662,7 +1670,7 @@ export default async function plugin(bb: BbPluginApi) {
             updates = await tg<any[]>("getUpdates", {
               offset: store.get<number>("ingress:offset") ?? 0,
               timeout: 25,
-              allowed_updates: ["message", "callback_query"],
+              allowed_updates: ["message", "edited_message", "callback_query"],
             });
           } finally { ingressPolling = false; }
           ingressError = null;

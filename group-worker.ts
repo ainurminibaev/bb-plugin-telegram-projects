@@ -1,7 +1,7 @@
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {splitText} from "./chat";
 import {ReplyRoutes} from "./reply-routing";
-import type {GroupTopicPolicy, Ingress} from "./ingress";
+import {canInvokeGroup, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {Store, Telegram} from "./model";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
@@ -27,7 +27,10 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     const prev=store.get<GroupTopicPolicy>(key);
     if (prev?.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly &&
         prev.requireMention===policy.requireMention && prev.botId===policy.botId &&
+        !!prev.includeTopicContext===!!policy.includeTopicContext &&
+        JSON.stringify(prev.allowedSenderIds??[])===JSON.stringify(policy.allowedSenderIds??[]) &&
         prev.ownerId===policy.ownerId && prev.botUsername===policy.botUsername) return;
+    store.del(`group:context:${chatId}:${topicId}`);
     store.put("group:thread:"+threadId,key);
     store.put(key,{...policy,acceptAfterSecond:Math.floor(Date.now()/1000)});
   });
@@ -58,7 +61,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     const allowed=()=>{
       const p=store.get<GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`);
       return p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && p.threadId===r.threadId &&
-        owner===job.ownerId && (!p.ownerOnly || owner===r.senderId);
+        owner===job.ownerId && canInvokeGroup(p,owner,r.senderId);
     };
     if (!allowed()) {finish("revoked");continue;}
     const dest={kind:"telegram" as const,chatId:r.chatId,topicId:r.topicId,updateId:r.updateId};

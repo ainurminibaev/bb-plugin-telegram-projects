@@ -69,3 +69,35 @@ test("pending group updates cross decimal boundaries in Telegram order",async()=
   await processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},new AbortController().signal);
   assert.deepEqual(sent,["99","100"]);
 });
+
+test("topic context is passive, scoped, editable and usable only by selected callers",async()=>{
+  const rows=new Map<string,any>();
+  const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v);},
+    del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
+    list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,value])=>({key,value:value as T}))};
+  const policy={chatId:-1001,topicId:3,threadId:"group",botId:5,botUsername:"bot",ownerOnly:true,
+    allowedSenderIds:[8],requireMention:true,includeTopicContext:true,revision:"one",ownerId:7};
+  bindGroupTopic(store,policy,"group-project");
+  let updateId=0;
+  function post(id:number,sender:number,text:string,topic=3,edit=false) {
+    return acceptGroupUpdate(store,{update_id:++updateId,[edit?"edited_message":"message"]:{message_id:id,
+      date:Math.floor(Date.now()/1000)+2,from:{id:sender},chat:{id:-1001,type:"supergroup"},message_thread_id:topic,
+      text,entities:text.startsWith("@bot")?[{type:"mention",offset:0,length:4}]:[]}},7,5);
+  }
+  assert.equal(post(1,9,"другая тема",4),false);
+  post(2,9,"встреча в три");post(2,9,"встреча в четыре",3,true);post(3,9,"@bot вопрос");
+  assert.equal(store.list("group:in:").length,0);
+  post(4,8,"@bot когда встреча?");
+  const sent:any[]=[];
+  const sdk={threads:{events:{list:async()=>[]},send:async(q:any)=>{sent.push(q);}}};
+  await processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},new AbortController().signal);
+  assert.equal(sent.length,1);
+  assert.equal(sent[0].threadId,"group");
+  assert.match(sent[0].input[0].text,/встреча в четыре/);
+  assert.doesNotMatch(sent[0].input[0].text,/другая тема|встреча в три/);
+  for(let i=5;i<40;i++)post(i,9,String(i));
+  assert.equal(rows.get("group:context:-1001:3").length,24);
+  bindGroupTopic(store,{...policy,includeTopicContext:false,revision:"two"},"group-project");
+  assert.equal(rows.has("group:context:-1001:3"),false);
+  assert.equal(post(45,9,"дальше без контекста"),false);
+});

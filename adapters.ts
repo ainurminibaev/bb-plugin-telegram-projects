@@ -105,6 +105,7 @@ export async function checkBot(tg: Telegram, expected?: number) {
     id: Number(me.id),
     username: String(me.username),
     topics: me.has_topics_enabled === true,
+    readsAllGroups: me.can_read_all_group_messages === true,
   };
 }
 export async function runBb(
