@@ -1,3 +1,4 @@
+import {proposalInput,presentProposal,acceptOwnerSelection} from "./owner-selection";
 import {bbReminderInput,isDirectOwnerRequest,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
 import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf} from "./isolated-group";
@@ -105,6 +106,7 @@ export const rpcContract = defineRpcContract({
   inspectChannelRights:{input:z.object({channelId:z.number().int().negative()}).strict(),
     output:z.object({publish:z.boolean(),editOthers:z.boolean(),deleteOthers:z.boolean()})},
   scheduleGroupReminder:{input:groupReminderInput,output:groupResultStatus},
+  presentOwnerProposal:{input:proposalInput,output:z.object({messageId:z.number(),draftHash:z.string()})},
   inspectGroupTask:{input:groupResultInput.omit({text:true}),output:z.object({
     binding:z.enum(["active","revoked"]),delivery:z.union([groupResultStatus.shape.state,z.literal("unsubmitted")]).optional(),
     messageId:z.number().optional(),
@@ -1170,6 +1172,15 @@ export default async function plugin(bb: BbPluginApi) {
       chatWake?.();
       return status;
     },
+    presentOwnerProposal: async args=>{
+      const owner=ownerId(),bot=botId();
+      if(!bridge || !owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
+      await bridge.validateOwnerAction(args.threadId,args.routeToken,owner);
+      const cfg=await settings.get();
+      if(!cfg.enabled || !cfg.chatEnabled || owner!==ownerId() || bot!==botId() || stateTransferBusy)
+        throw Error("bot_unavailable");
+      return presentProposal(store,owner,bot,args,telegram(botToken,lifetime.signal,15000,ownerId,apiRoot));
+    },
     inspectGroupTask: async args=>{
       const owner=ownerId(), bot=botId();
       if (!bridge || !owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
@@ -1847,6 +1858,10 @@ export default async function plugin(bb: BbPluginApi) {
           } finally { ingressPolling = false; }
           ingressError = null;
           for (const u of updates) {
+            if (cfg.chatEnabled && acceptOwnerSelection(store,u,ownerId(),botId())) {
+              store.put("ingress:offset",u.update_id+1);
+              continue;
+            }
             if (cfg.chatEnabled && acceptGroupUpdate(store, u, ownerId(), botId())) continue;
             const route = routeUpdate(u, ownerId(), store.get("pair:code"));
             if (route.kind === "pair") {

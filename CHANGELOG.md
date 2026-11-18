@@ -1,3 +1,7 @@
+# 0.9.12
+
+- Present versioned group-task proposals in the paired owner’s private chat and publish an immutable selection receipt to the assigned project adapter.
+
 # 0.9.11
 
 - Recheck configured source grants for the destination before delivering group results and attachments.
