@@ -24,7 +24,7 @@ function active(store:Store,owner:number,bot:number,task:string) {
   if(inspectGroupTask(store,owner,bot,task).binding!=="active") throw Error("group_task_unavailable");
   return store.get<GroupOrigin>("group:origin:"+task)!;
 }
-export async function presentProposal(store:Store,actor:number,bot:number,args:Proposal,tg:Telegram) {
+export async function presentProposal(store:Store,actor:number,bot:number,args:Pick<Proposal,"taskId"|"revision"|"items">,tg:Telegram) {
   const origin=active(store,actor,bot,args.taskId);
   const dir=directory(origin.projectId);
   const draftHash=createHash("sha256").update(JSON.stringify(args.items)).digest("hex");
@@ -137,7 +137,7 @@ function resultTarget(project:string) {
   catch {return;}
 }
 
-function readCompletion(directory:string,task:string) {
+function readTaskFile(directory:string,task:string) {
   const fd=openSync(join(directory,task+".json"),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
   try {
     const stat=fstatSync(fd);
@@ -164,7 +164,7 @@ export function collectDecisionResults(store:Store,owner:number,bot:number) {
     try {
       const origin=active(store,owner,bot,task);
       if (origin.projectId!==row.project || directory(origin.projectId)!==row.directory) continue;
-      const result=completionSchema.parse(readCompletion(target.directory,task));
+      const result=completionSchema.parse(readTaskFile(target.directory,task));
       if (result.actor!==owner || result.taskId!==task || result.revision!==row.revision ||
           result.draftHash!==row.draftHash || JSON.stringify(result.selected)!==JSON.stringify(row.selected) ||
           result.links.length!==row.selected.length || new Set(result.links).size!==result.links.length) continue;
@@ -181,5 +181,45 @@ export function collectDecisionResults(store:Store,owner:number,bot:number) {
       // An unpublished or unverified completion cannot release a result.
       continue;
     }
+  }
+}
+
+const autoTarget=z.object({projectId:z.string().min(1),directory:z.string().refine(isAbsolute)}).strict();
+function projectionDirectory(chat:number,topic:number,project:string) {
+  const raw=process.env.BB_TELEGRAM_AUTO_PROPOSALS;
+  if (!raw) return;
+  try {
+    const target=autoTarget.parse(JSON.parse(raw)[chat+":"+topic]);
+    if (target.projectId===project) return target.directory;
+  } catch {return;}
+}
+
+export function awaitProjectProposal(store:Store,task:string,chat:number,topic:number,project:string) {
+  const dir=projectionDirectory(chat,topic,project);
+  if (dir) store.put("selection:await-proposal:"+task,dir);
+}
+
+const projection=proposalInput.pick({taskId:true,revision:true,items:true}).strict();
+
+export async function presentProjectProposals(store:Store,owner:number,bot:number,tg:Telegram) {
+  for (const pending of store.list<string>("selection:await-proposal:")) {
+    const task=pending.key.slice("selection:await-proposal:".length);
+    const origin=store.get<GroupOrigin>("group:origin:"+task);
+    if (!origin || origin.owner!==owner || origin.bot!==bot ||
+        projectionDirectory(origin.chatId,origin.topicId,origin.projectId)!==pending.value ||
+        inspectGroupTask(store,owner,bot,task).binding!=="active") {
+      store.del(pending.key);
+      continue;
+    }
+    let args:z.infer<typeof projection>;
+    try {
+      args=projection.parse(readTaskFile(pending.value,task));
+      if (args.taskId!==task) continue;
+      directory(origin.projectId);
+    } catch {continue;}
+    // Consume the automatic trigger before a possibly ambiguous Telegram send.
+    // The owner's normal lookup can recover a proposal whose delivery was interrupted.
+    store.del(pending.key);
+    await presentProposal(store,owner,bot,args,tg);
   }
 }

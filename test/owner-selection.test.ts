@@ -4,13 +4,16 @@ import {writeFileSync,mkdtempSync,readFileSync,readdirSync,rmSync,statSync} from
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {randomUUID} from "node:crypto";
-import {acceptOwnerSelection,presentProposal,handleOwnerSelection,collectDecisionResults} from "../owner-selection";
+import {acceptOwnerSelection,presentProposal,handleOwnerSelection,collectDecisionResults,awaitProjectProposal,presentProjectProposals} from "../owner-selection";
 import type {Store,Telegram} from "../model";
 
 test("only an owner reply to the current draft releases selected operations",async()=>{
   const dir=mkdtempSync(join(tmpdir(),"decision-"));
   const prior=process.env.BB_TELEGRAM_DECISION_OUTBOXES;
   const results=mkdtempSync(join(tmpdir(),"results-"));
+  const inbox=mkdtempSync(join(tmpdir(),"projections-"));
+  const previousAuto=process.env.BB_TELEGRAM_AUTO_PROPOSALS;
+  process.env.BB_TELEGRAM_AUTO_PROPOSALS=JSON.stringify({"-1:3":{projectId:"work",directory:inbox}});
   const previousResults=process.env.BB_TELEGRAM_DECISION_RESULTS;
   process.env.BB_TELEGRAM_DECISION_RESULTS=JSON.stringify({work:{host:"example.org",directory:results}});
   process.env.BB_TELEGRAM_DECISION_OUTBOXES=JSON.stringify({work:dir});
@@ -26,6 +29,16 @@ test("only an owner reply to the current draft releases selected operations",asy
     let message=40;
     const tg:Telegram=async<T>(_method,p)=>{assert.equal(p.chat_id,actor);return {message_id:++message} as T;};
     const proposal={taskId,threadId:"coordinator",routeToken:randomUUID(),revision:1,items:["A","B","C"]};
+    awaitProjectProposal(store,taskId,-1,4,"work");
+    assert.equal(store.list("selection:await-proposal:").length,0);
+    awaitProjectProposal(store,taskId,-1,3,"work");
+    await presentProjectProposals(store,actor,bot,tg);
+    assert.equal(message,40);
+    writeFileSync(join(inbox,taskId+".json"),JSON.stringify({taskId,revision:1,items:proposal.items}));
+    rows=new Map(JSON.parse(JSON.stringify([...rows])));
+    await presentProjectProposals(store,actor,bot,tg);
+    await presentProjectProposals(store,actor,bot,tg);
+    assert.equal(message,41);
     const old=await presentProposal(store,actor,bot,proposal,tg);
     const current=await presentProposal(store,actor,bot,{...proposal,revision:2,items:["A2","B2","C2"]},tg);
     const reply=(sender:number,id:number,text="Сделай первый и третий.")=>({message:{from:{id:sender},chat:{id:sender,type:"private"},
@@ -92,6 +105,9 @@ test("only an owner reply to the current draft releases selected operations",asy
     else process.env.BB_TELEGRAM_DECISION_OUTBOXES=prior;
     if(previousResults===undefined) delete process.env.BB_TELEGRAM_DECISION_RESULTS;
     else process.env.BB_TELEGRAM_DECISION_RESULTS=previousResults;
+    if(previousAuto===undefined) delete process.env.BB_TELEGRAM_AUTO_PROPOSALS;
+    else process.env.BB_TELEGRAM_AUTO_PROPOSALS=previousAuto;
+    rmSync(inbox,{recursive:true,force:true});
     rmSync(results,{recursive:true,force:true});
     rmSync(dir,{recursive:true,force:true});
   }

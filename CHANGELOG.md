@@ -1,3 +1,7 @@
+# 0.9.16
+
+- Automatically present a project-prepared proposal in the paired owner chat for an explicitly assigned forum topic.
+
 # 0.9.15
 
 - Deliver verified project result links after a selected owner proposal completes.

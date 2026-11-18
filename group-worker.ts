@@ -1,3 +1,4 @@
+import {awaitProjectProposal} from "./owner-selection";
 import {sourcesVisible} from "./source-access";
 import {randomUUID} from "node:crypto";
 import {groupExecutor} from "./isolated-client";
@@ -253,6 +254,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         store.put("group:origin:"+job.taskId,{owner,bot:botId,sender:r.senderId,chatId:r.chatId,
           topicId:r.topicId,messageId:r.messageId,threadId:r.threadId,revision:policy.revision,projectId:policy.projectId,
           executionToken:job.executionToken});
+        awaitProjectProposal(store,job.taskId!,r.chatId,r.topicId,policy.projectId!);
         store.put(key,job);
       });
     }
