@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Store } from "./model";
 
 export type ReplyRoute = { kind: "bb" } | {
-  kind: "telegram"; chatId: number; topicId: number; updateId: number;
+  kind: "telegram"; chatId: number; topicId: number; updateId: number; messageId?: number;
 };
 export function routeMarker(id:string) {
     return {type: "text" as const, visibility: "agent-only" as const, mentions: [],

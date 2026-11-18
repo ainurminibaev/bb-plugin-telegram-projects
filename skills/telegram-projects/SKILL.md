@@ -85,6 +85,7 @@ without dispatch/subthread/tool names. Only public progress is forwarded, not re
 Failure overlay: failed parent and visible direct child threads produce a deduplicated
 Telegram notice. Retry time is taken from the actual durable threads.queue row, not
 from historical retry decisions. With no row, say no automatic retry is scheduled.
+Each failed coordinator turn gets its own status even when a later turn has already finished. On recovery, use the current request's route. If an external action was attempted before the failure, check its receipt or the destination state before repeating it. When that state cannot be verified, report the uncertain outcome and ask before another write.
 Only sanitized failure categories are shown; never forward raw provider error details.
 
 ## Explicit delivery from BB

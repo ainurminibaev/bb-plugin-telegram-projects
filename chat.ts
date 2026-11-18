@@ -1695,7 +1695,7 @@ export class ChatBridge {
         threadId: b.threadId,
         mode: "queue-if-active",
         input: [{ type: "text", text, mentions: [] }, this.routes.ingress(b.threadId,
-          {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId})],
+          {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId})],
       });
     } else {
       if (!b.ready) {
@@ -1725,7 +1725,7 @@ export class ChatBridge {
         prompt = "[cli-agents-selection:" + selection.token + "]\n" + text;
       }
       const marker = this.routes.ingress(null,
-        {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId});
+        {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId});
       const t = await this.d.sdk.threads.spawn({
         projectId: b.projectId,
         environment,
@@ -2207,25 +2207,29 @@ export class ChatBridge {
       const start = sorted.find(e => e.type === "turn/started");
       const error = sorted.find(e => e.type === "provider/error" && (!start || e.seq > start.seq));
       const category = error?.type === "provider/error" ? error.data.errorInfo?.category : undefined;
-      const reason = category === "rate-limit" ? "достигнут лимит модели" :
-        category === "unauthorized" ? "ошибка авторизации" :
-        category === "overloaded" ? "модель перегружена" :
-        category === "connection-failed" || category === "stream-disconnected" ? "потеряна связь с моделью" : "ошибка при выполнении";
-      let retry: {id: string; sendAt: number | null} | undefined;
-      let queueKnown = true;
-      try {
-        const queue = await this.d.sdk.threads.queue.list({threadId: t.id, signal: this.d.signal});
-        const failedTurnId = end.scope.turnId;
-        retry = queue.filter(r => r.payload.kind === "retry" && r.state !== "failed_exhausted" &&
-          this.routes.retryBelongsToTurn(t.id, failedTurnId, r.payload.retryOfTurnRequestId))
-          .sort((a,c) => (a.sendAt || 0)-(c.sendAt || 0))[0];
-      } catch { queueKnown = false; }
-      const retryLabel = retry ? retry.sendAt ? "Автоматическая повторная попытка: " + new Date(retry.sendAt).toLocaleString("ru-RU", {timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) + " МСК. После завершения ответ придёт сюда." : "Автоматическая повторная попытка стоит в очереди. После завершения ответ придёт сюда." :
-        queueKnown ? "Автоповтор сейчас не запланирован. Можно попросить продолжить после устранения причины." : "Пока не удалось проверить, запланирован ли автоповтор.";
-      const title = t.id === b.threadId ? "Помощник" : cleanAssistantText(t.title || "Отдельная задача").replace(/\s+/g, " ").slice(0,140);
-      this.enqueue(b.topicId, `⚠️ ${title}: ${reason}.\n${retryLabel}`, undefined,
-        `failure:${b.revision}:${t.id}:${end.seq}:${retry?.id || (queueKnown ? "none" : "unknown")}:${retry?.sendAt || 0}`);
+      await this.reportFailure(b,t.id,t.title,end.scope.turnId,end.seq,category);
     }
+  }
+  private async reportFailure(b:Binding,threadId:string,threadTitle:string|null,turnId:string,seq:number,category?:string) {
+    const reason = category === "rate-limit" ? "достигнут лимит модели" :
+      category === "unauthorized" ? "ошибка авторизации" :
+      category === "overloaded" ? "модель перегружена" :
+      category === "connection-failed" || category === "stream-disconnected" ? "потеряна связь с моделью" : "ошибка при выполнении";
+    let retry: {id: string; sendAt: number | null} | undefined;
+    let queueKnown = true;
+    try {
+      const queue = await this.d.sdk.threads.queue.list({threadId, signal: this.d.signal});
+      retry = queue.filter(r => r.payload.kind === "retry" && r.state !== "failed_exhausted" &&
+        this.routes.retryBelongsToTurn(threadId, turnId, r.payload.retryOfTurnRequestId))
+        .sort((a,c) => (a.sendAt || 0)-(c.sendAt || 0))[0];
+    } catch { queueKnown = false; }
+    const retryLabel = retry ? retry.sendAt ? "Автоматическая повторная попытка: " + new Date(retry.sendAt).toLocaleString("ru-RU", {timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) + " МСК." : "Автоматическая повторная попытка стоит в очереди." :
+      queueKnown ? "Автоповтор сейчас не запланирован. Перед повтором действия проверьте, успело ли оно выполниться." : "Пока не удалось проверить, запланирован ли автоповтор.";
+    const route = this.routes.destination(threadId,turnId);
+    if (route?.kind !== "telegram" || route.chatId !== this.d.owner() || route.topicId !== b.topicId) return;
+    const title = threadId === b.threadId ? "Помощник" : cleanAssistantText(threadTitle || "Отдельная задача").replace(/\s+/g, " ").slice(0,140);
+    this.enqueue(b.topicId, `⚠️ ${title}: ${reason}. Итог поручения не подтверждён.\n${retryLabel}`, undefined,
+      `failure:${b.revision}:${threadId}:${seq}:${retry?.id || (queueKnown ? "none" : "unknown")}:${retry?.sendAt || 0}`, false, undefined, route);
   }
   private async delegatedProgress(b: Binding): Promise<string[]> {
     if (!b.threadId) return [];
@@ -2317,6 +2321,7 @@ export class ChatBridge {
           threadId: b.threadId,
           afterSeq: String(b.cursor),
           types: [
+            "provider/error",
             "item/started",
             "item/completed",
             "turn/completed",
@@ -2359,6 +2364,14 @@ export class ChatBridge {
           if (event.scope.kind !== "turn" || !this.canDeliver(b, event.scope.turnId)) {
             b.cursor = event.seq;
             continue;
+          }
+          const errorKey="chat:failure-category:"+b.revision+":"+event.scope.turnId;
+          if (event.type==="provider/error" && event.data.errorInfo?.category)
+            this.s.put(errorKey,event.data.errorInfo.category);
+          if (event.type==="turn/completed") {
+            if (event.data.status==="failed")
+              await this.reportFailure(b,b.threadId,t.title,event.scope.turnId,event.seq,this.s.get<string>(errorKey));
+            this.s.del(errorKey);
           }
           if (event.type === "item/started") {
             const item = event.data.item;
@@ -2674,7 +2687,11 @@ export class ChatBridge {
             last = old;
             continue;
           }
+          const route=o.taskRoute;
+          const source=route?.kind==="telegram" && route.chatId===this.d.owner() && route.topicId===o.topicId
+            ? route.messageId : undefined;
           const payload = {
+            ...(source && !o.editId ? {reply_parameters:{message_id:source,allow_sending_without_reply:true}} : {}),
             message_thread_id: o.topicId || undefined,
             disable_notification: !key.startsWith("chat:out:question:"),
             link_preview_options: { is_disabled: true },

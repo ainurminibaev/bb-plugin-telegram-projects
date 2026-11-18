@@ -1866,3 +1866,42 @@ test("/work lists visible active children of the current binding without a model
     assert.equal(f.calls.length, 0);
   } finally { f.cleanup(); }
 });
+
+test("two rate-limited Telegram requests each get an addressed status; only the retried request gets its final",async()=>{
+  const f=fixture();
+  try {
+    const requests=["A","B"];
+    const originals=[];
+    const events:any[]=[];
+    const add=(type:string,turnId:string,data:any)=>events.push({seq:100+events.length,type,scope:{kind:"turn",turnId},data});
+    for (const id of requests) {
+      const input={...f.input(id),messageId:id==="A"?510:820};
+      originals.push(input.messageId);
+      await f.bridge.handle(input);
+      const submitted=f.calls.at(-1)![1];
+      add("client/turn/requested",id,{requestId:id,originPluginId:"telegram-projects",input:submitted.input});
+      add("turn/input/accepted",id,{clientRequestId:id});
+      add("provider/error",id,{errorInfo:{category:"rate-limit"}});
+      add("turn/completed",id,{status:"failed"});
+    }
+    const submittedCalls=f.calls.length;
+    f.sdk.threads.queue={list:async()=>[{id:"retry-B",state:"scheduled",sendAt:Date.now()+60000,
+      payload:{kind:"retry",retryOfTurnRequestId:"B"}}]};
+    add("client/turn/requested","B-retry",{requestId:"retry-B",retryOfRequestId:"B"});
+    add("turn/input/accepted","B-retry",{clientRequestId:"retry-B"});
+    add("item/completed","B-retry",{item:{type:"agentMessage",text:"A-INTERMEDIATE"}});
+    add("item/completed","B-retry",{item:{type:"agentMessage",text:"B-FINAL"}});
+    add("turn/completed","B-retry",{status:"completed"});
+    f.setEvents(events);
+    await f.bridge.observe(); await f.bridge.flush();
+    await f.bridge.observe(); await f.bridge.flush();
+    const statuses=f.sent.filter(m=>m.text?.startsWith("⚠️ Помощник"));
+    assert.deepEqual(statuses.map(m=>m.reply_parameters?.message_id),originals);
+    assert.match(statuses[0].text,/не запланирован/);
+    assert.match(statuses[1].text,/МСК/);
+    assert.ok(statuses.every(m=>m.text.includes("лимит модели")));
+    assert.deepEqual(f.sent.filter(m=>m.text==="B-FINAL").map(m=>m.reply_parameters.message_id),[820]);
+    assert.ok(!f.sent.some(m=>m.text?.includes("A-INTERMEDIATE")));
+    assert.equal(f.calls.length,submittedCalls);
+  } finally {f.cleanup();}
+});

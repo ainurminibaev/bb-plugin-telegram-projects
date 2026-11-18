@@ -1,3 +1,8 @@
+# 0.9.7
+
+- Report each failed Telegram coordinator turn, including failures followed by another task before the bridge polls. Reply to the originating message for new requests.
+- Show the retry state for the affected task. Retain the final response from its successful turn and avoid resubmitting the original operation from the bridge.
+
 # 0.9.6
 
 - Schedule a conditional group reminder from a direct user turn in the paired BB coordinator. Confirmation stays in BB and the reminder replies to the original Telegram group task.
