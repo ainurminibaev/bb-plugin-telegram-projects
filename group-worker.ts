@@ -1,4 +1,6 @@
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
+import {localArtifacts} from "./telegram-ux";
+import {readGroupPdf} from "./group-pdf";
 import {splitText} from "./chat";
 import {ReplyRoutes} from "./reply-routing";
 import {canInvokeGroup, type GroupTopicPolicy, type Ingress} from "./ingress";
@@ -8,6 +10,7 @@ type GroupInput = Extract<Ingress,{kind:"group"}>;
 type Job = {
   route: GroupInput; ownerId:number; revision?:string;
   state:"pending"|"submitted"|"ready"|"sending"|"done"|"revoked";
+  pdfIndex?:number; failedPdfs?:string[];
   cursor?:number; turnId?:string; answer?:string; part?:number;
 };
 
@@ -39,7 +42,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
 // Called serially by the chat service. Never retry a send with an unknown outcome.
 export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   owner:number, botId:number, transport:(chatId:number)=>Telegram, signal:AbortSignal,
-  transcribe?:(voice:NonNullable<GroupInput["voice"]>)=>Promise<string>) {
+  transcribe?:(voice:NonNullable<GroupInput["voice"]>)=>Promise<string>, fileHostId?:string) {
   const routes=new ReplyRoutes(store);
   const pending=store.list<Job>(`group:in:${botId}:`);
   pending.sort((a,b)=>a.value.route.updateId-b.value.route.updateId);
@@ -115,7 +118,41 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       store.put(key,job);
     }
     if (job.state==="ready") {
-      const parts=splitText(job.answer!);
+      let text=job.answer!;
+      const links=localArtifacts(text).filter(link=>/\.pdf$/i.test(link.path));
+      const paths=[...new Set(links.map(link=>link.path))];
+      for (let i=job.pdfIndex??0;i<paths.length;i++) {
+        let pdf;
+        try {
+          const thread=await sdk.threads.get({threadId:r.threadId,signal});
+          if (!fileHostId || !thread.environmentId) throw Error("missing_environment");
+          const env=await sdk.environments.get({environmentId:thread.environmentId,signal});
+          if (!env.path || env.hostId!==fileHostId) throw Error("group_export_host_mismatch");
+          pdf=await readGroupPdf(env.path,paths[i]);
+        } catch {
+          if (signal.aborted) return;
+          job.failedPdfs=[...(job.failedPdfs??[]),paths[i]];
+          job.pdfIndex=i+1;
+          store.put(key,job);
+          continue;
+        }
+        if (!allowed()) {finish("revoked");break;}
+        store.put(key,{...job,state:"sending"});
+        const sent=await transport(r.chatId)("sendDocument",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
+          reply_parameters:{message_id:r.messageId},document:pdf.document,document_filename:pdf.name,caption:pdf.name.slice(0,900)});
+        if (!Number.isSafeInteger(sent?.message_id) || !sent.document?.file_id) throw Error("missing_document_receipt");
+        job.pdfIndex=i+1;
+        store.atomic(()=>{
+          store.put(`group:pdf:${botId}:${r.chatId}:${r.topicId}:${sent.message_id}`,{
+            owner,threadId:r.threadId,path:pdf.path,sha256:pdf.sha256,fileId:sent.document.file_id});
+          store.put(key,job);
+        });
+      }
+      if (!allowed()) {finish("revoked");continue;}
+      for (const link of links) text=text.replace(link.markdown,
+        job.failedPdfs?.includes(link.path) ? "PDF недоступен для отправки." : "");
+      if (!text.trim()) {finish("done");continue;}
+      const parts=splitText(text.trim());
       for (let i=job.part??0;i<parts.length;i++) {
         if (!allowed()) {finish("revoked");break;}
         store.put(key,{...job,state:"sending",part:i});

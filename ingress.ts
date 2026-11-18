@@ -190,6 +190,14 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       }
     }
     if (route.kind !== "group") return;
+    const reply=message.reply_to_message;
+    if (reply?.from?.id===botId && reply.chat?.id===chatId && (reply.message_thread_id??0)===topicId) {
+      const pdf=store.get<{owner:number;threadId:string;path:string;sha256:string;fileId:string}>(
+        `group:pdf:${botId}:${chatId}:${topicId}:${reply.message_id}`);
+      if (pdf?.owner===owner && pdf.threadId===policy.threadId && pdf.fileId===reply.document?.file_id)
+        route.text += "\nОтправленная версия PDF: "+JSON.stringify({path:pdf.path,sha256:pdf.sha256})+
+          ". Сверь SHA-256 исходника перед правками и сохрани новую версию отдельным файлом.";
+    }
     const key = `group:in:${botId}:${route.updateId}`;
     if (!store.get(key) && !store.get(`group:receipt:${botId}:${route.updateId}`)) store.put(key, { route, ownerId: owner, revision: policy.revision, state: "pending" });
     const nextOffset = Math.max(store.get<number>("ingress:offset") ?? 0, route.updateId + 1);

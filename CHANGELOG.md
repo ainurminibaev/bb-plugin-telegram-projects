@@ -1,3 +1,7 @@
+# 0.9.1-personal.20
+
+- Deliver local PDF exports to the originating Telegram group topic. A reply to a delivered document identifies its original path and content hash in the bound thread.
+
 # 0.9.1-personal.19
 
 - Accept authorized voice corrections in group topics and preserve the target Telegram message of text and voice replies. Use the configured transcription service before dispatch.

@@ -1572,7 +1572,7 @@ export default async function plugin(bb: BbPluginApi) {
                 await processGroupInputs(store,bb.sdk,owner,bot,
                   chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
-                    cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined));
+                    cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined),cfg.telegramFileHostId);
               } catch (error) { ingressError = safeError(error); }
             }
           } else {
