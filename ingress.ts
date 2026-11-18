@@ -86,11 +86,12 @@ export function routeUpdate(
     if (group.requireMention && !addressed) return {kind: "ignore"};
     const reply = m.reply_to_message;
     const sameTopic = reply?.chat?.id === group.chatId && (reply.message_thread_id ?? 0) === topicId;
-    const target = sameTopic && Number.isSafeInteger(reply.message_id) ? {
+    const repliedToMessage = sameTopic && reply.message_id !== topicId;
+    const target = repliedToMessage && Number.isSafeInteger(reply.message_id) ? {
       messageId:reply.message_id, fileName:reply.document?.file_name,
       excerpt:String(reply.text ?? reply.caption ?? "").slice(0,600)
     } : undefined;
-    const examples=[groupExample(m), sameTopic && reply?.from?.id===from.id ? groupExample(reply) : undefined]
+    const examples=[groupExample(m), repliedToMessage && reply?.from?.id===from.id ? groupExample(reply) : undefined]
       .filter((file):file is GroupExample=>!!file);
     const prompt = target ? "Ответ на сообщение в этой теме: " + JSON.stringify(target) + "\n" + text : text;
     return {kind: "group", chatId: group.chatId, topicId, senderId: from.id,

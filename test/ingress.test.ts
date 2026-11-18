@@ -183,3 +183,21 @@ test("only a PDF reply tied to this task, sender and binding satisfies its remin
     assert.equal(store.get("group:completed-pdf:task"),i===3?20:undefined);
   }
 });
+
+test("a forum root supplies no reply content to a command", () => {
+  const forum = {id:-1001,type:"supergroup"};
+  const policy = {chatId:forum.id,topicId:3,threadId:"t",ownerOnly:true,
+    allowedSenderIds:[7],requireMention:true,botId:8,botUsername:"bot"};
+  const command = "/ask@bot title";
+  const message = {message_thread_id:3,message_id:4,chat:forum,from:{id:7},text:command,
+    entities:[{type:"bot_command",offset:0,length:8}]};
+  for (const replyId of [3,2]) {
+    const reply_to_message = {chat:forum,message_thread_id:3,message_id:replyId,text:"quoted"};
+    const result = route({update_id:9,message:{...message,reply_to_message}},9,undefined,policy);
+    assert.equal(result.kind,"group");
+    if (result.kind === "group") {
+      assert.equal(result.text === command, replyId === 3);
+      assert.equal(result.text.includes("quoted"), replyId !== 3);
+    }
+  }
+});

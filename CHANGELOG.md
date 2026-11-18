@@ -1,3 +1,7 @@
+# 0.9.8
+
+- Keep the current message text intact when Telegram references the forum topic root. Preserve quoted context for replies to ordinary messages.
+
 # 0.9.7
 
 - Report each failed Telegram coordinator turn, including failures followed by another task before the bridge polls. Reply to the originating message for new requests.
