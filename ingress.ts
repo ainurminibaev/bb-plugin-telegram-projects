@@ -4,6 +4,7 @@ import type { ChatInput } from "./chat";
 
 export type GroupTopicPolicy = {
   isolated?: boolean;
+  deliverySources?: string[];
   projectId?: string; // Older bindings used project and thread markers only.
   chatId: number;
   topicId: number;

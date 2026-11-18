@@ -115,3 +115,51 @@ test("native owner reminders accept direct BB turns only",()=>{
     assert.equal(isDirectOwnerRequest({...direct,...change}),false);
   }
 });
+
+test("a source-only revocation survives restart and suppresses all queued payloads",async()=>{
+  const {mkdtemp,writeFile,rm}=await import("node:fs/promises");
+  const {tmpdir}=await import("node:os");
+  const {join}=await import("node:path");
+  const {processGroupInputs}=await import("../group-worker");
+  const dir=await mkdtemp(join(tmpdir(),"source-grants-"));
+  const file=join(dir,"grants.json");
+  const previous=process.env.BB_TELEGRAM_SOURCE_GRANTS;
+  process.env.BB_TELEGRAM_SOURCE_GRANTS=file;
+  try {
+    for(const revoke of [true,false]) {
+      const before=fixture();
+      const key="group:policy:-1001:7";
+      before.store.put(key,{...before.store.get<object>(key),deliverySources:["D"]});
+      const text="D: approved https://example.invalid/D";
+      const grant={"1:-1001:7":["D"]};
+      await writeFile(file,JSON.stringify(grant));
+      queueGroupResult(before.store,2,1,"0",text);
+      if(revoke) {
+        // A second pending path would normally send a PDF followed by text.
+        before.store.put("group:in:1:43",{ownerId:2,revision:"bound",state:"ready",
+          route:{chatId:-1001,topicId:7,messageId:43,updateId:43,threadId:"thread-0",senderId:2},
+          answer:text+" [D.pdf](/tmp/outputs/D.pdf)"});
+        await writeFile(file,JSON.stringify({"1:-1002:7":["D"]}));
+      }
+      const after=fixture(before.snapshot());
+      const methods:string[]=[];
+      const transport:Telegram=async<T>(method,payload)=>{
+        methods.push(method);after.sent.push(payload);return {message_id:90} as T;
+      };
+      await after.tick(transport);
+      await processGroupInputs(after.store,{} as never,2,1,()=>transport,new AbortController().signal);
+      const replay=fixture(after.snapshot());
+      await replay.tick(transport);
+      assert.deepEqual(queueGroupResult(replay.store,2,1,"0",text),revoke?
+        {state:"source_unavailable"}:{state:"sent",messageId:90});
+      assert.equal(inspectGroupTask(replay.store,2,1,"0").binding,"active");
+      assert.deepEqual(methods,revoke?[]:["sendMessage"]);
+      if(revoke) assert.equal(replay.store.get<{reason:string}>("group:receipt:1:43")?.reason,"source_unavailable");
+      else assert.equal(after.sent[0].text,text);
+    }
+  } finally {
+    if(previous===undefined) delete process.env.BB_TELEGRAM_SOURCE_GRANTS;
+    else process.env.BB_TELEGRAM_SOURCE_GRANTS=previous;
+    await rm(dir,{recursive:true,force:true});
+  }
+});

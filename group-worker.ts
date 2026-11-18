@@ -1,3 +1,4 @@
+import {sourcesVisible} from "./source-access";
 import {randomUUID} from "node:crypto";
 import {groupExecutor} from "./isolated-client";
 import {historyPrefix,topicPassages} from "./topic-search";
@@ -36,6 +37,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     store.put("group:project:"+projectId,true);
     const prev=store.get<GroupTopicPolicy>(key);
     if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly &&
+        JSON.stringify(prev.deliverySources??[])===JSON.stringify(policy.deliverySources??[]) &&
         prev.requireMention===policy.requireMention && prev.botId===policy.botId &&
         !!prev.retainFullHistory===!!policy.retainFullHistory && !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
         JSON.stringify(prev.allowedSenderIds??[])===JSON.stringify(policy.allowedSenderIds??[]) &&
@@ -124,11 +126,12 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   for (const {key,value:job} of pending) {
     if (signal.aborted) return;
     const r=job.route;
+    let sourceDenied=false;
     const finish=(state:"done"|"revoked"|"sending", sentId?:number)=>{
       store.atomic(()=>{
         const receiptKey=`group:receipt:${botId}:${r.updateId}`;
         // An interrupted Telegram send requires the original payload for reconciliation.
-        store.put(receiptKey,state==="sending"?job:{state,chatId:r.chatId,topicId:r.topicId,
+        store.put(receiptKey,state==="sending"?job:{state,...(sourceDenied && {reason:"source_unavailable"}),chatId:r.chatId,topicId:r.topicId,
           messageId:r.messageId,threadId:r.threadId,turnId:job.turnId,sentId});
         if (job.progressId) store.put(`group:cleanup:${botId}:${r.updateId}`,{chatId:r.chatId,messageId:job.progressId});
         store.del(`group:examples:${botId}:${r.updateId}`);
@@ -141,7 +144,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     }
     const allowed=()=>{
       const p=store.get<GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`);
-      return p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && p.threadId===r.threadId &&
+      sourceDenied=!sourcesVisible(p?.deliverySources,botId,r.chatId,r.topicId);
+      return !sourceDenied && p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && p.threadId===r.threadId &&
         owner===job.ownerId && (r.senderId===owner || p.isolated===true) && canInvokeGroup(p,owner,r.senderId);
     };
     if (!allowed()) {finish("revoked");continue;}

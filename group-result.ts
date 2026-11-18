@@ -1,3 +1,4 @@
+import {sourcesVisible} from "./source-access";
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {z} from "zod";
 import {canInvokeGroup, type GroupTopicPolicy} from "./ingress";
@@ -9,7 +10,7 @@ export const groupResultInput = z.object({
   text:z.string().trim().min(1).max(4096),
 }).strict();
 export const groupResultStatus = z.object({
-  state:z.enum(["queued","sent","revoked","unknown","rejected","cancelled"]), messageId:z.number().optional(),
+  state:z.enum(["queued","sent","revoked","unknown","rejected","cancelled","source_unavailable"]), messageId:z.number().optional(),
 });
 type Status = z.infer<typeof groupResultStatus>;
 type Result = Status & {text:string};
@@ -114,6 +115,8 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     const policyKey=`group:policy:${chatId}:${topicId}`;
     const allowed=()=>current(origin) && groupBindingActive(store,origin);
     if (!allowed()) {finish("revoked");continue;}
+    const sourceAllowed=()=>sourcesVisible(store.get<GroupTopicPolicy>(policyKey)?.deliverySources,bot,chatId,topicId);
+    if (!sourceAllowed()) {finish("source_unavailable");continue;}
     const isolated=store.get<GroupTopicPolicy>(policyKey)!.isolated;
     if (isolated) {
       const worker=groupExecutor(chatId,topicId);
@@ -133,6 +136,7 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     }
     if (signal.aborted) return;
     if (!allowed()) {finish("revoked");continue;}
+    if (!sourceAllowed()) {finish("source_unavailable");continue;}
     if (satisfied()) {finish("cancelled");continue;}
     finish("unknown");
     try {

@@ -1,3 +1,7 @@
+# 0.9.11
+
+- Recheck configured source grants for the destination before delivering group results and attachments.
+
 # 0.9.10
 
 - Keep commands intact when Telegram references the forum topic root. Preserve the context of replies to ordinary messages.
