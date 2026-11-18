@@ -1,3 +1,7 @@
+# 0.9.18-rc.1
+
+- Transfer the private coordinator settings after a verified provider handoff. Hold incoming work until the settings are saved, including after a restart.
+
 # 0.9.17
 
 - Include the original forum message, task ID and revision in automatically presented proposals.

@@ -10,7 +10,7 @@ export type HandoffJob = {
   id: string; binding: HandoffBinding; providerId: string; model: string;
   source: string; sourceSeq: number; environmentId: string; at: number;
   frozen: string[]; priorTargets: string[]; target?: string;
-  phase: "preparing" | "creating" | "uncertain" | "waiting" | "moving" | "rollback" | "cancelled" | "done";
+  phase: "preparing" | "creating" | "uncertain" | "waiting" | "moving" | "bindingPolicy" | "rollback" | "cancelled" | "done";
   error?: string;
   cancelRequested?: boolean;
   pickupRequests?: string[];
@@ -71,6 +71,7 @@ export class TelegramHandoff {
   constructor(private d: {store: Store; sdk: Sdk;
     binding: (topic: number) => HandoffBinding | undefined;
     commit: (job: HandoffJob, cursor: number) => void;
+    syncCoordinator?: (job: HandoffJob) => Promise<void>;
     notify: (job: HandoffJob) => void;
     assertDeliveryDrained: (source: string, topic: number) => void;
     sourceRetired: (job: HandoffJob) => void;
@@ -229,7 +230,7 @@ export class TelegramHandoff {
   }
   async cancel(topic: number) {
     const j = this.active(topic);
-    if (!j) return;
+    if (!j || j.phase === "bindingPolicy") return;
     j.cancelRequested = true;
     this.save(j);
     if (this.flights.has(j.id)) { this.d.notify(j); return; }
@@ -266,6 +267,10 @@ export class TelegramHandoff {
       if (this.flights.has(j.id)) continue;
       this.flights.add(j.id);
       try {
+        if (j.phase === "bindingPolicy") {
+          await this.finishBinding(j);
+          continue;
+        }
         if (j.cancelRequested) { j.phase = "rollback"; this.save(j); }
         if (j.phase === "preparing") {
           // Reload before native creation: safe to release, not replay.
@@ -341,10 +346,14 @@ export class TelegramHandoff {
         if (this.jobs().find(x => x.id === j.id)?.cancelRequested) throw Error("handoff_cancel_requested");
         this.d.store.atomic(() => {
           this.d.commit(j, events[0]?.seq ?? 0);
-          j.phase = "done"; this.save(j);
+          j.phase = this.d.syncCoordinator ? "bindingPolicy" : "done"; this.save(j);
         });
-        this.d.notify(j);
+        if (this.d.syncCoordinator) await this.finishBinding(j);
+        else this.d.notify(j);
       } catch (e) {
+        // The Telegram binding and child ownership are already committed.
+        // Keep dispatch held and retry the idempotent settings write on restart.
+        if (j.phase === "bindingPolicy") { this.d.notify(j); continue; }
         j.error = e instanceof Error && /^handoff_[a-z_]+$/.test(e.message) ? e.message : "handoff_operation_unconfirmed";
         // Retain the hold on any partial transfer. A later poll reconciles
         // native parent links, including writes whose replies were lost.
@@ -352,6 +361,15 @@ export class TelegramHandoff {
         this.save(j); this.d.notify(j);
       } finally { this.flights.delete(j.id); }
     }
+  }
+  private async finishBinding(j: HandoffJob) {
+    const current = this.d.binding(j.binding.topicId);
+    if (!j.target || current?.threadId !== j.target || current.projectId !== j.binding.projectId)
+      throw Error("handoff_binding_changed");
+    await this.d.syncCoordinator?.(j);
+    j.phase = "done";
+    this.save(j);
+    this.d.notify(j);
   }
   private async retire(j: HandoffJob) {
     if (this.d.sourceIsBound(j.source)) {

@@ -1,4 +1,5 @@
 import { ReplyRoutes, type ReplyRoute } from "./reply-routing";
+import { syncCoordinator } from "./handoff-coordinator";
 import { TelegramHandoff, type HandoffJob } from "./handoff";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
@@ -219,6 +220,7 @@ export class ChatBridge {
           revision: fresh(), cursor, ready: false, profileId: undefined, profileTarget: undefined,
           status: undefined, progressId: undefined, progressText: undefined, activity: undefined, toolActivity: undefined});
       },
+      syncCoordinator: job => syncCoordinator(d.sdk, job),
       notify: job => this.handoffStatus(job),
       sourceRetired: job => {
         // All source deliveries were drained before its archive. Its route
@@ -1160,6 +1162,7 @@ export class ChatBridge {
   private handoffStatus(job: HandoffJob, force = false) {
     const b = this.binding(job.binding.topicId);
     const text = job.phase === "done" ? "Помощник переключён. История передана, рабочие подтреды сохранены. Продолжай писать здесь." :
+      job.phase === "bindingPolicy" ? "Сохраняю привязку правил помощника. Новые сообщения ждут в очереди." :
       job.phase === "cancelled" ? "Переключение отменено. Прежний помощник остаётся подключён; сообщения из очереди будут переданы ему." :
       job.cancelRequested ? "Отмена запрошена. Дожидаюсь результата текущего шага, чтобы безопасно вернуть прежнюю привязку. Сообщения сохранены в очереди." :
       job.phase === "uncertain" ? "Не удалось подтвердить создание нового треда. Повторно его не создаю. Можно отменить переключение и продолжить с прежним помощником." :
@@ -1172,7 +1175,7 @@ export class ChatBridge {
     const retry = job.retryAt && job.retryAt > Date.now() ? " Следующая попытка BB: " +
       new Date(job.retryAt).toLocaleString("ru-RU", {timeZone: "Europe/Moscow"}) + " МСК. Можно отменить переключение." : "";
     this.enqueue(job.binding.topicId, text + reason + retry,
-      b && !["done", "cancelled"].includes(job.phase) ? [[this.button(b, "handoffCancel", "Отменить переключение")]] : undefined,
+      b && !["done", "cancelled", "bindingPolicy"].includes(job.phase) ? [[this.button(b, "handoffCancel", "Отменить переключение")]] : undefined,
       "handoff:" + job.id + ":" + job.phase + (job.retryAt ? ":retry:" + job.retryAt : "") + (job.cancelRequested ? ":cancel" : "") + (force ? ":" + fresh() : ""));
   }
   private async handoffProviders(b: Binding) {
