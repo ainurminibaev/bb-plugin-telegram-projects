@@ -41,6 +41,7 @@ export async function saveLocalTelegramFile(input: {
   sourcePath: string;
   localRoot: string;
   inboxRoot: string;
+  threadId?: string;
   updateId: number;
   fileId: string;
   name: string;
@@ -124,7 +125,7 @@ export async function saveLocalTelegramFile(input: {
       throw Error("attachment_source_changed");
     await rename(temporary, destination);
     temporary = undefined;
-    const receipt = { path: destination, name, bytes, sha256: hash.digest("hex") };
+    const receipt = { ...(input.threadId?{threadId:input.threadId}:{}), path: destination, name, bytes, sha256: hash.digest("hex") };
     const pendingReceipt = join(directory, `.receipt-${randomUUID()}`);
     await writeFile(pendingReceipt, JSON.stringify(receipt), { mode: 0o600 });
     await rename(pendingReceipt, receiptPath);

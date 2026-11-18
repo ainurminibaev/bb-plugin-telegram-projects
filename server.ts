@@ -1,4 +1,5 @@
-import {openTopicSearch,historyPrefix} from "./topic-search";
+import {cleanInbox} from "./inbox-retention";
+import {openTopicSearch,historyPrefix,topicPassages} from "./topic-search";
 import { transcribeWithVoiceRouter } from "./voice-router";
 import { saveLocalTelegramFile, telegramApiRoot as checkedApiRoot } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
@@ -8,7 +9,7 @@ import {
   diagnosisSchema,
   diagnose,
 } from "./settings";
-import {channelPost,channelPostSchema} from "./channel-post";
+import {channelPost,channelPostSchema,inspectChannelRights} from "./channel-post";
 import { bindGroupTopic, groupTyping, processGroupInputs } from "./group-worker";
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
@@ -95,11 +96,13 @@ const statusSchema = z.object({
 });
 const handoffStatusSchema = z.object({id: z.string(), phase: z.string(), sourceThreadId: z.string(), targetThreadId: z.string().nullable(), error: z.string().nullable(), retirement: z.string().nullable(), retirementReason: z.string().nullable()});
 export const rpcContract = defineRpcContract({
+  inspectChannelRights:{input:z.object({channelId:z.number().int().negative()}).strict(),
+    output:z.object({publish:z.boolean(),editOthers:z.boolean(),deleteOthers:z.boolean()})},
   channelPost:{input:channelPostSchema,output:z.object({messageId:z.number().int().positive()})},
   bindGroupTopic: {
     input: z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative(),
       threadId:z.string().min(1),ownerOnly:z.boolean(),requireMention:z.boolean(),
-      allowedSenderIds:z.array(z.number().int().positive().safe()).max(100).optional(),includeTopicContext:z.boolean().optional(),searchableHistory:z.boolean().optional()}).strict(),
+      allowedSenderIds:z.array(z.number().int().positive().safe()).max(100).optional(),includeTopicContext:z.boolean().optional(),searchableHistory:z.boolean().optional(),retainFullHistory:z.boolean().optional()}).strict(),
     output:z.object({bound:z.literal(true)}),
   },
   unbindGroupTopic: {
@@ -496,9 +499,33 @@ export default async function plugin(bb: BbPluginApi) {
     if (typeof file.file_path !== "string") throw Error("attachment_file_invalid");
     return saveLocalTelegramFile({sourcePath:file.file_path,
       localRoot:c.telegramLocalRoot, inboxRoot:scope ? join(c.telegramInboxRoot,...scope) : c.telegramInboxRoot,
-      updateId:updateId, fileId:incoming.fileId, name:incoming.name,
+      threadId, updateId:updateId, fileId:incoming.fileId, name:incoming.name,
       expectedBytes:incoming.size || undefined, signal:fileSignal});
   }
+  let cleaning=false;
+  const inboxTimer=setInterval(async()=>{
+    if(cleaning || stateTransferBusy)return;
+    cleaning=true;
+    try {
+      const cfg=await settings.get();
+      if(!cfg.enabled || !cfg.telegramInboxRoot || !existsSync(cfg.telegramInboxRoot))return;
+      await cleanInbox(cfg.telegramInboxRoot,async id=>{
+        const queue=[id], seen=new Set<string>();
+        while(queue.length){
+          const threadId=queue.pop()!;
+          if(seen.has(threadId))return false;
+          seen.add(threadId);
+          const t=await bb.sdk.threads.get({threadId,signal:lifetime.signal});
+          if(t.status!=="idle" || t.queuedMessageCount || t.activeBackgroundAgentCount || ("hasPendingInteraction" in t && t.hasPendingInteraction))return false;
+          const children=await bb.sdk.threads.list({parentThreadId:threadId,includeHidden:true,limit:100,signal:lifetime.signal});
+          if(children.length===100)return false;
+          queue.push(...children.map(c=>c.id));
+        }
+        return true;
+      });
+    } catch { console.warn("Telegram inbox maintenance deferred"); }
+    finally {cleaning=false;}
+  },3600_000);
   const localFiles = async () => {
     const c = await settings.get();
     return {localRoot:c.telegramLocalRoot, inboxRoot:c.telegramInboxRoot};
@@ -1069,6 +1096,15 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const agency=agencyIntegration(store);
   bb.rpc.register(rpcContract, {
+    inspectChannelRights: async ({channelId})=>{
+      const owner=ownerId(), bot=botId();
+      if (!owner || !bot) throw Error("bot_unavailable");
+      if (!(await settings.get()).managedChannels.split(/[,\s]+/).includes([bot,owner,channelId].join(":")))
+        throw Error("channel_not_configured");
+      const tg=telegram(botToken,lifetime.signal,15000,()=>channelId,apiRoot);
+      await checkBot(tg,bot);
+      return inspectChannelRights(tg,channelId,owner,bot);
+    },
     channelPost: async args=>{
       const owner=ownerId(), bot=botId();
       if (!bridge || !owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
@@ -1086,7 +1122,7 @@ export default async function plugin(bb: BbPluginApi) {
       try { return await channelPost(store,tg,owner,bot,current.managedChannels,args); }
       finally { activeChannelWrites--; }
     },
-    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,allowedSenderIds,includeTopicContext,searchableHistory})=>{
+    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,allowedSenderIds,includeTopicContext,searchableHistory,retainFullHistory})=>{
       const owner=ownerId(), bot=botId();
       if (!owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
       const tg=telegram(botToken,lifetime.signal,15_000,()=>chatId,apiRoot);
@@ -1096,6 +1132,7 @@ export default async function plugin(bb: BbPluginApi) {
           (topicId>0 && !chat.is_forum)) throw Error("group_unavailable");
       const member=await tg("getChatMember",{chat_id:chatId,user_id:owner});
       if (!["creator","administrator"].includes(member.status)) throw Error("group_owner_required");
+      if (retainFullHistory && !searchableHistory) throw Error("full_history_requires_search");
       if (searchableHistory && (!includeTopicContext || !history)) throw Error("history_requires_topic_context_and_fts5");
       if (includeTopicContext && !me.readsAllGroups) {
         const self=await tg("getChatMember",{chat_id:chatId,user_id:bot});
@@ -1107,7 +1144,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!thread.projectId || thread.archivedAt || thread.deletedAt || thread.visibility==="hidden") throw Error("thread_unavailable");
       if (owner!==ownerId() || bot!==botId() || stateTransferBusy) throw Error("bot_changed");
       if (!ownerOnly && allowedSenderIds?.length) throw Error("allowlist_requires_owner_only");
-      bindGroupTopic(store,{searchableHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
+      bindGroupTopic(store,{searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},thread.projectId);
       return {bound:true as const};
     },
@@ -1315,6 +1352,11 @@ export default async function plugin(bb: BbPluginApi) {
     summary: "BB project topics, chats and Tasks notifications in Telegram",
     commands: [
       {
+        name:"search-history",
+        summary:"Search messages received in the current bound group or topic",
+        usage:"bb telegram-projects search-history <words>",
+      },
+      {
         name: "chat-forget",
         summary: "Remove a topic binding and keep the chats",
         usage: "bb telegram-projects chat-forget <topic-id>",
@@ -1352,7 +1394,18 @@ export default async function plugin(bb: BbPluginApi) {
           "bb telegram-projects bind <project-id|sms|navigation> <topic-id>",
       },
     ],
-    async run(argv) {
+    async run(argv,ctx) {
+      if(argv[0]==="search-history"){
+        const threadId=ctx.threadId;
+        const scope=threadId && store.get<string>("group:thread:"+threadId);
+        const policy=scope && store.get<import("./ingress").GroupTopicPolicy>(scope);
+        if(!history || !policy || !policy.searchableHistory || policy.threadId!==threadId ||
+          policy.ownerId!==ownerId() || policy.botId!==botId())return {exitCode:1,stderr:"bound_searchable_group_required"};
+        const query=argv.slice(1).join(" ").trim();
+        if(!query || query.length>1000)return {exitCode:1,stderr:"search_query_required"};
+        const rows=history.find(historyPrefix(policy.chatId,policy.topicId),query,Number.MAX_SAFE_INTEGER);
+        return {exitCode:0,stdout:topicPassages(rows,policy.chatId)||"Совпадений нет."};
+      }
       const [cmd, key, id] = argv.filter((x) => x !== "--json");
       if (cmd === "chat-forget") {
         const topicId = Number(key);
@@ -1734,6 +1787,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.onDispose(async () => {
     clearInterval(historyTimer);
+    clearInterval(inboxTimer);
     lifetime.abort();
     wake?.();
     await flight;

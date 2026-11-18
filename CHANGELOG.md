@@ -1,3 +1,9 @@
+# 0.9.1-personal.24
+
+- Inspect administrator permissions of the paired owner and the bot in a configured channel. An owner can request an edit to a manually published text post. This never grants a receipt for deletion.
+- Optionally retain all received group text for scoped full-text retrieval. The existing 30-day mode remains available. Use topic ID zero for plain groups.
+- Reclaim completed Telegram cache entries after 30 days or above 8 GiB. Entries younger than one day, active work, legacy unattributed downloads and files outside the managed cache are retained.
+
 # 0.9.1-personal.23
 
 - Show Telegram’s native typing indicator in the originating group topic while the assistant handles an authorized request. A silent progress reply stays visible in the topic until completion and is then deleted.

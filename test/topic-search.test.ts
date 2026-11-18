@@ -50,3 +50,13 @@ test("a permitted mention gets an older passage from its topic, with no ambient 
   assert.match(job.route.text,/4500/);assert.doesNotMatch(job.route.text,/3000/);assert.match(job.route.text,/t.me\/c\/123\/1/);
  } finally {db.close();}
 });
+
+test("permanent group history survives cleanup and remains scoped to a group without topics",()=>{
+ const db=new Database(":memory:");db.exec("CREATE TABLE state(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
+ try{
+  const h=openTopicSearch(db),scope=historyPrefix(-11,0);
+  db.prepare("INSERT INTO state VALUES(?,?)").run(scope+42,JSON.stringify({id:42,sender:1,name:"Автор",text:"архив Java",date:1,permanent:true}));
+  h.prune();assert.equal(h.find(scope,"Java",50)[0].id,42);
+  assert.equal(h.find(historyPrefix(-12,0),"Java",50).length,0);
+ }finally{db.close();}
+});

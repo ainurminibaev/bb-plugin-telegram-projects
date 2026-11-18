@@ -34,11 +34,18 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     const prev=store.get<GroupTopicPolicy>(key);
     if (prev?.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly &&
         prev.requireMention===policy.requireMention && prev.botId===policy.botId &&
-        !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
+        !!prev.retainFullHistory===!!policy.retainFullHistory && !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
         JSON.stringify(prev.allowedSenderIds??[])===JSON.stringify(policy.allowedSenderIds??[]) &&
         prev.ownerId===policy.ownerId && prev.botUsername===policy.botUsername) return;
     if (prev) for (const row of store.list(`group:recent-files:${prev.botId}:${chatId}:${topicId}:`)) store.del(row.key);
-    for (const row of store.list(historyPrefix(chatId,topicId))) store.del(row.key);
+    const sameAudience = prev && prev.threadId===threadId && prev.ownerId===policy.ownerId &&
+      prev.botId===policy.botId && prev.ownerOnly===policy.ownerOnly &&
+      JSON.stringify(prev.allowedSenderIds??[])===JSON.stringify(policy.allowedSenderIds??[]);
+    for (const row of store.list<Record<string,unknown>>(historyPrefix(chatId,topicId))) {
+      if (sameAudience && prev.searchableHistory && policy.searchableHistory) {
+        store.put(row.key,{...row.value,permanent:policy.retainFullHistory===true});
+      } else store.del(row.key);
+    }
     store.del(`group:context:${chatId}:${topicId}`);
     store.put("group:thread:"+threadId,key);
     store.put(key,{...policy,acceptAfterSecond:Math.floor(Date.now()/1000)});

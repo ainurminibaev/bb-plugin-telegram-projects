@@ -139,3 +139,12 @@ PDF для групповой темы сохраняйте под новым и
 
 В привязанной групповой теме при обработке разрешённого обращения отображается стандартный индикатор Telegram «печатает». Для фонового сбора контекста и ожидания обещанных файлов он не включается.
 Перед передачей поручения в BB бот также отвечает «⏳ Готовлю ответ…» в той же теме без звукового уведомления. После результата мост удаляет этот статус.
+
+
+### Group history, channel administration and attachment storage
+
+Bind a normal group with `topicId=0`. Enable `includeTopicContext`, `searchableHistory` and `retainFullHistory` for a searchable archive from the point of observation. Telegram Bot API does not backfill earlier history. The agent in the bound thread can run `bb telegram-projects search-history <words>`. Unbinding removes the scope's local index. Changing its audience or owner resets the index to avoid disclosing previous conversations.
+
+Configure the bot/owner/channel triple under managedChannels and run the inspectChannelRights RPC. The owner needs to be a Telegram channel administrator. For a manually published text post the bot needs can_edit_messages. Give the assistant an unambiguous target. An earlier message, message link or forward may identify it. Manual edits never grant deletion rights to that post.
+
+The local inbox is temporary storage. Save durable files into the project. Hourly maintenance removes completed managed downloads after 30 days, or oldest first above 8 GiB, with a minimum age of one day. Unknown legacy entries and busy thread trees are retained; the storage target is therefore a soft cap.

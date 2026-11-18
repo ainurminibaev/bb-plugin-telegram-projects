@@ -11,6 +11,7 @@ export type GroupTopicPolicy = {
   allowedSenderIds?: number[];
   includeTopicContext?: boolean;
   searchableHistory?: boolean;
+  retainFullHistory?: boolean;
   botId: number;
   botUsername: string;
   ownerId?: number;
@@ -257,8 +258,8 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       const line: TopicLine = {id:message.message_id, sender:sender.id,
         name:String(sender.first_name ?? sender.username ?? sender.id).slice(0,80),
         date:message.date, replyTo:message.reply_to_message?.message_id, text:body.slice(0,600)};
-      if (policy.searchableHistory && line.date>=historyCutoff())
-        store.put(archiveKey,{...line,text:body.slice(0,4096)});
+      if (policy.searchableHistory && (policy.retainFullHistory || line.date>=historyCutoff()))
+        store.put(archiveKey,{...line,text:body.slice(0,4096),permanent:policy.retainFullHistory===true});
       if (!edit || recentEdit)
         store.put(key,[...previous,line].sort((a,b)=>a.id-b.id).slice(-24));
       if (route.kind === "group") {

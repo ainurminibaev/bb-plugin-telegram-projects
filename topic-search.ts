@@ -34,9 +34,9 @@ export function openTopicSearch(db:Database) {
     }
   })();
   const search=db.prepare(`SELECT s.value, snippet(topic_fts,0,'','',' … ',40) AS passage FROM topic_fts JOIN topic_documents d ON d.id=topic_fts.rowid JOIN state s ON s.key=d.sourceKey
-    WHERE topic_fts MATCH ? AND s.key GLOB ? AND json_extract(s.value,'$.date')>=?
+    WHERE topic_fts MATCH ? AND s.key GLOB ? AND (json_extract(s.value,'$.permanent')=1 OR json_extract(s.value,'$.date')>=?)
     AND json_extract(s.value,'$.id')<? ORDER BY rank,json_extract(s.value,'$.id') DESC LIMIT 5`);
-  const prune=db.prepare("DELETE FROM state WHERE key GLOB 'group:history:*' AND json_extract(value,'$.date')<?");
+  const prune=db.prepare("DELETE FROM state WHERE key GLOB 'group:history:*' AND COALESCE(json_extract(value,'$.permanent'),0)=0 AND json_extract(value,'$.date')<?");
   return {
     prune:()=>prune.run(historyCutoff()),
     find(prefix:string,query:string,before:number):TopicRecord[] {

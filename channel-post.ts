@@ -6,9 +6,20 @@ const fields={threadId:z.string().min(1),routeToken:z.string().uuid(),channelId:
 const messageId=z.number().int().positive(), text=z.string().trim().min(1).max(4096);
 export const channelPostSchema=z.discriminatedUnion("action",[
   z.object({...fields,action:z.literal("publish"),text}).strict(),
-  z.object({...fields,action:z.literal("edit"),messageId,text}).strict(),
+  z.object({...fields,action:z.literal("edit"),messageId,text,manual:z.literal(true).optional()}).strict(),
   z.object({...fields,action:z.literal("delete"),messageId}).strict(),
 ]);
+
+export async function inspectChannelRights(tg:Telegram,channelId:number,owner:number,bot:number) {
+  const chat=await tg("getChat",{chat_id:channelId});
+  if (chat.id!==channelId || chat.type!=="channel") throw Error("channel_required");
+  const member=await tg("getChatMember",{chat_id:channelId,user_id:owner});
+  if (!["administrator","creator"].includes(member.status)) throw Error("channel_owner_admin_required");
+  const self=await tg("getChatMember",{chat_id:channelId,user_id:bot});
+  const admin=self.status==="administrator";
+  return {publish:admin && self.can_post_messages===true,
+    editOthers:admin && self.can_edit_messages===true,deleteOthers:admin && self.can_delete_messages===true};
+}
 
 export async function channelPost(store:Store,tg:Telegram,owner:number,bot:number,allowed:string,
   args:z.infer<typeof channelPostSchema>) {
@@ -25,7 +36,11 @@ export async function channelPost(store:Store,tg:Telegram,owner:number,bot:numbe
     return {messageId:saved.messageId};
   }
   const owned="channel:own:"+scope+":";
-  if (action!=="publish" && !store.get(owned+args.messageId)) throw Error("channel_post_not_owned");
+  const manual=action==="edit" && args.manual===true && !store.get(owned+args.messageId);
+  if (action!=="publish" && !manual && !store.get(owned+args.messageId)) throw Error("channel_post_not_owned");
+  const rights=await inspectChannelRights(tg,channelId,owner,bot);
+  if (!(manual ? rights.editOthers : action==="delete" ? rights.publish || rights.deleteOthers : rights.publish || (action==="edit" && rights.editOthers)))
+    throw Error(manual ? "channel_requires_can_edit_messages" : "channel_requires_can_post_messages");
   // Reserve synchronously before any network call. A lost acknowledgement must never duplicate a post.
   store.put(key,{digest});
   let id:number;
@@ -41,7 +56,7 @@ export async function channelPost(store:Store,tg:Telegram,owner:number,bot:numbe
     id=result.message_id;
   }
   store.atomic(()=>{
-    if(action==="delete") store.del(owned+id);else store.put(owned+id,true);
+    if(action==="delete") store.del(owned+id);else if (!manual) store.put(owned+id,true);
     store.put(key,{digest,messageId:id});
   });
   return {messageId:id};
