@@ -1,15 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {mkdtempSync,readFileSync,readdirSync,rmSync,statSync} from "node:fs";
+import {writeFileSync,mkdtempSync,readFileSync,readdirSync,rmSync,statSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {randomUUID} from "node:crypto";
-import {acceptOwnerSelection,presentProposal,handleOwnerSelection} from "../owner-selection";
+import {acceptOwnerSelection,presentProposal,handleOwnerSelection,collectDecisionResults} from "../owner-selection";
 import type {Store,Telegram} from "../model";
 
 test("only an owner reply to the current draft releases selected operations",async()=>{
   const dir=mkdtempSync(join(tmpdir(),"decision-"));
   const prior=process.env.BB_TELEGRAM_DECISION_OUTBOXES;
+  const results=mkdtempSync(join(tmpdir(),"results-"));
+  const previousResults=process.env.BB_TELEGRAM_DECISION_RESULTS;
+  process.env.BB_TELEGRAM_DECISION_RESULTS=JSON.stringify({work:{host:"example.org",directory:results}});
   process.env.BB_TELEGRAM_DECISION_OUTBOXES=JSON.stringify({work:dir});
   try {
     let rows=new Map<string,any>();
@@ -49,6 +52,20 @@ test("only an owner reply to the current draft releases selected operations",asy
     run(valid);run(reply(actor,current.messageId,"/approve 1,3"));run(reply(actor,current.messageId,"/approve 2"));
     assert.equal(statSync(path).ino,inode);
     assert.deepEqual(JSON.parse(readFileSync(path,"utf8")),receipt);
+    const links=["https://example.org/task/1","https://example.org/task/3"];
+    const resultFile=join(results,taskId+".json");
+    const collect=()=>collectDecisionResults(store,actor,bot);
+    const resultKey="group:result:"+taskId;
+    for(const invalid of [{actor:99},{taskId:randomUUID()},{revision:1},{draftHash:"other"},
+        {selected:[2,3]},{links:[links[0],links[0]]},{links:[links[0],"https://example.org.evil/task/3"]}]) {
+      writeFileSync(resultFile,JSON.stringify({...receipt,links,...invalid}));
+      collect();assert.equal(store.get(resultKey),undefined);
+    }
+    writeFileSync(resultFile,JSON.stringify({...receipt,links}));
+    collect();collect();
+    assert.deepEqual(store.get(resultKey),{state:"queued",text:links.join("\n")});
+    assert.equal(store.list("group:result-queue:").length,1);
+    assert.equal(store.list("selection:await-result:").length,0);
     await assert.rejects(presentProposal(store,actor,bot,{...proposal,revision:3},tg),/proposal_conflict/);
     // Synthetic adapter scans twice, including after restoring its own ledger.
     const external:number[]=[];
@@ -73,6 +90,9 @@ test("only an owner reply to the current draft releases selected operations",asy
   } finally {
     if(prior===undefined) delete process.env.BB_TELEGRAM_DECISION_OUTBOXES;
     else process.env.BB_TELEGRAM_DECISION_OUTBOXES=prior;
+    if(previousResults===undefined) delete process.env.BB_TELEGRAM_DECISION_RESULTS;
+    else process.env.BB_TELEGRAM_DECISION_RESULTS=previousResults;
+    rmSync(results,{recursive:true,force:true});
     rmSync(dir,{recursive:true,force:true});
   }
 });

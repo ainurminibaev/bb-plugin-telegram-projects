@@ -1,4 +1,4 @@
-import {proposalInput,presentProposal,handleOwnerSelection} from "./owner-selection";
+import {proposalInput,presentProposal,handleOwnerSelection,collectDecisionResults} from "./owner-selection";
 import {bbReminderInput,isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
 import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf} from "./isolated-group";
@@ -1757,6 +1757,7 @@ export default async function plugin(bb: BbPluginApi) {
             if (owner && bot) {
               try {
                 void typing?.();
+                collectDecisionResults(store,owner,bot);
                 await deliverGroupResults(store,bb.sdk,o=>o.owner===ownerId() && o.bot===botId() && !stateTransferBusy,
                   chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal);
                 await processGroupInputs(store,bb.sdk,owner,bot,

@@ -52,3 +52,5 @@ node_modules/.bin/tsx --test test/owner-selection.test.ts
 ```
 
 During a current paired owner turn, resolveOwnerGroupMessage accepts threadId, routeToken and the original message link in the form https://t.me/c/CHAT/TOPIC/MESSAGE. It returns taskId and projectId after checking the active binding. Use the returned task for inspectGroupTask or presentOwnerProposal. The lookup performs no delivery.
+
+For automatic delivery configure BB_TELEGRAM_DECISION_RESULTS as a JSON map from projectId to {"directory":"/results","host":"example.org"}. Mount this dedicated adapter output directory read-only in the receiver. After verifying external writes, the adapter atomically publishes TASKID.json with the original five decision fields and links, one distinct HTTPS URL per selected operation in the same order. The bridge matches the receipt to the approved version and uses the ordinary durable group delivery queue.

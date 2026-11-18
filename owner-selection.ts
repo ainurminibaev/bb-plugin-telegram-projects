@@ -1,8 +1,8 @@
 import {createHash,randomUUID} from "node:crypto";
-import {closeSync,fsyncSync,openSync,linkSync,readFileSync,unlinkSync,writeFileSync} from "node:fs";
+import {closeSync,constants,fstatSync,readSync,fsyncSync,openSync,linkSync,readFileSync,unlinkSync,writeFileSync} from "node:fs";
 import {dirname,isAbsolute,join} from "node:path";
 import {z} from "zod";
-import {inspectGroupTask,type GroupOrigin} from "./group-result";
+import {inspectGroupTask,queueGroupResult,type GroupOrigin} from "./group-result";
 import type {Store,Telegram} from "./model";
 
 export const proposalInput=z.object({
@@ -104,6 +104,8 @@ export function acceptOwnerSelection(store:Store,update:any,actor:number|undefin
   const body=JSON.stringify({actor,taskId:task,revision:row.revision,draftHash:row.draftHash,selected});
   store.put(key(task),{...row,selected});
   publish(join(row.directory,task+".json"),body);
+  if (resultTarget(row.project) && !store.get("group:result:"+task))
+    store.put("selection:await-result:"+task,true);
   return true;
 }
 
@@ -122,4 +124,62 @@ export async function handleOwnerSelection(store:Store,update:any,actor:number|u
     });
   }
   return handled;
+}
+
+const resultTargets=z.record(z.string(),z.object({
+  directory:z.string().refine(isAbsolute),
+  host:z.string().min(1).regex(/^[a-z0-9.-]+$/),
+}).strict());
+function resultTarget(project:string) {
+  const raw=process.env.BB_TELEGRAM_DECISION_RESULTS;
+  if (!raw) return;
+  try {return resultTargets.parse(JSON.parse(raw))[project];}
+  catch {return;}
+}
+
+function readCompletion(directory:string,task:string) {
+  const fd=openSync(join(directory,task+".json"),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+  try {
+    const stat=fstatSync(fd);
+    if (!stat.isFile() || stat.size<1 || stat.size>16384) throw Error("invalid_completion");
+    const data=Buffer.alloc(stat.size);
+    if (readSync(fd,data,0,data.length,0)!==data.length) throw Error("incomplete_completion");
+    return JSON.parse(data.toString("utf8"));
+  } finally {closeSync(fd);}
+}
+
+const completionSchema=z.object({
+  actor:z.number().int(),taskId:z.string().uuid(),revision:z.number().int(),draftHash:z.string(),
+  selected:z.array(z.number().int()).max(10),links:z.array(z.string().max(2048)).min(1).max(10),
+}).strict();
+
+// The adapter publishes verified links by atomic rename. The bridge owns destination and delivery state.
+export function collectDecisionResults(store:Store,owner:number,bot:number) {
+  for (const {key:pending} of store.list("selection:await-result:")) {
+    const task=pending.slice("selection:await-result:".length);
+    const row=store.get<Draft>(key(task));
+    if (!row?.selected || row.actor!==owner || row.bot!==bot) continue;
+    const target=resultTarget(row.project);
+    if (!target) continue;
+    try {
+      const origin=active(store,owner,bot,task);
+      if (origin.projectId!==row.project || directory(origin.projectId)!==row.directory) continue;
+      const result=completionSchema.parse(readCompletion(target.directory,task));
+      if (result.actor!==owner || result.taskId!==task || result.revision!==row.revision ||
+          result.draftHash!==row.draftHash || JSON.stringify(result.selected)!==JSON.stringify(row.selected) ||
+          result.links.length!==row.selected.length || new Set(result.links).size!==result.links.length) continue;
+      for (const link of result.links) {
+        const url=new URL(link);
+        if (url.protocol!=="https:" || url.host!==target.host || url.username || url.password ||
+            url.pathname==="/" || /[\s\\<>]/u.test(link) || url.href!==link) throw Error("invalid_result_link");
+      }
+      const text=result.links.join("\n");
+      if (text.length>4096) continue;
+      queueGroupResult(store,owner,bot,task,text);
+      store.del(pending);
+    } catch {
+      // An unpublished or unverified completion cannot release a result.
+      continue;
+    }
+  }
 }

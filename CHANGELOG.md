@@ -1,3 +1,7 @@
+# 0.9.15
+
+- Deliver verified project result links after a selected owner proposal completes.
+
 # 0.9.14
 
 - Resolve an original private forum message link to its active group task from a verified owner turn.
