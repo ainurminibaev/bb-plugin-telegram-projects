@@ -1,3 +1,7 @@
+# 0.9.13
+
+- Accept ordinary Russian replies to numbered proposals and ask which items to execute when a reply only confirms a multi-item list.
+
 # 0.9.12
 
 - Present versioned group-task proposals in the paired owner’s private chat and publish an immutable selection receipt to the assigned project adapter.

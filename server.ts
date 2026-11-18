@@ -1,4 +1,4 @@
-import {proposalInput,presentProposal,acceptOwnerSelection} from "./owner-selection";
+import {proposalInput,presentProposal,handleOwnerSelection} from "./owner-selection";
 import {bbReminderInput,isDirectOwnerRequest,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
 import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf} from "./isolated-group";
@@ -1858,7 +1858,7 @@ export default async function plugin(bb: BbPluginApi) {
           } finally { ingressPolling = false; }
           ingressError = null;
           for (const u of updates) {
-            if (cfg.chatEnabled && acceptOwnerSelection(store,u,ownerId(),botId())) {
+            if (cfg.chatEnabled && await handleOwnerSelection(store,u,ownerId(),botId(),tg)) {
               store.put("ingress:offset",u.update_id+1);
               continue;
             }

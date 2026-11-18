@@ -4,7 +4,7 @@ import {mkdtempSync,readFileSync,readdirSync,rmSync,statSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {randomUUID} from "node:crypto";
-import {acceptOwnerSelection,presentProposal} from "../owner-selection";
+import {acceptOwnerSelection,presentProposal,handleOwnerSelection} from "../owner-selection";
 import type {Store,Telegram} from "../model";
 
 test("only an owner reply to the current draft releases selected operations",async()=>{
@@ -25,18 +25,28 @@ test("only an owner reply to the current draft releases selected operations",asy
     const proposal={taskId,threadId:"coordinator",routeToken:randomUUID(),revision:1,items:["A","B","C"]};
     const old=await presentProposal(store,actor,bot,proposal,tg);
     const current=await presentProposal(store,actor,bot,{...proposal,revision:2,items:["A2","B2","C2"]},tg);
-    const reply=(sender:number,id:number,text="/approve 1,3")=>({message:{from:{id:sender},chat:{id:sender,type:"private"},
+    const reply=(sender:number,id:number,text="Сделай первый и третий.")=>({message:{from:{id:sender},chat:{id:sender,type:"private"},
       reply_to_message:{message_id:id,from:{id:bot},chat:{id:sender}},text}});
     const run=(event:any)=>acceptOwnerSelection(store,event,actor,bot);
     run(reply(33,current.messageId));run(reply(actor,old.messageId));run(reply(actor,current.messageId,"/approve 1,4"));
     const forwarded=reply(actor,current.messageId);run({message:{...forwarded.message,forward_origin:{type:"user"}}});
     assert.deepEqual(readdirSync(dir),[]);
-    const valid=reply(actor,current.messageId);run(valid);
+    for (const text of ["первый и третий?", "да", "не делай первый и третий", "сделай первый, если успеем", "давай сначала обсудим"]) {
+      assert.equal(run(reply(actor,current.messageId,text)),false);
+      assert.deepEqual(readdirSync(dir),[]);
+    }
+    const vague={...reply(actor,current.messageId,"да"),update_id:600};
+    await handleOwnerSelection(store,vague,actor,bot,tg);
+    const clarification=message;
+    await handleOwnerSelection(store,vague,actor,bot,tg);
+    assert.equal(message,clarification);
+    assert.deepEqual(readdirSync(dir),[]);
+    const valid=reply(actor,clarification,"Давай 1 и 3.");run(valid);
     const path=join(dir,taskId+".json"),inode=statSync(path).ino;
     const receipt=JSON.parse(readFileSync(path,"utf8"));
     assert.deepEqual(receipt,{actor,taskId,revision:2,draftHash:current.draftHash,selected:[1,3]});
     rows=new Map(JSON.parse(JSON.stringify([...rows])));
-    run(valid);run(reply(actor,current.messageId,"/approve 2"));
+    run(valid);run(reply(actor,current.messageId,"/approve 1,3"));run(reply(actor,current.messageId,"/approve 2"));
     assert.equal(statSync(path).ino,inode);
     assert.deepEqual(JSON.parse(readFileSync(path,"utf8")),receipt);
     await assert.rejects(presentProposal(store,actor,bot,{...proposal,revision:3},tg),/proposal_conflict/);

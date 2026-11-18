@@ -35,9 +35,9 @@ export async function presentProposal(store:Store,actor:number,bot:number,args:P
      (old.revision===args.revision && old.draftHash!==draftHash))) throw Error("proposal_conflict");
   if(old?.revision===row.revision && old.messageId) return {messageId:old.messageId,draftHash};
   store.put(key(args.taskId),row);
-  const text=[`Поручение ${args.taskId}, версия ${args.revision}`,...args.items.map((s,i)=>`${i+1}. ${s}`),
-    "Ответьте на это сообщение, например: /approve 1,3"].join("\n");
-  const sent=await tg("sendMessage",{chat_id:actor,text});
+  const text=["Что выполнить?",...args.items.map((s,i)=>`${i+1}. ${s}`),
+    args.items.length===1 ? "Можно ответить «да, сделай» или предложить правку." : "Можно выбрать пункты по номерам или словами, одобрить всё или предложить правку."].join("\n");
+  const sent=await tg("sendMessage",{chat_id:actor,text,reply_markup:{force_reply:true}});
   const current=store.get<Draft>(key(args.taskId));
   if(!Number.isSafeInteger(sent.message_id) || sent.message_id<=0 || current?.revision!==row.revision ||
      current.draftHash!==draftHash) throw Error("proposal_superseded");
@@ -63,21 +63,40 @@ function publish(path:string, body:string) {
     try {fsyncSync(parent);} finally {closeSync(parent);}
   } finally {unlinkSync(temp);}
 }
-export function acceptOwnerSelection(store:Store,update:any,actor:number|undefined,bot:number|undefined) {
+function selectedItems(text:string,count:number):number[] | undefined {
+  const reply=text.trim().toLowerCase().replace(/ё/g,"е").replace(/[.!]+$/,"").trim();
+  if (/^(?:да,? )?(?:давай|сделай|делай|выполни|одобряю) все(?: пункты)?$/.test(reply))
+    return Array.from({length:count},(_,i)=>i+1);
+  if (count===1 && /^(?:да|да,? сделай|сделай|делай|подтверждаю)$/.test(reply)) return [1];
+  const words=["первый","второй","третий","четвертый","пятый","шестой","седьмой","восьмой","девятый","десятый"];
+  const list=reply.replace(/^(?:\/approve |(?:да,? )?(?:давай|сделай|делай|выполни|одобряю|подтверждаю) )/,"")
+    .replace(/^(?:только )?(?:пункты? )?/,"");
+  const selected=list.split(/\s*,\s*|\s+и\s+/).map(item=>
+    /^(?:[1-9]|10)$/.test(item) ? Number(item) : words.indexOf(item)+1);
+  if (selected.some(n=>!n || n>count) || new Set(selected).size!==selected.length) return;
+  return selected.sort((a,b)=>a-b);
+}
+export function acceptOwnerSelection(store:Store,update:any,actor:number|undefined,bot:number|undefined,
+  clarify?:(task:string,proposal:number)=>void) {
   const m=update?.message;
   if(!actor || !bot || m?.chat?.type!=="private" || m.chat.id!==actor || m.from?.id!==actor ||
     m.from.is_bot || m.sender_chat || m.forward_origin || m.via_bot || m.is_automatic_forward ||
     m.reply_to_message?.from?.id!==bot || m.reply_to_message?.chat?.id!==actor ||
-    typeof m.text!=="string" || !/^\/approve(?:\s|$)/.test(m.text)) return false;
+    typeof m.text!=="string") return false;
   const id=m.reply_to_message.message_id;
-  const task=store.get<string>(`selection:message:${bot}:${actor}:${id}`);
-  if(!task) return true;
+  const address=store.get<string|{task:string;proposal:number}>(`selection:message:${bot}:${actor}:${id}`);
+  const task=typeof address==="string" ? address : address?.task;
+  const proposal=typeof address==="object" ? address.proposal : id;
+  if(!task) return /^\/approve(?:\s|$)/.test(m.text);
   const row=store.get<Draft>(key(task));
-  if(!row || row.messageId!==id || row.bot!==bot || row.actor!==actor) return true;
-  const match=/^\/approve ([1-9]\d?(?:\s*,\s*[1-9]\d?){0,9})$/.exec(m.text);
-  if(!match) return true;
-  const selected=match[1].split(",").map(Number).sort((a,b)=>a-b);
-  if(new Set(selected).size!==selected.length || selected.some(n=>n>row.count)) return true;
+  if(!row || row.messageId!==proposal || row.bot!==bot || row.actor!==actor) return true;
+  const selected=selectedItems(m.text,row.count);
+  // Free-form questions, changes and conditional answers belong in the owner's conversation.
+  if(!selected && !row.selected && clarify && /^(?:да|ок|хорошо|согласен|согласна|давай|подтверждаю)[.!]*$/iu.test(m.text.trim())) {
+    clarify(task,proposal);
+    return true;
+  }
+  if(!selected) return /^\/approve(?:\s|$)/.test(m.text);
   if(row.selected && JSON.stringify(row.selected)!==JSON.stringify(selected)) return true;
   let origin:GroupOrigin;
   try {origin=active(store,actor,bot,task);} catch {return true;}
@@ -86,4 +105,21 @@ export function acceptOwnerSelection(store:Store,update:any,actor:number|undefin
   store.put(key(task),{...row,selected});
   publish(join(row.directory,task+".json"),body);
   return true;
+}
+
+export async function handleOwnerSelection(store:Store,update:any,actor:number|undefined,bot:number|undefined,tg:Telegram) {
+  let question:{task:string;proposal:number}|undefined;
+  const handled=acceptOwnerSelection(store,update,actor,bot,(task,proposal)=>{question={task,proposal};});
+  if(question && actor && bot) {
+    const seen=`selection:clarified:${bot}:${actor}:${update.update_id}`;
+    if(store.get(seen)) return handled;
+    const sent=await tg("sendMessage",{chat_id:actor,reply_parameters:{message_id:question.proposal},
+      text:"Какие пункты выполнить? Можно ответить номерами или словами.",reply_markup:{force_reply:true}});
+    if(!Number.isSafeInteger(sent.message_id) || sent.message_id<=0) throw Error("clarification_unconfirmed");
+    store.atomic(()=>{
+      store.put(`selection:message:${bot}:${actor}:${sent.message_id}`,question);
+      store.put(seen,true);
+    });
+  }
+  return handled;
 }
