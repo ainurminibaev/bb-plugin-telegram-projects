@@ -1,3 +1,4 @@
+import {openTopicSearch,historyPrefix} from "./topic-search";
 import { transcribeWithVoiceRouter } from "./voice-router";
 import { saveLocalTelegramFile, telegramApiRoot as checkedApiRoot } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
@@ -98,7 +99,7 @@ export const rpcContract = defineRpcContract({
   bindGroupTopic: {
     input: z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative(),
       threadId:z.string().min(1),ownerOnly:z.boolean(),requireMention:z.boolean(),
-      allowedSenderIds:z.array(z.number().int().positive().safe()).max(100).optional(),includeTopicContext:z.boolean().optional()}).strict(),
+      allowedSenderIds:z.array(z.number().int().positive().safe()).max(100).optional(),includeTopicContext:z.boolean().optional(),searchableHistory:z.boolean().optional()}).strict(),
     output:z.object({bound:z.literal(true)}),
   },
   unbindGroupTopic: {
@@ -343,7 +344,14 @@ export default async function plugin(bb: BbPluginApi) {
   bb.storage.migrate(db, [
     "CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   ]);
+  let history:ReturnType<typeof openTopicSearch>|undefined;
+  try { history=openTopicSearch(db); } catch(error) {
+    if (!String(error).includes("no such module: fts5")) throw error;
+  }
+  history?.prune();
+  const historyTimer=setInterval(()=>history?.prune(),3600_000);
   const store: Store = {
+    findTopicHistory:history?.find,
     get<T>(key: string) {
       const r = db.prepare("SELECT value FROM state WHERE key=?").get(key) as
         { value: string } | undefined;
@@ -1057,7 +1065,7 @@ export default async function plugin(bb: BbPluginApi) {
       try { return await channelPost(store,tg,owner,bot,current.managedChannels,args); }
       finally { activeChannelWrites--; }
     },
-    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,allowedSenderIds,includeTopicContext})=>{
+    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,allowedSenderIds,includeTopicContext,searchableHistory})=>{
       const owner=ownerId(), bot=botId();
       if (!owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
       const tg=telegram(botToken,lifetime.signal,15_000,()=>chatId,apiRoot);
@@ -1067,6 +1075,7 @@ export default async function plugin(bb: BbPluginApi) {
           (topicId>0 && !chat.is_forum)) throw Error("group_unavailable");
       const member=await tg("getChatMember",{chat_id:chatId,user_id:owner});
       if (!["creator","administrator"].includes(member.status)) throw Error("group_owner_required");
+      if (searchableHistory && (!includeTopicContext || !history)) throw Error("history_requires_topic_context_and_fts5");
       if (includeTopicContext && !me.readsAllGroups) {
         const self=await tg("getChatMember",{chat_id:chatId,user_id:bot});
         if (!["creator","administrator"].includes(self.status)) {
@@ -1077,7 +1086,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!thread.projectId || thread.archivedAt || thread.deletedAt || thread.visibility==="hidden") throw Error("thread_unavailable");
       if (owner!==ownerId() || bot!==botId() || stateTransferBusy) throw Error("bot_changed");
       if (!ownerOnly && allowedSenderIds?.length) throw Error("allowlist_requires_owner_only");
-      bindGroupTopic(store,{includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
+      bindGroupTopic(store,{searchableHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},thread.projectId);
       return {bound:true as const};
     },
@@ -1085,7 +1094,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
       const key=`group:policy:${chatId}:${topicId}`;
       const removed=!!store.get(key);
-      store.atomic(()=>{store.del(key);store.del(`group:context:${chatId}:${topicId}`);});
+      store.atomic(()=>{for (const row of store.list(historyPrefix(chatId,topicId))) store.del(row.key);store.del(key);store.del(`group:context:${chatId}:${topicId}`);});
       return {removed};
     },
     providerHandoffStatus: ({topicId}) => bridge?.providerHandoffStatus(topicId) ?? null,
@@ -1713,6 +1722,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   bb.onDispose(async () => {
+    clearInterval(historyTimer);
     lifetime.abort();
     wake?.();
     await flight;

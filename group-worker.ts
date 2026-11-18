@@ -1,3 +1,4 @@
+import {historyPrefix,topicPassages} from "./topic-search";
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {localArtifacts} from "./telegram-ux";
 import {readGroupPdf} from "./group-pdf";
@@ -30,9 +31,10 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     const prev=store.get<GroupTopicPolicy>(key);
     if (prev?.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly &&
         prev.requireMention===policy.requireMention && prev.botId===policy.botId &&
-        !!prev.includeTopicContext===!!policy.includeTopicContext &&
+        !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
         JSON.stringify(prev.allowedSenderIds??[])===JSON.stringify(policy.allowedSenderIds??[]) &&
         prev.ownerId===policy.ownerId && prev.botUsername===policy.botUsername) return;
+    for (const row of store.list(historyPrefix(chatId,topicId))) store.del(row.key);
     store.del(`group:context:${chatId}:${topicId}`);
     store.put("group:thread:"+threadId,key);
     store.put(key,{...policy,acceptAfterSecond:Math.floor(Date.now()/1000)});
@@ -73,6 +75,11 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       try {
         const transcript = (await transcribe?.(r.voice))?.trim();
         if (!transcript) throw Error("voice_unavailable");
+        if (!allowed()) {finish("revoked");continue;}
+        if (r.searchBefore!==undefined) {
+          const matches=store.findTopicHistory?.(historyPrefix(r.chatId,r.topicId),transcript,r.searchBefore)??[];
+          r.text=topicPassages(matches,r.chatId)+r.text;
+        }
         r.text += "\nГолосовое обращение: " + transcript;
         delete r.voice;
       } catch {

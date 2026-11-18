@@ -1,3 +1,7 @@
+# 0.9.1-personal.21
+
+- Optionally search up to 30 days of received text in the addressed group topic. Include up to five matched passages with links for authorized text and transcribed voice requests.
+
 # 0.9.1-personal.20
 
 - Deliver local PDF exports to the originating Telegram group topic. A reply to a delivered document identifies its original path and content hash in the bound thread.

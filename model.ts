@@ -57,6 +57,7 @@ export type Event = {
   urgent: boolean;
 };
 export interface Store {
+  findTopicHistory?:(prefix:string,query:string,before:number)=>import("./topic-search").TopicRecord[];
   get<T>(key: string): T | undefined;
   put(key: string, value: unknown): void;
   del(key: string): void;
