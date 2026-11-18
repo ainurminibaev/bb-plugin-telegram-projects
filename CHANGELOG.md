@@ -1,6 +1,6 @@
 # 0.9.1-personal.23
 
-- Show Telegram’s native typing indicator in the originating group topic while the assistant handles an authorized request.
+- Show Telegram’s native typing indicator in the originating group topic while the assistant handles an authorized request. A silent progress reply stays visible in the topic until completion and is then deleted.
 
 # 0.9.1-personal.22
 

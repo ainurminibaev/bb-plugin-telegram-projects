@@ -7,12 +7,13 @@ import {ReplyRoutes} from "./reply-routing";
 import {refersToExamples, promisesExamples, canInvokeGroup, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
-import type {Store, Telegram} from "./model";
+import {TelegramFailure,type Store,type Telegram} from "./model";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
 type Job = {
   route: GroupInput; ownerId:number; revision?:string;
   state:"pending"|"submitted"|"ready"|"sending"|"done"|"revoked";
+  progressId?:number|null;
   pdfIndex?:number; failedPdfs?:string[];
   cursor?:number; turnId?:string; answer?:string; part?:number;
 };
@@ -86,8 +87,20 @@ export function groupTyping(store:Store, owner:()=>number|undefined, bot:()=>num
 export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   owner:number, botId:number, transport:(chatId:number)=>Telegram, signal:AbortSignal,
   transcribe?:(voice:NonNullable<GroupInput["voice"]>)=>Promise<string>, fileHostId?:string,
-  receiveExample?:(example:GroupExample,route:GroupInput)=>Promise<SavedTelegramFile>) {
+  receiveExample?:(example:GroupExample,route:GroupInput)=>Promise<SavedTelegramFile>, visibleProgress=false) {
   const routes=new ReplyRoutes(store);
+  type Cleanup={chatId:number;messageId:number;retryAt?:number};
+  for (const {key,value} of store.list<Cleanup>(`group:cleanup:${botId}:`)) {
+    if (signal.aborted) return;
+    if ((value.retryAt??0)>Date.now()) continue;
+    try {
+      await transport(value.chatId)("deleteMessage",{chat_id:value.chatId,message_id:value.messageId});
+      store.del(key);
+    } catch (error) {
+      if (error instanceof TelegramFailure && ["telegram_400","telegram_403"].includes(error.code)) store.del(key);
+      else store.put(key,{...value,retryAt:Date.now()+1000*(error instanceof TelegramFailure ? error.retryAfter : 30)});
+    }
+  }
   const pending=store.list<Job>(`group:in:${botId}:`);
   pending.sort((a,b)=>a.value.route.updateId-b.value.route.updateId);
   for (const {key,value:job} of pending) {
@@ -99,6 +112,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         // An interrupted Telegram send requires the original payload for reconciliation.
         store.put(receiptKey,state==="sending"?job:{state,chatId:r.chatId,topicId:r.topicId,
           messageId:r.messageId,threadId:r.threadId,turnId:job.turnId,sentId});
+        if (job.progressId) store.put(`group:cleanup:${botId}:${r.updateId}`,{chatId:r.chatId,messageId:job.progressId});
         store.del(`group:examples:${botId}:${r.updateId}`);
         store.del(key);
       });
@@ -162,6 +176,18 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         job.state="ready";
       }
       if (r.waitUntil!==undefined) {delete r.waitUntil;store.put(key,job);}
+    }
+    if (visibleProgress && job.state==="pending" && job.progressId===undefined) {
+      // A lost Telegram acknowledgement must not create a second status on restart.
+      job.progressId=null;
+      store.put(key,job);
+      try {
+        const sent=await transport(r.chatId)("sendMessage",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
+          reply_parameters:{message_id:r.messageId},text:"⏳ Готовлю ответ…",disable_notification:true});
+        if (Number.isSafeInteger(sent?.message_id)) job.progressId=sent.message_id;
+        store.put(key,job);
+      } catch { /* A status failure must not stop the actual reply. */ }
+      if (!allowed()) {finish("revoked");continue;}
     }
     if (job.state==="pending" && r.examples?.length) {
       try {

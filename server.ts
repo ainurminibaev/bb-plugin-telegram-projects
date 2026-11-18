@@ -1592,7 +1592,7 @@ export default async function plugin(bb: BbPluginApi) {
                   chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined),cfg.telegramFileHostId,
-                  (file,r)=>receiveLocalFile(file,r.updateId,r.threadId,signal,["groups",String(bot),String(r.chatId),String(r.topicId),String(r.senderId)]));
+                  (file,r)=>receiveLocalFile(file,r.updateId,r.threadId,signal,["groups",String(bot),String(r.chatId),String(r.topicId),String(r.senderId)]),true);
               } catch (error) { ingressError = safeError(error); }
             }
           } else {
