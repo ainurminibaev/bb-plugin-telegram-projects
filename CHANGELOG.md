@@ -1,3 +1,8 @@
+# 0.9.6
+
+- Schedule a conditional group reminder from a direct user turn in the paired BB coordinator. Confirmation stays in BB and the reminder replies to the original Telegram group task.
+- When binding a group, report whether Telegram privacy settings may prevent ordinary mentions from reaching the bot. The owner can grant visibility in that group.
+
 # 0.9.4
 
 - The paired owner can schedule a reminder about a group task from the private bot chat. A PDF received in reply to the task, a PDF delivered by the bot, or a registered decision can satisfy its matching reminder.

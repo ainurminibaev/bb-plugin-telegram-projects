@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {inspectGroupTask,deliverGroupResults, queueGroupResult, queueGroupReminder, type GroupOrigin} from "../group-result";
+import {isDirectOwnerRequest,inspectGroupTask,deliverGroupResults, queueGroupResult, queueGroupReminder, type GroupOrigin} from "../group-result";
 import type {Store, Telegram} from "../model";
 
 function fixture(snapshot?:string) {
@@ -103,4 +103,15 @@ test("paired owner inspects an exact return address without opening a thread or 
   assert.deepEqual(inspectGroupTask(f.store,2,1,"0"),{binding:"active",delivery:"sent",messageId:90});
   f.store.del("group:policy:-1001:7");
   assert.deepEqual(inspectGroupTask(f.store,2,1,"0"),{binding:"revoked"});
+});
+
+test("native owner reminders accept direct BB turns only",()=>{
+  const direct={initiator:"user",senderThreadId:null,target:{kind:"new-turn"}};
+  assert.ok(isDirectOwnerRequest(direct));
+  assert.ok(isDirectOwnerRequest({...direct,systemMessageKind:"unlabeled"}));
+  for (const change of [{initiator:"agent"},{initiator:"system"},{senderThreadId:"child"},
+    {originPluginId:"telegram-projects"},{systemMessageKind:"child-completed"},
+    {retryOfRequestId:"old"},{target:{kind:"steer"}}]) {
+    assert.equal(isDirectOwnerRequest({...direct,...change}),false);
+  }
 });

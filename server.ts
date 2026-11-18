@@ -1,4 +1,4 @@
-import {inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
+import {bbReminderInput,isDirectOwnerRequest,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
 import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf} from "./isolated-group";
 import {cleanInbox} from "./inbox-retention";
@@ -115,7 +115,7 @@ export const rpcContract = defineRpcContract({
     input: z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative(),
       threadId:z.string().min(1),ownerOnly:z.boolean(),requireMention:z.boolean(),
       allowedSenderIds:z.array(z.number().int().positive().safe()).max(100).optional(),includeTopicContext:z.boolean().optional(),searchableHistory:z.boolean().optional(),retainFullHistory:z.boolean().optional()}).strict(),
-    output:z.object({bound:z.literal(true)}),
+    output:z.object({bound:z.literal(true),warning:z.string().optional()}),
   },
   unbindGroupTopic: {
     input:z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative()}).strict(),
@@ -442,6 +442,28 @@ export default async function plugin(bb: BbPluginApi) {
     return code;
   }
   let chatWake: (() => void) | undefined;
+  bb.agents.registerTool({
+    name:"telegram_group_reminder",
+    description:"Schedule one conditional reminder for an existing Telegram group task from the owner's direct BB conversation.",
+    parameters:bbReminderInput,
+    async execute(args,{threadId,projectId,signal}) {
+      const owner=ownerId(),bot=botId();
+      const binding=()=>store.get<{threadId:string;projectId:string;revision:string}>("chat:binding:0");
+      const before=binding();
+      if (!owner || !bot || !before?.revision || before.threadId!==threadId || before.projectId!==projectId)
+        throw Error("owner_coordinator_required");
+      const cfg=await settings.get();
+      const [request]=await bb.sdk.threads.events.list({threadId,order:"desc",limit:"1",types:["client/turn/requested"],signal});
+      if (request?.type!=="client/turn/requested" || !isDirectOwnerRequest(request.data))
+        throw Error("direct_bb_owner_request_required");
+      if (signal.aborted || !bridge || stateTransferBusy || !cfg.enabled || !cfg.chatEnabled ||
+          ownerId()!==owner || botId()!==bot || binding()?.revision!==before.revision)
+        throw Error("bot_unavailable");
+      const receipt=queueGroupReminder(store,owner,bot,args);
+      chatWake?.();
+      return JSON.stringify(receipt);
+    },
+  });
   async function events(): Promise<Events> {
     const saved = store.get("events:config");
     if (saved) return readEvents(saved);
@@ -1196,10 +1218,12 @@ export default async function plugin(bb: BbPluginApi) {
       if (!["creator","administrator"].includes(member.status)) throw Error("group_owner_required");
       if (retainFullHistory && !searchableHistory) throw Error("full_history_requires_search");
       if (searchableHistory && (!includeTopicContext || !history)) throw Error("history_requires_topic_context_and_fts5");
-      if (includeTopicContext && !me.readsAllGroups) {
+      let warning:string|undefined;
+      if ((includeTopicContext || requireMention) && !me.readsAllGroups) {
         const self=await tg("getChatMember",{chat_id:chatId,user_id:bot});
         if (!["creator","administrator"].includes(self.status)) {
-          throw Error("Для контекста темы включите получение обычных сообщений Telegram в этой группе.");
+          warning="Telegram ограничивает видимость сообщений в этой группе. Для обычного @упоминания назначьте бота администратором только здесь. До этого используйте /ask@"+me.username+" или ответ на сообщение бота.";
+          if (includeTopicContext) throw Error(warning);
         }
       }
       const executor=groupExecutor(chatId,topicId);
@@ -1213,7 +1237,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!ownerOnly && allowedSenderIds?.length) throw Error("allowlist_requires_owner_only");
       bindGroupTopic(store,{isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},thread.projectId);
-      return {bound:true as const};
+      return warning ? {bound:true as const,warning} : {bound:true as const};
     },
     unbindGroupTopic: ({chatId,topicId})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");

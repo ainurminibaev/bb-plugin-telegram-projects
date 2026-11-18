@@ -61,7 +61,17 @@ export const groupReminderInput=groupResultInput.extend({
 });
 type Reminder = Result & Pick<z.infer<typeof groupReminderInput>,"dueAt"|"waitingFor">;
 
-export function queueGroupReminder(store:Store,owner:number,bot:number,args:z.infer<typeof groupReminderInput>):Status {
+export const bbReminderInput=groupReminderInput.omit({threadId:true,routeToken:true});
+
+export function isDirectOwnerRequest(request:{
+  initiator:string; senderThreadId:string|null; originPluginId?:string; systemMessageKind?:string;
+  retryOfRequestId?:string; target:{kind:string};
+}) {
+  return request.initiator==="user" && request.senderThreadId===null && !request.originPluginId &&
+    (!request.systemMessageKind || request.systemMessageKind==="unlabeled") && !request.retryOfRequestId && request.target.kind==="new-turn";
+}
+
+export function queueGroupReminder(store:Store,owner:number,bot:number,args:z.infer<typeof bbReminderInput>):Status {
   const origin=store.get<GroupOrigin>("group:origin:"+args.taskId);
   if (!origin || origin.owner!==owner || origin.bot!==bot) throw Error("group_task_unavailable");
   const key="group:reminder:"+args.taskId;
