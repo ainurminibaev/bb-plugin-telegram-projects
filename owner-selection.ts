@@ -24,7 +24,7 @@ function active(store:Store,owner:number,bot:number,task:string) {
   if(inspectGroupTask(store,owner,bot,task).binding!=="active") throw Error("group_task_unavailable");
   return store.get<GroupOrigin>("group:origin:"+task)!;
 }
-export async function presentProposal(store:Store,actor:number,bot:number,args:Pick<Proposal,"taskId"|"revision"|"items">,tg:Telegram) {
+export async function presentProposal(store:Store,actor:number,bot:number,args:Pick<Proposal,"taskId"|"revision"|"items">,tg:Telegram,showOrigin=false) {
   const origin=active(store,actor,bot,args.taskId);
   const dir=directory(origin.projectId);
   const draftHash=createHash("sha256").update(JSON.stringify(args.items)).digest("hex");
@@ -35,7 +35,10 @@ export async function presentProposal(store:Store,actor:number,bot:number,args:P
      (old.revision===args.revision && old.draftHash!==draftHash))) throw Error("proposal_conflict");
   if(old?.revision===row.revision && old.messageId) return {messageId:old.messageId,draftHash};
   store.put(key(args.taskId),row);
-  const text=["Что выполнить?",...args.items.map((s,i)=>`${i+1}. ${s}`),
+  const context=showOrigin && /^-100[1-9]\d*$/.test(String(origin.chatId)) && origin.topicId>0
+    ? [`Источник: https://t.me/c/${String(origin.chatId).slice(4)}/${origin.topicId}/${origin.messageId}`,
+       `Поручение: ${args.taskId} (версия ${args.revision})`] : [];
+  const text=["Что выполнить?",...context,...args.items.map((s,i)=>`${i+1}. ${s}`),
     args.items.length===1 ? "Можно ответить «да, сделай» или предложить правку." : "Можно выбрать пункты по номерам или словами, одобрить всё или предложить правку."].join("\n");
   const sent=await tg("sendMessage",{chat_id:actor,text,reply_markup:{force_reply:true}});
   const current=store.get<Draft>(key(args.taskId));
@@ -220,6 +223,6 @@ export async function presentProjectProposals(store:Store,owner:number,bot:numbe
     // Consume the automatic trigger before a possibly ambiguous Telegram send.
     // The owner's normal lookup can recover a proposal whose delivery was interrupted.
     store.del(pending.key);
-    await presentProposal(store,owner,bot,args,tg);
+    await presentProposal(store,owner,bot,args,tg,true);
   }
 }

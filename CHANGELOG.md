@@ -1,3 +1,7 @@
+# 0.9.17
+
+- Include the original forum message, task ID and revision in automatically presented proposals.
+
 # 0.9.16
 
 - Automatically present a project-prepared proposal in the paired owner chat for an explicitly assigned forum topic.
