@@ -18,6 +18,26 @@ export type GroupOrigin = {
   threadId:string; revision:string; projectId:string; executionToken?:string;
 };
 
+function groupBindingActive(store:Store,origin:GroupOrigin) {
+  const {chatId,topicId,threadId,projectId,owner,bot,sender}=origin;
+  const key=`group:policy:${chatId}:${topicId}`;
+  const policy=store.get<GroupTopicPolicy>(key);
+  return !!policy && policy.revision===origin.revision && policy.ownerId===owner && policy.botId===bot &&
+    policy.threadId===threadId && policy.projectId===projectId && (sender===owner || policy.isolated===true) &&
+    canInvokeGroup(policy,owner,sender) && store.get("group:thread:"+threadId)===key &&
+    store.get("group:project:"+projectId)===true;
+}
+
+// A binding confirms the return address only. Delivery additionally checks the live worker.
+export function inspectGroupTask(store:Store,owner:number,bot:number,taskId:string) {
+  const origin=store.get<GroupOrigin>("group:origin:"+taskId);
+  if (!origin || origin.owner!==owner || origin.bot!==bot) throw Error("group_task_unavailable");
+  if (!groupBindingActive(store,origin)) return {binding:"revoked" as const};
+  const receipt=store.get<Result>("group:result:"+taskId);
+  return {binding:"active" as const,delivery:receipt?.state ?? "unsubmitted",
+    ...(receipt?.messageId && {messageId:receipt.messageId})} as const;
+}
+
 export function queueGroupResult(store:Store, owner:number, bot:number, taskId:string, text:string):Status {
   const origin=store.get<GroupOrigin>("group:origin:"+taskId);
   if (!origin || origin.owner!==owner || origin.bot!==bot) throw Error("group_task_unavailable");
@@ -82,13 +102,7 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     if (!origin) {finish("revoked");continue;}
     const {chatId,topicId,threadId,projectId,bot,owner,sender}=origin;
     const policyKey=`group:policy:${chatId}:${topicId}`;
-    const allowed=()=>{
-      const p=store.get<GroupTopicPolicy>(policyKey);
-      return current(origin) && p?.revision===origin.revision && p.ownerId===owner && p.botId===bot &&
-        p.threadId===threadId && p.projectId===projectId && (sender===owner || p.isolated===true) &&
-        canInvokeGroup(p,owner,sender) && store.get("group:thread:"+threadId)===policyKey &&
-        store.get("group:project:"+projectId)===true;
-    };
+    const allowed=()=>current(origin) && groupBindingActive(store,origin);
     if (!allowed()) {finish("revoked");continue;}
     const isolated=store.get<GroupTopicPolicy>(policyKey)!.isolated;
     if (isolated) {

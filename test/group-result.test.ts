@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {deliverGroupResults, queueGroupResult, queueGroupReminder, type GroupOrigin} from "../group-result";
+import {inspectGroupTask,deliverGroupResults, queueGroupResult, queueGroupReminder, type GroupOrigin} from "../group-result";
 import type {Store, Telegram} from "../model";
 
 function fixture(snapshot?:string) {
@@ -89,4 +89,18 @@ test("an identical reminder can be retried but its condition, text and deadline 
     assert.throws(()=>queueGroupReminder(store,2,1,{...args,...change}),/group_reminder_conflict/);
   }
   assert.equal(store.list("group:reminder-queue:").length,1);
+});
+
+test("paired owner inspects an exact return address without opening a thread or enqueueing work",async()=>{
+  const f=fixture();
+  const before=f.snapshot();
+  assert.deepEqual(inspectGroupTask(f.store,2,1,"0"),{binding:"active",delivery:"unsubmitted"});
+  for (const [owner,bot,id] of [[9,1,"0"],[2,9,"0"],[2,1,"missing"]] as const)
+    assert.throws(()=>inspectGroupTask(f.store,owner,bot,id),/group_task_unavailable/);
+  assert.equal(f.snapshot(),before);
+  await f.tick();assert.equal(f.sent.length,0);
+  f.queue();await f.tick();
+  assert.deepEqual(inspectGroupTask(f.store,2,1,"0"),{binding:"active",delivery:"sent",messageId:90});
+  f.store.del("group:policy:-1001:7");
+  assert.deepEqual(inspectGroupTask(f.store,2,1,"0"),{binding:"revoked"});
 });
