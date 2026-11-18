@@ -59,10 +59,25 @@ export const inputSchema = z.object({
     .optional(),
 });
 export type ChatInput = z.infer<typeof inputSchema>;
+// After a forwarded message the owner usually types a question about it. The
+// question takes longer than the 4 s used for ordinary consecutive messages.
+export const FORWARD_COMMENT_MS = 10_000;
+// A question or forward that still arrives after the batch was dispatched joins
+// the running turn of that batch instead of becoming a separate task.
+export const FORWARD_FOLLOWUP_MS = 30_000;
+const FORWARD_PREFIX = "[Пересланное сообщение]\n";
 function collectionWindow(input: ChatInput, normalMs: number) {
   const promise = /(?:жди|подожди|погоди|сейчас (?:пришлю|перешлю|скину|запишу)).{0,40}(?:файл|фото|голосов|аудио|ссылк|пост|сообщени)/iu;
-  return !input.forwarded && promise.test(input.text ?? "") ? 90_000 : normalMs;
+  if (!input.forwarded && promise.test(input.text ?? "")) return 90_000;
+  return input.forwarded && normalMs ? Math.max(normalMs, FORWARD_COMMENT_MS) : normalMs;
 }
+function forwardedWithQuestion(parts: ChatInput[], texts: string[]) {
+  const forwarded = texts.filter((_, i) => parts[i].forwarded)
+    .map(t => t.startsWith(FORWARD_PREFIX) ? t.slice(FORWARD_PREFIX.length) : t);
+  const own = texts.filter((_, i) => !parts[i].forwarded);
+  return "Пересланное:\n" + forwarded.join("\n\n") + "\n\nВопрос пользователя:\n" + own.join("\n\n");
+}
+type RecentDispatch = {threadId: string; route: Extract<ReplyRoute,{kind:"telegram"}>; lastSentAt: number; forwarded: boolean};
 type Binding = {
   questionOnly?: boolean;
   topicId: number;
@@ -403,6 +418,8 @@ export class ChatBridge {
           input:[{type:"text",mentions:[],text:
             `Для итогового ответа по поручению из Telegram проверь конкретный ход ${value.turnId} ` +
             `в рабочем треде ${value.threadId} (статус ${value.status}). Сообщи результат этого хода. ` +
+            (value.mixed ? "В этот ход попали несколько отдельных сообщений, поэтому точный адресат не определён: " +
+              "ответь владельцу по каждому из них в этом ответе. " : "") +
             "Поручение уже завершилось. Не запускай его повторно."},value.marker]});
         if (this.s.get(key)) this.s.put(key,{...value,state:"submitted",startedAt});
       } catch (error) {
@@ -1471,6 +1488,51 @@ export class ChatBridge {
       );
     return this.handleInput(input);
   }
+  private rememberDispatch(threadId: string, parts: ChatInput[], route: RecentDispatch["route"]) {
+    const sent = parts.map(p => p.sentAt).filter((x): x is number => x !== undefined);
+    const key = "chat:recent:" + parts[0].topicId;
+    const prior = this.s.get<RecentDispatch>(key);
+    const joined = prior?.threadId === threadId && this.routes.sameTask(prior.route, route);
+    this.s.put(key, {threadId, route, lastSentAt: sent.length ? Math.max(...sent) : Math.floor(Date.now()/1000),
+      forwarded: parts.some(p => p.forwarded) || Boolean(joined && prior?.forwarded)} satisfies RecentDispatch);
+  }
+  // A forward and the owner's question about it are one task. When the second
+  // half arrives after the first was dispatched, add it to that running turn
+  // under the same Telegram route. If that turn is not verifiably running,
+  // the message becomes an ordinary separate request.
+  private async forwardFollowUp(b: Binding, parts: ChatInput[]) {
+    const prior = this.s.get<RecentDispatch>("chat:recent:" + parts[0].topicId);
+    const first = parts[0].sentAt;
+    if (!prior || !b.threadId || prior.threadId !== b.threadId || first === undefined ||
+        first < prior.lastSentAt || (first - prior.lastSentAt) * 1000 > FORWARD_FOLLOWUP_MS ||
+        parts.some(p => p.ownerId !== parts[0].ownerId) ||
+        !(prior.forwarded || parts.some(p => p.forwarded)) || this.routes.cancelled(prior.route)) return undefined;
+    if (!(await this.runningTurnOf(b.threadId, prior.route))) return undefined;
+    const forwards = parts.filter(p => p.forwarded).length;
+    const prefix = forwards === parts.length
+      ? "Пересланное (дополнение к сообщению пользователя выше, это одно поручение):\n"
+      : forwards ? "Дополнение к сообщению пользователя выше, это одно поручение:\n"
+        : "Вопрос пользователя к пересланному выше (это одно поручение):\n";
+    return {route: prior.route, prefix};
+  }
+  private async runningTurnOf(threadId: string, route: RecentDispatch["route"]) {
+    const events = await this.d.sdk.threads.events.list({threadId, order: "desc", limit: "40", signal: this.d.signal,
+      types: ["client/turn/requested", "turn/input/accepted", "turn/completed"]});
+    const asc = [...events].sort((a, b) => a.seq - b.seq);
+    for (const e of asc) if (e.type === "client/turn/requested") {
+      try { this.routes.requested(threadId, e.data); } catch { /* the observer reports conflicts */ }
+    }
+    const accepted = asc.filter(e => e.type === "turn/input/accepted" && e.scope.kind === "turn");
+    const last = accepted.at(-1);
+    if (!last || last.scope.kind !== "turn") return false;
+    const turnId = last.scope.turnId;
+    if (asc.some(e => e.type === "turn/completed" && e.scope.kind === "turn" && e.scope.turnId === turnId)) return false;
+    const ids = accepted.filter(e => e.scope.kind === "turn" && e.scope.turnId === turnId)
+      .map(e => (e.data as {clientRequestId: string}).clientRequestId);
+    const known = this.routes.destination(threadId, turnId);
+    if (known) return this.routes.sameTask(known, route);
+    return ids.length > 0 && ids.every(id => this.routes.sameTask(this.routes.routeOf(threadId, id), route));
+  }
   private async handleInput(input: ChatInput, parts?: ChatInput[]) {
     let b = this.binding(input.topicId);
     const moving = this.handoffs.active(input.topicId);
@@ -1644,7 +1706,8 @@ export class ChatBridge {
         const includesOriginal = parts.some(other => other.messageId === part.replyTo);
         texts.push(!includesOriginal ? this.withReplyContext(part,prepared) : prepared);
       }
-      text = texts.join("\n\n");
+      text = parts.some(p => p.forwarded) && parts.some(p => !p.forwarded)
+        ? forwardedWithQuestion(parts, texts) : texts.join("\n\n");
       const key = "chat:in:" + input.updateId;
       const inbox = this.s.get<Inbox>(key);
       if (inbox) this.s.put(key,{...inbox,phase:undefined});
@@ -1691,12 +1754,15 @@ export class ChatBridge {
       }
       await this.validThread(b, b.threadId);
       this.watchInput(b);
+      const own = {kind: "telegram" as const, chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId};
+      const followUp = await this.forwardFollowUp(b, parts ?? [input]);
       await this.d.sdk.threads.send({
         threadId: b.threadId,
-        mode: "queue-if-active",
-        input: [{ type: "text", text, mentions: [] }, this.routes.ingress(b.threadId,
-          {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId})],
+        mode: followUp ? "steer-if-active" : "queue-if-active",
+        input: [{ type: "text", text: followUp ? followUp.prefix + text : text, mentions: [] },
+          this.routes.ingress(b.threadId, followUp?.route ?? own)],
       });
+      this.rememberDispatch(b.threadId, parts ?? [input], followUp?.route ?? own);
     } else {
       if (!b.ready) {
         await this.menu(b);
@@ -1736,6 +1802,8 @@ export class ChatBridge {
         ...(b.model ? { model: b.model } : {}),
       });
       this.routes.bindIngress(marker, t.id);
+      this.rememberDispatch(t.id, parts ?? [input], {kind: "telegram", chatId: input.chatId, topicId: input.topicId,
+        updateId: input.updateId, messageId: input.messageId});
       b = { ...b, threadId: t.id, cursor: 0, ready: false };
       this.save(b);
       this.watchInput(b);
@@ -2343,7 +2411,10 @@ export class ChatBridge {
               const outcomes = subject.outcomes ?? (subject.kind === "thread" ? [{threadId:subject.threadId,
                 status:event.data.systemMessageKind === "child-completed" ? "completed" :
                   event.data.systemMessageKind === "child-failed" ? "failed" : "interrupted"}] : []);
-              this.routes.inheritOutcomes(b.threadId,event.data.requestId,outcomes);
+              // A notice that carries no Telegram task still continues a turn
+              // it is steered into; it must not make that turn ambiguous.
+              if (!this.routes.inheritOutcomes(b.threadId,event.data.requestId,outcomes))
+                this.routes.unroutedNotice(b.threadId,event.data.requestId);
               this.s.put("reply:notification-request:" + b.threadId + ":" + event.data.requestId, true);
             } else this.routes.requested(b.threadId, event.data);
             b.cursor = event.seq;

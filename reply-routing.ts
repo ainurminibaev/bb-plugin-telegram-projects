@@ -60,17 +60,31 @@ export class ReplyRoutes {
     const key = "reply:outcome:" + JSON.stringify([threadId, turnId]);
     if (this.store.get(key)) return;
     const turn = this.store.get<TurnRoutes>(this.turnKey(threadId, turnId));
-    const parents = turn?.requestIds.map(id =>
-      this.store.get<string>("reply:request-parent:" + this.requestKey(threadId, id)));
+    const owners = turn ? this.owningRequests(threadId, turn) : [];
+    const parents = owners.map(id => this.parentOf(threadId, id));
+    const delegatedBy = parents[0] && parents.every(id => id === parents[0]) ? parents[0] : undefined;
+    // A delegated turn that mixed separate submissions has no single exact
+    // destination. It is still reported to its coordinator, explicitly marked,
+    // so the coordinator answers the owner instead of the result being lost.
+    const first = turn?.requestIds.length ? this.store.get<ReplyRoute>(this.requestKey(threadId, turn.requestIds[0])) : undefined;
+    const mixedParent = turn?.ambiguous ? this.parentOf(threadId, turn.requestIds[0]) : undefined;
+    const mixed = !route && mixedParent && first?.kind === "telegram" && !this.cancelled(first) &&
+      owners.every(id => {
+        const r = this.store.get<ReplyRoute>(this.requestKey(threadId, id));
+        return r?.kind !== "telegram" || (r.chatId === first.chatId && r.topicId === first.topicId);
+      }) ? first : undefined;
     this.store.atomic(() => {
       this.store.put(key, {threadId, turnId, status, route, consumedBy: null});
-      if (route?.kind === "telegram" && parents?.[0] && parents.every(id => id === parents[0]))
-        this.store.put("reply:pending-child:" + JSON.stringify([parents[0],threadId,turnId]),
-          {parent:parents[0], threadId, turnId, status, route});
+      if (route?.kind === "telegram" && delegatedBy)
+        this.store.put("reply:pending-child:" + JSON.stringify([delegatedBy,threadId,turnId]),
+          {parent:delegatedBy, threadId, turnId, status, route});
+      else if (mixed && mixedParent)
+        this.store.put("reply:pending-child:" + JSON.stringify([mixedParent,threadId,turnId]),
+          {parent:mixedParent, threadId, turnId, status, route:mixed, mixed:true});
     });
   }
   reserveChildReports(parent: string, chatId: number, topicId: number) {
-    type Report = {parent:string; threadId:string; turnId:string; status:string; route:Extract<ReplyRoute,{kind:"telegram"}>};
+    type Report = {parent:string; threadId:string; turnId:string; status:string; route:Extract<ReplyRoute,{kind:"telegram"}>; mixed?:boolean};
     const parentPrefix = JSON.stringify([parent]).slice(0,-1) + ",";
     for (const {key,value} of this.store.list<Report>("reply:pending-child:" + parentPrefix)) {
       if (value.route.chatId !== chatId || value.route.topicId !== topicId) continue;
@@ -134,11 +148,16 @@ export class ReplyRoutes {
   }
   requested(threadId: string, data: {
     requestId: string; originPluginId?: string; retryOfRequestId?: string;
+    initiator?: string; systemMessageKind?: string; senderThreadId?: string | null;
     input?: readonly {type: string; text?: string; visibility?: string}[];
   }) {
     if (data.retryOfRequestId) return this.retry(threadId, data.requestId, data.retryOfRequestId);
     if (data.originPluginId !== "telegram-projects") {
       this.record(threadId, data.requestId, {kind: "bb"});
+      if (data.initiator === "system" && data.systemMessageKind?.startsWith("child-"))
+        this.unroutedNotice(threadId, data.requestId);
+      else if (data.initiator === "agent" && data.senderThreadId)
+        this.store.put(this.auxiliaryKey(threadId, data.requestId), {kind: "agent", senderThreadId: data.senderThreadId});
       return true;
     }
     const ids = (data.input ?? []).flatMap(block => {
@@ -178,13 +197,39 @@ export class ReplyRoutes {
     const key = this.turnKey(threadId, turnId);
     const turn = this.store.get<TurnRoutes>(key) ?? {requestIds: [], ambiguous: false};
     if (!turn.requestIds.includes(requestId)) turn.requestIds.push(requestId);
-    const routes = turn.requestIds.map(id => this.store.get<ReplyRoute>(this.requestKey(threadId, id)));
+    const owners = this.owningRequests(threadId, turn);
+    const routes = owners.map(id => this.store.get<ReplyRoute>(this.requestKey(threadId, id)));
     // Child notifications can continue the exact same task. Different updates
     // in the same topic are still different tasks and cannot be merged safely.
     const first = routes[0];
     turn.ambiguous ||= routes.some(r => !r || !first ||
       (first.kind === "bb" ? r.kind !== "bb" : !this.sameTask(first, r)));
     this.store.put(key, turn);
+  }
+  /** A notice about the thread's own child that carries no Telegram task. */
+  unroutedNotice(threadId: string, requestId: string) {
+    this.store.put(this.auxiliaryKey(threadId, requestId), {kind: "child-notice"});
+  }
+  private auxiliaryKey(threadId: string, requestId: string) {
+    return "reply:auxiliary:" + JSON.stringify([threadId, requestId]);
+  }
+  private parentOf(threadId: string, requestId: string) {
+    return this.store.get<string>("reply:request-parent:" + this.requestKey(threadId, requestId));
+  }
+  // Requests that decide a turn's destination. A notice about the worker's own
+  // children, or a BB message from the coordinator that delegated this turn,
+  // steered into an already started turn continues that same task. It must not
+  // make the turn ambiguous: its first request still identifies the destination.
+  private owningRequests(threadId: string, turn: TurnRoutes) {
+    const delegatedBy = turn.requestIds.length ? this.parentOf(threadId, turn.requestIds[0]) : undefined;
+    return turn.requestIds.filter((id, i) => {
+      if (i === 0) return true;
+      const aux = this.store.get<{kind: string; senderThreadId?: string}>(this.auxiliaryKey(threadId, id));
+      return !(aux?.kind === "child-notice" || (aux?.kind === "agent" && delegatedBy && aux.senderThreadId === delegatedBy));
+    });
+  }
+  routeOf(threadId: string, requestId: string) {
+    return this.store.get<ReplyRoute>(this.requestKey(threadId, requestId));
   }
   destination(threadId: string, turnId: string): ReplyRoute | undefined {
     const turn = this.store.get<TurnRoutes>(this.turnKey(threadId, turnId));

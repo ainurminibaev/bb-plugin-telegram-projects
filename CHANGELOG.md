@@ -1,6 +1,16 @@
+# 0.9.10
+
+- Keep commands intact when Telegram references the forum topic root. Preserve the context of replies to ordinary messages.
+
+# 0.9.9
+
+- Treat a forwarded message, including a forwarded post with a photo, and the owner's question about it as one task. After a forward the bridge waits up to 10 seconds for a comment instead of 4. The agent receives one request structured as «Пересланное: … / Вопрос пользователя: …».
+- If the second half arrives after the first was already dispatched, within 30 seconds and while that turn is verifiably still running, it is added to the running turn under the same Telegram reply instead of starting a separate turn. Otherwise it remains an ordinary separate request.
+
 # 0.9.8
 
-- Keep the current message text intact when Telegram references the forum topic root. Preserve quoted context for replies to ordinary messages.
+- Return a delegated worker's result to Telegram when notices about the worker's own child threads, or a message from its coordinator, joined its running turn. These no longer make the turn's destination ambiguous.
+- When one delegated turn mixes separate submissions, still report it to the coordinator, marked as mixed, instead of dropping the Telegram return.
 
 # 0.9.7
 
