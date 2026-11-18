@@ -61,7 +61,7 @@ Commands work inside a project topic. The bot menu in Telegram is built from the
 
 ## Privacy
 
-The bot token is stored as a secret plugin setting or read from Env Catalog; it is never returned to the plugin page. Only the paired Telegram account is served; groups and other users are ignored. Agent output for summaries is sent only to the BB model you choose.
+The bot token is stored as a secret plugin setting or read from Env Catalog; it is never returned to the plugin page. In a private chat only the paired Telegram account can use the assistant. In a group, the owner configures the topic, who can call the assistant, and whether ordinary messages provide context. Agent output for summaries is sent only to the BB model you choose.
 
 ## Advanced
 
@@ -146,6 +146,8 @@ PDF для групповой темы сохраняйте под новым и
 
 
 ### Group history, channel administration and attachment storage
+
+The bridge records the project when the owner binds a group thread. If the thread moves to another project, the bridge cancels pending delivery, including a prepared reply. Bind the intended thread again before resending the request. When upgrading an older installation with multiple registered group projects, renew those topic bindings once so the bridge can verify each project.
 
 Bind a normal group with `topicId=0`. Enable `includeTopicContext`, `searchableHistory` and `retainFullHistory` for a searchable archive from the point of observation. Telegram Bot API does not backfill earlier history. The agent in the bound thread can run `bb telegram-projects search-history <words>`. Unbinding removes the scope's local index. Changing its audience or owner resets the index to avoid disclosing previous conversations.
 

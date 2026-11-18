@@ -32,7 +32,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     if (claim && claim!==key) throw Error("thread_belongs_to_other_topic");
     store.put("group:project:"+projectId,true);
     const prev=store.get<GroupTopicPolicy>(key);
-    if (prev?.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly &&
+    if (prev && prev.projectId === projectId && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly &&
         prev.requireMention===policy.requireMention && prev.botId===policy.botId &&
         !!prev.retainFullHistory===!!policy.retainFullHistory && !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
         JSON.stringify(prev.allowedSenderIds??[])===JSON.stringify(policy.allowedSenderIds??[]) &&
@@ -48,7 +48,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     }
     store.del(`group:context:${chatId}:${topicId}`);
     store.put("group:thread:"+threadId,key);
-    store.put(key,{...policy,acceptAfterSecond:Math.floor(Date.now()/1000)});
+    store.put(key,{...policy,projectId,acceptAfterSecond:Math.floor(Date.now()/1000)});
   });
 }
 
@@ -142,6 +142,15 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         owner===job.ownerId && canInvokeGroup(p,owner,r.senderId);
     };
     if (!allowed()) {finish("revoked");continue;}
+    const topicKey = `group:policy:${r.chatId}:${r.topicId}`;
+    const belongsToGroup = (thread: Awaited<ReturnType<typeof sdk.threads.get>>) => {
+      const binding = store.get<GroupTopicPolicy>(topicKey);
+      return allowed() && thread.id === r.threadId && !thread.archivedAt && !thread.deletedAt &&
+        thread.visibility === "visible" && !!thread.projectId &&
+        store.get("group:thread:" + r.threadId) === topicKey &&
+        store.get("group:project:" + thread.projectId) === true &&
+        (binding?.projectId ? binding.projectId === thread.projectId : store.list("group:project:").length === 1);
+    };
     const dest={kind:"telegram" as const,chatId:r.chatId,topicId:r.topicId,updateId:r.updateId};
     if (job.state==="pending" && r.voice) {
       try {
@@ -223,6 +232,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       store.put(key,job);
     }
     if (job.state==="pending") {
+      const thread = await sdk.threads.get({threadId:r.threadId,signal});
+      if (!belongsToGroup(thread)) {finish("revoked");continue;}
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
       if (!allowed()) continue;
       const marker=routes.ingress(r.threadId,dest);
@@ -257,6 +268,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       store.put(key,job);
     }
     if (job.state==="ready") {
+      // Ready jobs may be resumed long after submission, including between reply parts.
+      const thread = await sdk.threads.get({threadId:r.threadId,signal});
+      if (!belongsToGroup(thread)) {finish("revoked");continue;}
       let text=job.answer!;
       const links=localArtifacts(text).filter(link=>/\.pdf$/i.test(link.path));
       const paths=[...new Set(links.map(link=>link.path))];
@@ -264,7 +278,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         let pdf;
         try {
           const thread=await sdk.threads.get({threadId:r.threadId,signal});
-          if (!fileHostId || !thread.environmentId) throw Error("missing_environment");
+          if (!belongsToGroup(thread) || !fileHostId || !thread.environmentId) throw Error("missing_environment");
           const env=await sdk.environments.get({environmentId:thread.environmentId,signal});
           if (!env.path || env.hostId!==fileHostId) throw Error("group_export_host_mismatch");
           pdf=await readGroupPdf(env.path,paths[i]);

@@ -11,10 +11,12 @@ test("worker delivers only its completed turn into the bound forum topic",async(
  const rows=new Map<string,any>();
  const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
    list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
  store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
  assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"}},7,5));
  const events:any[]=[];
- const sdk={threads:{events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
  send:async(q:any)=>{
    function event(type:string,data:any,turnId:string){events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId}});}
    for(const [id,text,input] of [["other","private",[]],["group","answer",q.input]] as const){
@@ -70,10 +72,12 @@ test("pending group updates cross decimal boundaries in Telegram order",async()=
   const store={get:<T>(key:string)=>rows.get(key) as T,put:(key:string,value:unknown)=>{rows.set(key,value);},
     del:(key:string)=>{rows.delete(key);},atomic:(fn:()=>void)=>fn(),
     list:<T>(prefix:string)=>[...rows.keys()].sort().filter(k=>k.startsWith(prefix)).map(key=>({key,value:rows.get(key) as T}))};
-  store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",ownerOnly:true,requireMention:false});
+  store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",ownerOnly:true,requireMention:false});
   for (const id of [99,100]) assert.ok(acceptGroupUpdate(store,{update_id:id,message:{message_id:id,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:String(id)}},7,5));
   const sent:string[]=[];
-  const sdk={threads:{events:{list:async()=>[]},send:async(q:any)=>{sent.push(q.input[0].text);}}};
+  const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{sent.push(q.input[0].text);}}};
   await processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},new AbortController().signal);
   assert.deepEqual(sent,["99","100"]);
 });
@@ -97,7 +101,7 @@ test("topic context is passive, scoped, editable and usable only by selected cal
   assert.equal(store.list("group:in:").length,0);
   post(4,8,"@bot когда встреча?");
   const sent:any[]=[];
-  const sdk={threads:{events:{list:async()=>[]},send:async(q:any)=>{sent.push(q);}}};
+  const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{sent.push(q);}}};
   await processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},new AbortController().signal);
   assert.equal(sent.length,1);
   assert.equal(sent[0].threadId,"group");
@@ -116,6 +120,8 @@ test("only an authorized voice reply is transcribed and queued with the chosen T
   del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,value])=>({key,value:value as T}))};
  const chat={id:-111,type:"supergroup"};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:group","group:policy:-111:3");
  store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
   ownerOnly:true,allowedSenderIds:[8],requireMention:true,includeTopicContext:true,ownerId:7});
  const reply={message_id:12,message_thread_id:3,from:{id:5},chat,document:{file_name:"first.pdf"}};
@@ -127,7 +133,7 @@ test("only an authorized voice reply is transcribed and queued with the chosen T
  assert.equal(voice(21,8),false);
  assert.ok(voice(22,8,reply));
  let calls=0;const sent:any[]=[];
- const sdk={threads:{events:{list:async()=>[]},send:async(q:any)=>{sent.push(q);}}};
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{sent.push(q);}}};
  for(let i=0;i<2;i++)await processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},
   new AbortController().signal,async v=>{assert.equal(v.fileId,"audio");calls++;return "убери третий пункт";});
  assert.equal(calls,1);assert.equal(sent.length,1);assert.equal(sent[0].threadId,"group");
@@ -141,13 +147,15 @@ for (const transcript of ["Сейчас скину примеры","Возьми
   del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
   list:<T>(prefix:string)=>Array.from(rows).filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:structuredClone(v) as T}))};
  const chat={id:-111,type:"supergroup"};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:group","group:policy:-111:3");
  store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
   ownerOnly:true,allowedSenderIds:[8],requireMention:true,includeTopicContext:true});
  function post(id:number,user:number,m:object,topic=3){
   return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:topic,from:{id:user},...m}},7,5);
  }
  const calls:string[]=[];const sent:string[]=[];
- const sdk={threads:{events:{list:async()=>[]},send:async(q:any)=>{sent.push(q.input[0].text);}}};
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{sent.push(q.input[0].text);}}};
  const tick=()=>processGroupInputs(store,sdk as any,7,5,()=>async()=>{throw Error("unexpected delivery");},
   new AbortController().signal,async()=>transcript,"host",async(f)=>{
    calls.push(f.fileId);return {path:"/inbox/"+f.name,name:f.name,bytes:12,sha256:"hash"};
@@ -167,6 +175,8 @@ for (const requireMention of [true,false]) test(`voice correction selects its se
   del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
   list:<T>(prefix:string)=>Array.from(rows).filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:structuredClone(v) as T}))};
  const chat={id:-111,type:"supergroup"};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:group","group:policy:-111:3");
  store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
   ownerOnly:true,allowedSenderIds:[8],requireMention,includeTopicContext:true});
  function post(id:number,user:number,m:object){
@@ -183,7 +193,7 @@ for (const requireMention of [true,false]) test(`voice correction selects its se
   await mkdir(source);
   await writeFile(join(source,"p1"),"first example");
   await writeFile(join(source,"p2"),"second example");
-  const sdk={threads:{events:{list:async()=>[]},send:async(q:any)=>{
+  const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{
    const text=q.input[0].text;
    const saved=JSON.parse(text.split("\n").at(-1)) as {path:string}[];
    assert.deepEqual(await Promise.all(saved.map(f=>readFile(f.path,"utf8"))),["first example","second example"]);
@@ -205,6 +215,8 @@ test("parallel requests accept explicit replies and skip closed collections",()=
   del:(k:string)=>{rows.delete(k);},atomic:(f:()=>void)=>f(),
   list:<T>(prefix:string)=>Array.from(rows).filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:structuredClone(v) as T}))};
  const chat={id:-111,type:"supergroup"};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:group","group:policy:-111:3");
  store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
   ownerOnly:true,requireMention:true,includeTopicContext:true});
  const post=(id:number,body:object)=>acceptGroupUpdate(store,{update_id:id,message:{chat,date:50,message_id:id,message_thread_id:3,from:{id:7},...body}},7,5);
@@ -219,4 +231,42 @@ test("parallel requests accept explicit replies and skip closed collections",()=
  post(25,photo("first"));post(25,photo("first"));
  const bag=(id:number)=>store.get<{files:{fileId:string}[]}>(`group:examples:5:${id}`).files.map(f=>f.fileId);
  assert.deepEqual(bag(20),["first"]);assert.deepEqual(bag(21),["second"]);
+});
+
+test("a queued Telegram request cannot follow its thread into another group project",async()=>{
+  const rows = new Map<string,any>();
+  const store = {
+    get:<T>(key:string)=>rows.get(key) as T,
+    put:(key:string,value:unknown)=>{rows.set(key,value);},
+    del:(key:string)=>{rows.delete(key);},
+    atomic:(fn:()=>void)=>fn(),
+    list:<T>(prefix:string)=>[...rows].filter(([key])=>key.startsWith(prefix)).map(([key,value])=>({key,value:value as T})),
+  };
+  bindGroupTopic(store,{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",
+    requireMention:false,ownerOnly:true,revision:"original"},"original-group");
+  store.put("group:project:other-group",true);
+  const update={update_id:42,message:{message_id:42,date:Math.floor(Date.now()/1000)+2,
+    chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"prepare a PDF"}};
+  assert.ok(acceptGroupUpdate(store,update,7,5));
+  const sdk={threads:{get:async()=>({id:"t",projectId:"other-group",visibility:"visible"})}};
+  await processGroupInputs(store,sdk as any,7,5,()=>{throw Error("unexpected delivery");},new AbortController().signal);
+  assert.equal(rows.get("group:receipt:5:42").state,"revoked");
+});
+
+test("a prepared answer stays private when the group thread has moved before delivery",async()=>{
+  const rows = new Map<string,any>();
+  const store = {
+    get:<T>(key:string)=>rows.get(key) as T,
+    put:(key:string,value:unknown)=>{rows.set(key,value);},
+    del:(key:string)=>{rows.delete(key);},
+    atomic:(fn:()=>void)=>fn(),
+    list:<T>(prefix:string)=>[...rows].filter(([key])=>key.startsWith(prefix)).map(([key,value])=>({key,value:value as T})),
+  };
+  bindGroupTopic(store,{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",
+    requireMention:false,ownerOnly:true,revision:"original"},"group-project");
+  const route={kind:"group",chatId:-1001,topicId:3,threadId:"t",senderId:7,updateId:43,messageId:9};
+  store.put("group:in:5:43",{route,ownerId:7,revision:"original",state:"ready",answer:"fixture"});
+  const sdk={threads:{get:async()=>({id:"t",projectId:"personal-project",visibility:"visible"})}};
+  await processGroupInputs(store,sdk as any,7,5,()=>{throw Error("unexpected Telegram delivery");},new AbortController().signal);
+  assert.equal(rows.get("group:receipt:5:43").state,"revoked");
 });

@@ -1,3 +1,8 @@
+# 0.9.1-personal.27
+
+- Group topic bindings record their BB project. The bridge checks the thread before submission and before delivering a prepared reply or opening a PDF.
+- After updating an installation that previously registered multiple group projects, bind the group topics again to confirm their project IDs.
+
 # 0.9.1-personal.26
 
 - Send `/work` in a connected assistant chat to list active direct child tasks across all pages. The command reads BB thread status without starting a model turn.

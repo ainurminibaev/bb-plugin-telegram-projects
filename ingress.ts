@@ -3,6 +3,7 @@ import type { Store } from "./model";
 import type { ChatInput } from "./chat";
 
 export type GroupTopicPolicy = {
+  projectId?: string; // Older bindings used project and thread markers only.
   chatId: number;
   topicId: number;
   threadId: string;
