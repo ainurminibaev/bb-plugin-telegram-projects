@@ -6,7 +6,7 @@ import { markdownExcerpt } from "./events";
 import { localArtifacts, renderTelegramParts, cleanAssistantText, publicActivity } from "./telegram-ux";
 import type { BbPluginApi, MessageDispatchHookContext, MessageDispatchHookDecision } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   mkdirSync,
   readdirSync,
@@ -289,14 +289,19 @@ export class ChatBridge {
     if (this.s.get(cursorKey) === undefined) {
       const prior = await this.d.sdk.threads.events.list({threadId:args.threadId,order:"desc",limit:"100",
         types:["client/turn/requested","turn/input/accepted","turn/completed"],signal:this.d.signal});
-      for (const event of [...prior].sort((a,b)=>a.seq-b.seq)) {
-        if (event.type === "client/turn/requested") this.routes.requested(args.threadId,event.data);
-        else if (event.type === "turn/input/accepted" && event.scope.kind === "turn")
-          this.routes.accept(args.threadId,event.scope.turnId,event.data.clientRequestId);
+      // Two tasks may start using the same worker while this read is pending.
+      // Only the first snapshot may initialize its cursor. A later snapshot
+      // can already contain the other task's completion, still to be observed.
+      if (this.s.get(cursorKey) === undefined) {
+        for (const event of [...prior].sort((a,b)=>a.seq-b.seq)) {
+          if (event.type === "client/turn/requested") this.routes.requested(args.threadId,event.data);
+          else if (event.type === "turn/input/accepted" && event.scope.kind === "turn")
+            this.routes.accept(args.threadId,event.scope.turnId,event.data.clientRequestId);
+        }
+        // Historical completions predate this delegation and are not notices
+        // belonging to it. An already-running turn still has its own route above.
+        this.s.put(cursorKey,Math.max(0,...prior.map(e=>e.seq)));
       }
-      // Historical completions predate this delegation and are not notices
-      // belonging to it. An already-running turn still has its own route above.
-      this.s.put(cursorKey,Math.max(0,...prior.map(e=>e.seq)));
     }
     await this.d.sdk.threads.send({threadId:args.threadId, mode:"queue-if-active",
       input:[{type:"text",text:args.text,mentions:[]},marker]});
@@ -304,13 +309,23 @@ export class ChatBridge {
     return {accepted:true as const};
   }
   async spawnDelegated(args: {parentThreadId: string; routeToken: string; projectId: string;
-    environmentId: string; text: string; title: string; deliveryId: string; providerId?: string; model?: string}): Promise<{threadId:string}> {
+    environmentId?: string; projectSource?: {hostId:string; path:string}; text: string; title: string; deliveryId: string; providerId?: string; model?: string}): Promise<{threadId:string}> {
     const key = "reply:delegation-spawn:" + args.deliveryId;
     const old = this.s.get<{args: typeof args; state: string; threadId?: string}>(key);
     if (old) {
       if (JSON.stringify(old.args) !== JSON.stringify(args)) throw Error("delegation_id_conflict");
       if (old.state !== "accepted" || !old.threadId) throw Error("delegation_delivery_uncertain_check_native_threads");
       return {threadId:old.threadId};
+    }
+    if (Boolean(args.environmentId) === Boolean(args.projectSource)) throw Error("choose_environment_or_project_source");
+    let environment;
+    if (args.projectSource) {
+      const project = await this.d.sdk.projects.get({projectId:args.projectId});
+      const source = project.sources.find(s => s.hostId === args.projectSource!.hostId && s.path === args.projectSource!.path);
+      if (!source) throw Error("project_source_mismatch");
+      environment = {type:"host" as const,hostId:source.hostId,workspace:{type:"unmanaged" as const,path:source.path}};
+    } else {
+      environment = {type:"reuse" as const,environmentId:args.environmentId!};
     }
     await this.validateDelegationParent(args.parentThreadId,args.routeToken);
     // Another identical RPC may have reserved this delivery during validation.
@@ -320,7 +335,7 @@ export class ChatBridge {
     // Native spawn validates that pair and handles execution, limits and retries.
     this.s.put(key,{args,state:"sending"});
     const child = await this.d.sdk.threads.spawn({projectId:args.projectId,
-      environment:{type:"reuse",environmentId:args.environmentId},parentThreadId:args.parentThreadId,
+      environment,parentThreadId:args.parentThreadId,
       parentNotifications:"auto",title:args.title,visibility:"visible",
       ...(args.providerId ? {providerId:args.providerId}:{}),...(args.model ? {model:args.model}:{}),
       input:[{type:"text",text:args.text,mentions:[]},marker]});
@@ -328,6 +343,13 @@ export class ChatBridge {
     this.s.put("reply:child-cursor:"+child.id,0);
     this.s.put(key,{args,state:"accepted",threadId:child.id});
     return {threadId:child.id};
+  }
+  async validateOwnerAction(threadId:string,token:string,owner:number) {
+    const row=this.s.get<{threadId?:string;delegatedBy?:string;reportKey?:string;route?:{kind:string;chatId:number;topicId:number}}>("reply:ingress:"+token);
+    if (row?.threadId!==threadId || row.delegatedBy || row.reportKey || row.route?.kind!=="telegram" ||
+        row.route.chatId!==owner || this.binding(row.route.topicId)?.threadId!==threadId)
+      throw Error("owner_request_required");
+    await this.validateDelegationParent(threadId,token);
   }
   private async validateDelegationParent(threadId: string, token: string) {
     const events = await this.d.sdk.threads.events.list({threadId,order:"desc",limit:"1",
@@ -340,6 +362,44 @@ export class ChatBridge {
     if (!latest.data.systemMessageKind?.startsWith("child-"))
       this.routes.requested(threadId,latest.data);
     this.routes.assertCurrentDelegation(threadId,token,latest.data.requestId);
+  }
+  private async submitChildReports(binding: Binding) {
+    const owner = this.d.owner();
+    if (owner === undefined || !binding.threadId) return;
+    const reports = this.routes.reserveChildReports(binding.threadId,owner,binding.topicId);
+    for (const {key,value} of reports) {
+      if (this.s.get<{state:string}>(key)?.state !== value.state) continue;
+      if (value.state !== "reserved") {
+        const queue = await this.d.sdk.threads.queuedMessages.list({threadId:binding.threadId});
+        if (!this.s.get(key)) continue; // A native receipt arrived during the read.
+        const queued = queue.find(q => q.originPluginId === "telegram-projects" &&
+          q.content.some(block => block.type === "text" && block.text === value.marker.text));
+        if (queued?.state === "failed_exhausted") {
+          this.enqueue(binding.topicId,this.tr("Рабочий тред завершился. BB исчерпал попытки передать его результат помощнику. Результат сохранён в истории рабочего треда."),
+            undefined,"child-report-exhausted:" + key);
+          this.s.put(key,{...value,state:"failed-reported"});
+          continue;
+        }
+        if (!queued) this.enqueue(binding.topicId,
+          this.tr("Рабочий тред завершился. Подтверждение передачи результата помощнику пока не пришло. История задачи сохранена в BB."),
+          undefined,"child-report-uncertain:" + key);
+        this.s.put(key,{...value,state:queued ? "submitted" : "uncertain-reported",startedAt:Date.now()});
+        continue;
+      }
+      const startedAt = Date.now();
+      this.s.put(key,{...value,state:"submitting",startedAt});
+      try {
+        await this.d.sdk.threads.send({threadId:binding.threadId,mode:"queue-if-active",
+          input:[{type:"text",mentions:[],text:
+            `Для итогового ответа по поручению из Telegram проверь конкретный ход ${value.turnId} ` +
+            `в рабочем треде ${value.threadId} (статус ${value.status}). Сообщи результат этого хода. ` +
+            "Поручение уже завершилось. Не запускай его повторно."},value.marker]});
+        if (this.s.get(key)) this.s.put(key,{...value,state:"submitted",startedAt});
+      } catch (error) {
+        if (this.s.get(key)) this.s.put(key,{...value,state:"uncertain",startedAt});
+        throw error;
+      }
+    }
   }
   private async observeChildRoutes(parent: Binding) {
     const parentThreadId = parent.threadId!;
@@ -407,11 +467,13 @@ export class ChatBridge {
       ?? this.binding(topicId);
   }
   private save(b: Binding) {
+    if (this.s.get("group:project:"+b.projectId)) throw Error("group_project_unavailable");
+    this.s.put("private:project:"+b.projectId,true);
     this.s.put("chat:binding:" + b.topicId, b);
   }
   private binding(topicId: number): Binding | undefined {
     const old = this.s.get<Binding>("chat:binding:" + topicId);
-    if (old) return old;
+    if (old) return this.s.get("group:project:"+old.projectId) ? undefined : old;
     const topic = this.s
       .list<Topic>("topic:")
       .find(
@@ -420,7 +482,7 @@ export class ChatBridge {
           x.value.key.startsWith("proj_") &&
           !x.value.missingSince,
       )?.value;
-    if (!topic) return;
+    if (!topic || this.s.get("group:project:"+topic.key)) return;
     const b: Binding = {
       topicId,
       projectId: topic.key,
@@ -705,7 +767,7 @@ export class ChatBridge {
   async projects(topicId: number) {
     const projects = (
       await this.d.sdk.projects.list({ signal: this.d.signal })
-    ).filter((p) => p.kind === "standard");
+    ).filter((p) => p.kind === "standard" && !this.s.get("group:project:"+p.id));
     const b = this.binding(topicId) ?? {
       topicId,
       projectId: "",
@@ -816,6 +878,7 @@ export class ChatBridge {
       signal: this.d.signal,
     });
     if (
+      this.s.get("group:thread:" + id) ||
       t.projectId !== b.projectId ||
       t.deletedAt ||
       t.archivedAt ||
@@ -1301,6 +1364,10 @@ export class ChatBridge {
       this.s.put("chat:button:" + id, { ...a, used: true });
       if (a.kind === "project") {
         await this.d.sdk.projects.get({ projectId: a.arg! });
+        if (this.s.get("group:project:"+a.arg)) {
+          this.enqueue(input.topicId,this.tr("Этот проект используется в группе. Выбери другой проект."));
+          return;
+        }
         const fixed = this.s
           .list<Topic>("topic:")
           .find((x) => x.value.threadId === input.topicId)?.value;
@@ -1428,7 +1495,7 @@ export class ChatBridge {
       }
       this.enqueue(
         input.topicId,
-        this.tr("🎙 Распознано:\n") + text.slice(0, 3000),
+        this.tr("🎙 Распознано:\n") + text,
       );
     }
     if (input.attachment) {
@@ -1457,6 +1524,10 @@ export class ChatBridge {
         if (this.d.signal.aborted) return;
         // From here onward the outcome may include agent dispatch; never replay it.
         if (inbox) this.s.put(inboxKey, { ...inbox, phase: undefined });
+        if (input.attachment.kind === "voice")
+          this.enqueue(input.topicId, this.tr(
+            "Голосовое сохранено целиком как файл. Автоматическое распознавание доступно для записей до 10 минут и 15 МБ.",
+          ), undefined, "voice-file:" + input.updateId);
         const metadata = JSON.stringify({ path: saved.path, name: saved.name,
           bytes: saved.bytes, sha256: saved.sha256, kind: input.attachment.kind });
         text = (text || "Получено вложение. Уточни задачу, если она не следует из текущего разговора.") +
@@ -2223,14 +2294,16 @@ export class ChatBridge {
           ) {
             const k = "chat:candidate:" + b.revision + ":" + event.scope.turnId;
             const text = this.s.get<string>(k);
-            if (text?.trim())
-              this.enqueue(
-                b.topicId,
-                text,
-                undefined,
-                "event:" + b.revision + ":" + event.seq,
-                false,
-              );
+            const route = this.routes.destination(b.threadId,event.scope.turnId);
+            const legacyKey = "chat:out:event:" + b.revision + ":" + event.seq;
+            if (text?.trim() && route?.kind === "telegram" && !this.s.get(legacyKey)) {
+              // The coordinator can finish the same task by reading its worker before
+              // the child receipt arrives. Keep one outbox row across both BB turns.
+              const digest = createHash("sha256").update(JSON.stringify([
+                b.threadId,route.chatId,route.topicId,route.updateId,text.trim(),
+              ])).digest("hex");
+              this.enqueue(b.topicId,text,undefined,"event:" + b.revision + ":result-" + digest);
+            }
             this.s.del(k);
           }
           if (
@@ -2245,6 +2318,9 @@ export class ChatBridge {
             );
           b.cursor = event.seq;
         }
+        // Give already visible native notifications the first claim. On stock BB
+        // the child completion itself can wake the parent even without a notice.
+        if (events.length < 100) await this.submitChildReports(b);
         const pending = await this.d.sdk.threads.interactions.list({
           threadId: b.threadId,
           signal: this.d.signal,
@@ -2455,11 +2531,13 @@ export class ChatBridge {
   }
   async flush() {
     let count = 0;
-    for (const { key, value: o } of this.s
+    for (const { key } of this.s
       .list<Outbox>("chat:out:")
       .sort((a, b) => a.value.at - b.value.at)) {
       if (this.disposed || this.d.signal.aborted || count >= 8) break;
-      if (o.sentId || o.retryAt > Date.now()) continue;
+      // A final delivered earlier in this batch may have cancelled queued progress.
+      const o = this.s.get<Outbox>(key);
+      if (!o || o.sentId || o.retryAt > Date.now()) continue;
       if (o.ownerId !== undefined && o.ownerId !== this.d.owner()) {
         this.s.put(key, {...o, sentId: -1, text: "", keys: undefined});
         continue;

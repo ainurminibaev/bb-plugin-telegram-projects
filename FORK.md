@@ -99,3 +99,9 @@ Rollback must preserve current chat state and restore the previous plugin code
 and corresponding BB runtime files. A build or a passing unit test is not live
 acceptance. The original memory and conversation archives are not part of this
 plugin update.
+
+### Roll back a channel-enabled installation to personal.15
+
+Stop both receivers and wait for in-flight deliveries to finish. Save an ordinary private export first. Then call `exportPrivateState` with `{"confirm":true,"targetVersion":"personal.15"}`. Keep both receipt IDs and checksums privately. The second export stages the channel allowlist as a private storage row and omits the newer setting from the snapshot. personal.15 can retain this row across removal or restore it into an empty store.
+
+Install personal.15, then call its `restorePrivateState` with the **second** receipt's ID, SHA-256 and `confirm:true`. Check the private chat binding and queues before enabling the receivers. Group and channel actions become available again after returning to the newer fork. To return, stop the receivers and export the **current** personal.15 state so that activity during the rollback is retained. Install the newer fork and restore this latest export. The newer fork reads the saved channel allowlist. A snapshot from before channels were configured restores an empty list.

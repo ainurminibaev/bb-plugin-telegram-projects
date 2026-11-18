@@ -42,3 +42,11 @@ test("album multipart sends attach references and named files without filename f
   assert.equal(result.length,2);
  }finally{globalThis.fetch=original;}
 });
+
+test("explicit group destinations cannot fall back to the private owner", async () => {
+  const api = telegram(async () => assert.fail("wrong destination reached token lookup"),
+    new AbortController().signal, 1000, () => 123);
+  for (const method of ["sendMessage", "sendPhoto", "sendMediaGroup", "setMessageReaction", "editMessageText", "deleteMessage"]) {
+    await assert.rejects(api(method, {chat_id: -100111, message_thread_id: 3}), /telegram_chat_mismatch/);
+  }
+});

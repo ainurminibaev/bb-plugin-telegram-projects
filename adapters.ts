@@ -24,10 +24,15 @@ export function telegram(
     method: string,
     body: Record<string, unknown>,
   ): Promise<T> => {
+    const hasDestination = !["getMe", "getUpdates", "setMyCommands", "setMyDescription", "setMyShortDescription"].includes(method);
+    const chatId = hasDestination ? owner() : undefined;
+    // An explicitly addressed message must never be redirected to another chat.
+    if (hasDestination && body.chat_id !== undefined && String(body.chat_id) !== String(chatId))
+      throw Error("telegram_chat_mismatch");
     const secret = await token();
     const endpoint = telegramApiRoot(await apiRoot());
     const payload: Record<string, unknown> = { ...body,
-      ...(["getMe", "getUpdates", "setMyCommands", "setMyDescription", "setMyShortDescription"].includes(method) ? {} : { chat_id: owner() }) };
+      ...(hasDestination ? { chat_id: chatId } : {}) };
     const multipart = Object.values(payload).some(v => v instanceof Blob);
     const form = new FormData();
     if (multipart) for (const [key, value] of Object.entries(payload)) {
@@ -181,13 +186,19 @@ export async function transcribeTelegramVoice(
   const file = await telegram(token, signal, 30_000, undefined, apiRoot)("getFile", {
     file_id: voice.fileId,
   });
+  const expectedBytes = voice.size || file.file_size || undefined;
+  if (expectedBytes !== undefined && (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0 || expectedBytes > 15_000_000))
+    throw Error("voice_file_invalid");
+  if (voice.size && file.file_size && voice.size !== file.file_size)
+    throw Error("voice_file_invalid");
   if (endpoint !== "https://api.telegram.org") {
     if (!localFiles || typeof file.file_path !== "string") throw Error("voice_file_invalid");
     const config = await localFiles();
     const saved = await saveLocalTelegramFile({ ...config, sourcePath: file.file_path,
-      updateId: 0, fileId: voice.fileId, name: "voice.ogg", expectedBytes: voice.size || undefined,
+      updateId: 0, fileId: voice.fileId, name: "voice.ogg", expectedBytes,
       maxBytes: 15_000_000, signal });
     const bytes = await readFile(saved.path);
+    if (bytes.length === 0 || bytes.length !== saved.bytes) throw Error("voice_download_failed");
     const audio = new File([bytes], "voice.ogg", {type: voice.mime});
     const result = transcribe ? {text: await transcribe(audio)} : await sdk.system.transcribeVoice({ file: audio, signal });
     const text = (result as {text?:string}).text;
@@ -224,6 +235,8 @@ export async function transcribeTelegramVoice(
     }
     chunks.push(value);
   }
+  if (length === 0 || (expectedBytes !== undefined && length !== expectedBytes))
+    throw Error("voice_download_failed");
   const bytes = Buffer.concat(chunks);
   const audio = new File([bytes], "voice.ogg", {type: voice.mime});
   const result = transcribe ? {text: await transcribe(audio)} : await sdk.system.transcribeVoice({file: audio, signal});

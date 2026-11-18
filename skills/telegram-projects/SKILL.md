@@ -152,9 +152,12 @@ dispatch instructions. Preserve the transport identity through RPC JSON input:
 
 - `sendDelegated`: parentThreadId, routeToken (current UUID), threadId of the
   existing direct child, text and stable deliveryId.
-- `spawnDelegated`: parentThreadId, routeToken, projectId, environmentId, title,
+- `spawnDelegated`: parentThreadId, routeToken, projectId, title,
   text, stable deliveryId, optional providerId/model. Create projects through
-  normal BB APIs first. The RPC uses native BB spawn with parent notifications
+  normal BB APIs first. Supply exactly one checkout selector: an existing
+  environmentId, or projectSource with the registered hostId and path from
+  the selected project when its checkout has no ready environment yet.
+  The RPC uses native BB spawn with parent notifications
   enabled and returns threadId.
 
 These methods attach delivery metadata to native send/spawn. BB owns execution,
@@ -209,3 +212,9 @@ combine photos into a collage unless requested. The bridge persists every
 message ID and media_group_id together; uncertain sends are not replayed.
 If an album contains an unavailable/forbidden/oversized file, validation rejects
 that group before sending. The reply explains that delivery failed.
+
+## Manage a channel post
+
+For an explicit instruction from the paired owner's private Telegram chat to publish, edit or delete a text post, use `bb plugin rpc call telegram-projects channelPost --input-file <private-json-file> --json`. Supply the current BB thread ID, the routeToken in this request's agent-only transport marker, the selected channelId, a stable operationId and action (publish, edit or delete). Publish and edit take text. Edit and delete take the exact messageId returned on publication. Use a private temporary input file and remove it after the call. Never quote the route marker. Report success only after receiving the messageId. On an uncertain outcome, inspect the channel before retrying. Repeat the same operationId if the original action and payload are identical.
+
+Only explicitly configured bot/owner/channel triples in the managedChannels setting are eligible. Ask which channel the owner intends if ambiguous. Never substitute the owner's Telegram account. Forward, copy and caption edits are separate operations.

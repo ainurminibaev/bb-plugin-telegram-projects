@@ -119,10 +119,10 @@ test("delegation carries the exact accepted task through a reused worker and res
   routes.accept("child","work-turn","work");
   routes.complete("child","work-turn","completed");
   const restored = new ReplyRoutes(store);
-  assert.equal(restored.inheritOutcomes("parent","notice",[{threadId:"child",status:"completed"}]),true);
+  assert.equal(restored.inheritOutcomes("parent","notice",[{threadId:"child",status:"completed",turnId:"work-turn"}]),true);
   restored.accept("parent","continued-turn","notice");
   assert.deepEqual(restored.destination("parent","continued-turn"),tg);
-  assert.equal(restored.inheritOutcomes("parent","notice",[{threadId:"child",status:"completed"}]),true);
+  assert.equal(restored.inheritOutcomes("parent","notice",[{threadId:"child",status:"completed",turnId:"work-turn"}]),true);
   assert.equal(restored.inheritOutcomes("parent","duplicate",[{threadId:"child",status:"completed"}]),false);
 });
 
@@ -143,4 +143,62 @@ test("same-task child notice can join its parent turn without changing the desti
   assert.deepEqual(routes.destination("parent","turn"),tg);
   routes.record("parent","other-task",{...tg,updateId:999});routes.accept("parent","turn","other-task");
   assert.equal(routes.destination("parent","turn"),undefined);
+});
+
+test("late stock notice cannot claim the only remaining run of a reused worker", () => {
+  const {routes} = fixture();
+  for (const [id, updateId] of [["first", 31], ["second", 32]] as const) {
+    routes.record("worker", id, {...tg, updateId});
+    routes.accept("worker", id, id);
+    routes.complete("worker", id, "interrupted");
+  }
+  const notice = {threadId:"worker", status:"interrupted"};
+  assert.equal(routes.inheritOutcomes("parent","first-done",[{...notice,turnId:"first"}]), true);
+  assert.equal(routes.inheritOutcomes("parent","delayed",[notice]), false);
+  assert.equal(routes.inheritOutcomes("parent","pre-turn",[{...notice,turnId:null}]), false);
+  assert.equal(routes.inheritOutcomes("parent","second-done",[{...notice,turnId:"second"}]), true);
+  routes.accept("parent","final","second-done");
+  assert.deepEqual(routes.destination("parent","final"), {...tg,updateId:32});
+});
+
+test("reverse-order outcomes keep each worker run in its original topic across restart", () => {
+  const {store, routes} = fixture();
+  const first = {...tg, topicId: 121, updateId: 31};
+  const second = {...tg, topicId: 122, updateId: 32};
+  for (const [id, route] of [["first", first], ["second", second]] as const) {
+    routes.record("worker", id, route);
+    routes.accept("worker", id, id);
+    routes.complete("worker", id, "completed");
+  }
+
+  for (const [id, route] of [["second", second], ["first", first]] as const) {
+    const restored = new ReplyRoutes(store);
+    const outcome = {threadId: "worker", turnId: id, status: "completed"};
+    assert.equal(restored.inheritOutcomes("parent", id, [outcome]), true);
+    restored.accept("parent", id, id);
+    assert.deepEqual(restored.destination("parent", id), route);
+    assert.equal(restored.inheritOutcomes("parent", id + "-duplicate", [outcome]), false);
+  }
+});
+
+test("stock child receipt survives restart and never adopts a BB run or a different coordinator", () => {
+  const {store,routes} = fixture();
+  const origin = routes.ingress("parent",tg);
+  routes.requested("parent",{requestId:"p",originPluginId:"telegram-projects",input:[origin]});
+  const token = origin.text.match(/route:([^\]]+)/)![1];
+  const worker = routes.delegatedIngress("parent",token,"child");
+  routes.requested("child",{requestId:"w",originPluginId:"telegram-projects",input:[worker]});
+  routes.accept("child","target","w");
+  routes.complete("child","target","completed");
+  routes.requested("child",{requestId:"bb"});
+  routes.accept("child","newer","bb");
+  routes.complete("child","newer","completed");
+  assert.deepEqual(routes.reserveChildReports("other",tg.chatId,tg.topicId),[]);
+  assert.deepEqual(routes.reserveChildReports("parent",tg.chatId,0),[]);
+  const reports = routes.reserveChildReports("parent",tg.chatId,tg.topicId);
+  assert.deepEqual(reports.map(r=>r.value.turnId),["target"]);
+  const resumed = new ReplyRoutes(store);
+  assert.deepEqual(resumed.reserveChildReports("parent",tg.chatId,tg.topicId),reports);
+  assert.equal(resumed.inheritOutcomes("parent","late-stock",[{threadId:"child",status:"completed"}]),false);
+  assert.equal(resumed.inheritOutcomes("parent","late-patched",[{threadId:"child",turnId:"target",status:"completed"}]),false);
 });

@@ -340,3 +340,27 @@ test("busy worker prevents native creation", async () => {
     assert.equal(f.calls.length, 0);
   } finally {await f.harness.lifecycle.dispose();}
 });
+
+test("a late queued pickup retry after cancellation is fenced on the target only", async () => {
+  const f = fixture();
+  try {
+    await f.create().begin(f.binding(), "codex", "codex-model");
+    f.rows[2].status = "active";
+    await f.create().cancel(0);
+    assert.deepEqual(f.deletedQueue, []);
+    const recovered = f.create();
+    const retry = (threadId: string, requestId: string) => recovered.dispatch({
+      thread: {id:threadId}, queuedMessages:[{payload:{kind:"retry",retryOfTurnRequestId:requestId}}],
+    } as any);
+    f.queues.add("target-1");
+    assert.equal(retry("target-1","request-target-1")?.action,"wait");
+    assert.ok(f.create().needsPolling());
+    await f.create().poll();
+    assert.deepEqual(f.deletedQueue, ["retry-target-1"]);
+    assert.equal(f.create().needsPolling(),false);
+    assert.equal(retry("target-1","unrelated"),undefined);
+    assert.equal(retry("source","request-target-1"),undefined);
+    assert.equal(f.binding().threadId,"source");
+    assert.equal(f.rows[1].parentThreadId,"source");
+  } finally {await f.harness.lifecycle.dispose();}
+});

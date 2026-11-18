@@ -1,3 +1,11 @@
+# 0.9.1-personal.16
+
+- On stock BB, route delegated results using the child's own run events. A worker can handle successive Telegram requests while each result keeps its original destination.
+- Reconcile late pickup retries after handoff cancellation. First-time delegation can use a registered project that has no environment yet.
+- Bind a group topic to a dedicated workspace and restrict requests by sender and topic. The personal chat menu also checks existing buttons before opening a project reserved for a group.
+- Support posting, editing and deleting posts in an explicitly configured channel from the owner's private chat.
+- Check the length of voice files copied from a remote local Bot API before transcription.
+
 # 0.9.1-personal.15
 
 - Cancelling or rolling back a handoff removes its pending native pickup retries by exact request identity; unrelated queued work is preserved.

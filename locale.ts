@@ -1,9 +1,12 @@
 // Telegram texts are written in Russian; English replaces them through this table.
 export type Language = "ru" | "en";
 export const english: Record<string, string> = {
+  "Этот проект используется в группе. Выбери другой проект.": "This project is used in a group. Choose another project.",
   "Можно сменить модель или продолжить эту переписку с другим агентом.": "Change the model or continue this conversation with another agent.",
   "Другой агент → сохранить историю": "Another agent → keep history",
   "Получаю файл из Telegram…": "Receiving the file from Telegram…",
+  "Рабочий тред завершился. Подтверждение передачи результата помощнику пока не пришло. История задачи сохранена в BB.": "The worker thread finished. Delivery to the assistant has not been confirmed. The task history is available in BB.",
+  "Рабочий тред завершился. BB исчерпал попытки передать его результат помощнику. Результат сохранён в истории рабочего треда.": "The worker thread finished. BB exhausted its attempts to deliver the result to the assistant. The result is in the worker thread history.",
   "Работаю над задачей…": "Working on the task…",
   "❓ Агентство: нужен ответ": "❓ Agency: answer needed",
   "Агентство · уведомление": "Agency · notice",
@@ -74,6 +77,8 @@ export const english: Record<string, string> = {
     "Transcription is currently unavailable. Send text.",
   "Не удалось распознать голос. Сообщение не передано помощнику. Можно отправить текст. Ограничение голосовых: 10 минут и 15 МБ.":
     "Could not transcribe the recording. Send text or check BB transcription settings. Limit: 10 minutes and 15 MB.",
+  "Голосовое сохранено целиком как файл. Автоматическое распознавание доступно для записей до 10 минут и 15 МБ.":
+    "Voice recording saved in full as a file. Automatic transcription supports recordings up to 10 minutes and 15 MB.",
   "🎙 Распознано:\n": "🎙 Transcribed:\n",
   "Отправь текст или голосовое сообщение. Вложения пока открывай в BB.":
     "Send text or a voice message. Open attachments in BB for now.",

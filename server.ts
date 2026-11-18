@@ -7,10 +7,12 @@ import {
   diagnosisSchema,
   diagnose,
 } from "./settings";
+import {channelPost,channelPostSchema} from "./channel-post";
+import { bindGroupTopic, processGroupInputs } from "./group-worker";
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
-import { routeUpdate } from "./ingress";
+import { acceptGroupUpdate, routeUpdate } from "./ingress";
 import { menuCommands } from "./commands";
 import {
   classifyThread,
@@ -92,6 +94,16 @@ const statusSchema = z.object({
 });
 const handoffStatusSchema = z.object({id: z.string(), phase: z.string(), sourceThreadId: z.string(), targetThreadId: z.string().nullable(), error: z.string().nullable(), retirement: z.string().nullable(), retirementReason: z.string().nullable()});
 export const rpcContract = defineRpcContract({
+  channelPost:{input:channelPostSchema,output:z.object({messageId:z.number().int().positive()})},
+  bindGroupTopic: {
+    input: z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative(),
+      threadId:z.string().min(1),ownerOnly:z.boolean(),requireMention:z.boolean()}).strict(),
+    output:z.object({bound:z.literal(true)}),
+  },
+  unbindGroupTopic: {
+    input:z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative()}).strict(),
+    output:z.object({removed:z.boolean()}),
+  },
   providerHandoffStatus: {
     input: z.object({topicId: z.number().int().nonnegative()}).strict(), output: handoffStatusSchema.nullable(),
   },
@@ -103,7 +115,7 @@ export const rpcContract = defineRpcContract({
     input: z.object({confirm: z.literal(true), topicId: z.number().int().nonnegative(), id: z.string().uuid()}).strict(), output: handoffStatusSchema,
   },
   exportPrivateState: {
-    input: z.object({confirm: z.literal(true)}).strict(),
+    input: z.object({confirm: z.literal(true), targetVersion: z.literal("personal.15").optional()}).strict(),
     output: z.object({id: z.string(), sha256: z.string(), rows: z.number()}),
   },
   restorePrivateState: {
@@ -149,7 +161,8 @@ export const rpcContract = defineRpcContract({
   },
   spawnDelegated: {
     input:z.object({parentThreadId:z.string().min(1),routeToken:z.string().uuid(),projectId:z.string().min(1),
-      environmentId:z.string().min(1),text:z.string().min(1).max(100000),title:z.string().min(1).max(200),
+      environmentId:z.string().min(1).optional(),projectSource:z.object({hostId:z.string().min(1),path:z.string().min(1)}).strict().optional(),
+      text:z.string().min(1).max(100000),title:z.string().min(1).max(200),
       deliveryId:z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/),providerId:z.string().min(1).optional(),model:z.string().min(1).optional()}).strict(),
     output:z.object({threadId:z.string()}),
   },
@@ -251,6 +264,7 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Time zone, e.g. Europe/Madrid (empty: server) / Часовой пояс",
       default: "",
     },
+    managedChannels:{type:"string",label:"Managed channels (bot ID:owner ID:channel ID, comma separated)",default:""},
     telegramApiRoot: {
       type: "string", label: "Telegram Bot API URL", default: "https://api.telegram.org",
     },
@@ -343,12 +357,12 @@ export default async function plugin(bb: BbPluginApi) {
       db.prepare("DELETE FROM state WHERE key=?").run(key);
     },
     list<T>(prefix: string) {
+      // GLOB uses the binary primary-key index for literal prefixes. Escape
+      // pattern characters because callers supply an exact prefix, not a glob.
+      const pattern = prefix.replace(/[[*?]/g, c => "[" + c + "]") + "*";
       return (
-        db
-          .prepare(
-            "SELECT key,value FROM state WHERE substr(key,1,?)=? ORDER BY key",
-          )
-          .all(prefix.length, prefix) as { key: string; value: string }[]
+        db.prepare("SELECT key,value FROM state WHERE key GLOB ? ORDER BY key")
+          .all(pattern) as { key: string; value: string }[]
       ).map((r) => ({ key: r.key, value: JSON.parse(r.value) as T }));
     },
     atomic(fn) {
@@ -390,6 +404,7 @@ export default async function plugin(bb: BbPluginApi) {
   const ownerId = () => store.get<number>("owner:id");
   const botId = () => store.get<number>("bot:id");
   let stateTransferBusy = false;
+  let activeChannelWrites = 0;
   function pairCode() {
     let code = store.get<string>("pair:code");
     if (!code) {
@@ -1024,6 +1039,47 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const agency=agencyIntegration(store);
   bb.rpc.register(rpcContract, {
+    channelPost: async args=>{
+      const owner=ownerId(), bot=botId();
+      if (!bridge || !owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
+      const token=await botToken(), root=await apiRoot();
+      const tg=telegram(async()=>token,lifetime.signal,15000,()=>args.channelId,async()=>root);
+      const cfg=await settings.get();
+      if(!cfg.managedChannels.split(/[,\s]+/).includes([bot,owner,args.channelId].join(":"))) throw Error("channel_not_configured");
+      await checkBot(tg,bot);
+      const chat=await tg("getChat",{chat_id:args.channelId});
+      if (chat.id!==args.channelId || chat.type!=="channel") throw Error("channel_required");
+      await bridge.validateOwnerAction(args.threadId,args.routeToken,owner);
+      const current=await settings.get();
+      if(owner!==ownerId() || bot!==botId() || stateTransferBusy || !current.enabled || !current.chatEnabled) throw Error("bot_changed");
+      activeChannelWrites++;
+      try { return await channelPost(store,tg,owner,bot,current.managedChannels,args); }
+      finally { activeChannelWrites--; }
+    },
+    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention})=>{
+      const owner=ownerId(), bot=botId();
+      if (!owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
+      const tg=telegram(botToken,lifetime.signal,15_000,()=>chatId,apiRoot);
+      const me=await checkBot(tg,bot);
+      const chat=await tg("getChat",{chat_id:chatId});
+      if (chat.id!==chatId || !["group","supergroup"].includes(chat.type) ||
+          (topicId>0 && !chat.is_forum)) throw Error("group_unavailable");
+      const member=await tg("getChatMember",{chat_id:chatId,user_id:owner});
+      if (!["creator","administrator"].includes(member.status)) throw Error("group_owner_required");
+      const thread=await bb.sdk.threads.get({threadId});
+      if (!thread.projectId || thread.archivedAt || thread.deletedAt || thread.visibility==="hidden") throw Error("thread_unavailable");
+      if (owner!==ownerId() || bot!==botId() || stateTransferBusy) throw Error("bot_changed");
+      bindGroupTopic(store,{chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
+        ownerId:owner,revision:crypto.randomUUID()},thread.projectId);
+      return {bound:true as const};
+    },
+    unbindGroupTopic: ({chatId,topicId})=>{
+      if (stateTransferBusy) throw Error("state_transfer_in_progress");
+      const key=`group:policy:${chatId}:${topicId}`;
+      const removed=!!store.get(key);
+      store.del(key);
+      return {removed};
+    },
     providerHandoffStatus: ({topicId}) => bridge?.providerHandoffStatus(topicId) ?? null,
     startProviderHandoff: async ({topicId, sourceThreadId, providerId, model}) => {
       if (!bridge) throw Error("chat_bridge_unavailable");
@@ -1033,19 +1089,19 @@ export default async function plugin(bb: BbPluginApi) {
       if (!bridge) throw Error("chat_bridge_unavailable");
       return bridge.cancelProviderHandoff(topicId, id);
     },
-    exportPrivateState: async () => {
+    exportPrivateState: async ({targetVersion}) => {
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
       const c = await settings.get();
-      if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge)
+      if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge || activeChannelWrites)
         throw Error("stop_receivers_before_state_export");
-      return new StateTransfer(store).export(c);
+      return new StateTransfer(store).export(c, targetVersion);
     },
     restorePrivateState: async ({id, sha256}) => {
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
       stateTransferBusy = true;
       try {
         const c = await settings.get();
-        if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge)
+        if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge || activeChannelWrites)
           throw Error("stop_receivers_before_state_restore");
         return await new StateTransfer(store).restore(id, sha256,
           value => settings.experimental_set(value as Parameters<typeof settings.experimental_set>[0]));
@@ -1056,7 +1112,7 @@ export default async function plugin(bb: BbPluginApi) {
       stateTransferBusy = true;
       try {
         const c = await settings.get();
-        if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge)
+        if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge || activeChannelWrites)
           throw Error("stop_receivers_before_state_replace");
         return await new StateTransfer(store).replace(id, sha256, expectedCurrentSha256, c,
           value => settings.experimental_set(value as Parameters<typeof settings.experimental_set>[0]));
@@ -1501,6 +1557,13 @@ export default async function plugin(bb: BbPluginApi) {
             }
             await publishControl(true, cfg.language);
             await bridge.tick();
+            const owner = ownerId(), bot = botId();
+            if (owner && bot) {
+              try {
+                await processGroupInputs(store,bb.sdk,owner,bot,
+                  chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal);
+              } catch (error) { ingressError = safeError(error); }
+            }
           } else {
             activeAbort?.abort();
             await bridge?.dispose();
@@ -1603,6 +1666,7 @@ export default async function plugin(bb: BbPluginApi) {
           } finally { ingressPolling = false; }
           ingressError = null;
           for (const u of updates) {
+            if (cfg.chatEnabled && acceptGroupUpdate(store, u, ownerId(), botId())) continue;
             const route = routeUpdate(u, ownerId(), store.get("pair:code"));
             if (route.kind === "pair") {
               store.put("owner:id", route.userId);

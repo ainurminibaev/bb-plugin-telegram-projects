@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { routeUpdate as route } from "../ingress";
+import { acceptGroupUpdate, routeUpdate as route } from "../ingress";
 const routeUpdate = (u: unknown) => route(u, OWNER_ID);
 const OWNER_ID = 259034221;
 const chat = { id: OWNER_ID, type: "private" };
@@ -128,4 +128,41 @@ test("photo chooses largest variant, foreign owners cannot submit files", () => 
   const r = routeUpdate({update_id: 13, message});
   assert.equal(r.kind === "chat" && r.input.attachment?.fileId, "big");
   assert.equal(routeUpdate({update_id: 13, message: {...message, from: {id: 99}}}).kind, "ignore");
+});
+
+test("group policy binds a specific chat and topic and keeps the real sender", () => {
+  const policy = {chatId:-10011, topicId:3, threadId:"group-worker", botId:70, botUsername:"test_bot", ownerOnly:true, requireMention:true};
+  for (const ownerOnly of [true,false]) for (const requireMention of [true,false])
+    for (const sender of [10,11]) for (const chat of [-10011,-10022]) for (const topic of [2,3])
+      for (const kind of ["plain","mention","reply","other","command"]) {
+        const text = kind === "mention" ? "О @TeSt_Bot" : kind === "command" ? "/ask@test_bot" : kind === "other" ? "@another" : "hello";
+        const msg = {message_id:8, chat:{type:"supergroup", id:chat}, from:{id:sender}, text, message_thread_id:topic,
+          entities:kind === "command" ? [{type:"bot_command",offset:0,length:text.length}] : [{type:"mention",offset:kind==="mention"?2:0,length:9}],
+          reply_to_message:kind === "reply" ? {from:{id:70}} : undefined};
+        const result=route({update_id:9,message:msg},10,undefined,{...policy,ownerOnly,requireMention});
+        const accept=chat===policy.chatId && topic===policy.topicId && (!ownerOnly || sender===10) &&
+          (!requireMention || ["mention","reply","command"].includes(kind));
+        if (accept) assert.deepEqual(result,{kind:"group",chatId:chat,topicId:topic,threadId:"group-worker",senderId:sender,messageId:8,updateId:9,text});
+        else assert.equal(result.kind,"ignore");
+      }
+});
+
+test("accepted group input keeps its first binding and offset on replay", () => {
+  const rows = new Map<string, any>();
+  const store = {get:<T>(k:string)=>rows.get(k) as T, put:(k:string,v:unknown)=>{rows.set(k,v)},
+    atomic:(fn:()=>void)=>fn(), del:(k:string)=>{rows.delete(k)}, list:()=>[]};
+  const policy={chatId:-1001,topicId:3,botId:55,botUsername:"test_bot",ownerOnly:true,requireMention:false,threadId:"thread-A"};
+  const update={update_id:10,message:{message_id:8,chat:{id:-1001,type:"supergroup"},from:{id:123},message_thread_id:3,text:"hello"}};
+  assert.equal(acceptGroupUpdate(store,update,123,55),false);
+  store.put("group:policy:-1001:3",policy);
+  assert.equal(acceptGroupUpdate(store,update,123,56),false);
+  assert.equal(acceptGroupUpdate(store,update,111,55),false);
+  assert.equal(acceptGroupUpdate(store,update,123,55),true);
+  assert.equal(rows.get("ingress:offset"),11);
+  store.put("group:policy:-1001:3",{...policy,threadId:"thread-B"});
+  store.put("ingress:offset",13);
+  assert.equal(acceptGroupUpdate(store,update,123,55),true);
+  assert.equal(rows.get("ingress:offset"),13);
+  assert.equal(rows.get("group:in:55:10").route.threadId,"thread-A");
+  assert.equal([...rows.keys()].filter(k=>k.startsWith("group:in:")).length,1);
 });

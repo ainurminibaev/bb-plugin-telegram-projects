@@ -20,9 +20,9 @@ export class ReplyRoutes {
   private turnKey(threadId: string, turnId: string) {
     return "reply:turn:" + JSON.stringify([threadId, turnId]);
   }
-  ingress(threadId: string | null, route: Extract<ReplyRoute, {kind: "telegram"}>) {
+  ingress(threadId: string | null, route: Extract<ReplyRoute, {kind: "telegram"}>, delegatedBy?: string, reportKey?: string) {
     const id = randomUUID();
-    this.store.put("reply:ingress:" + id, {threadId, route});
+    this.store.put("reply:ingress:" + id, {threadId, route, delegatedBy, reportKey});
     return {type: "text" as const, visibility: "agent-only" as const, mentions: [],
       text: "[bb-telegram-reply-route:" + id + "]\nTransport metadata only; do not quote this marker in the answer."};
   }
@@ -33,7 +33,7 @@ export class ReplyRoutes {
       throw Error("unproven_parent_request");
     const accepted = this.store.get<ReplyRoute>(this.requestKey(parentThreadId, parent.requestId));
     if (!this.sameTask(accepted, parent.route)) throw Error("parent_route_conflict");
-    return this.ingress(childThreadId, parent.route);
+    return this.ingress(childThreadId, parent.route, parentThreadId);
   }
   assertCurrentDelegation(parentThreadId: string, token: string, currentRequestId: string) {
     const parent = this.store.get<{threadId: string; route: ReplyRoute}>("reply:ingress:" + token);
@@ -46,7 +46,37 @@ export class ReplyRoutes {
     // Retain BB outcomes too: an ambiguous reused worker must never inherit
     // an older Telegram task just because only that task has a destination.
     const key = "reply:outcome:" + JSON.stringify([threadId, turnId]);
-    if (!this.store.get(key)) this.store.put(key, {threadId, turnId, status, route, consumedBy: null});
+    if (this.store.get(key)) return;
+    const turn = this.store.get<TurnRoutes>(this.turnKey(threadId, turnId));
+    const parents = turn?.requestIds.map(id =>
+      this.store.get<string>("reply:request-parent:" + this.requestKey(threadId, id)));
+    this.store.atomic(() => {
+      this.store.put(key, {threadId, turnId, status, route, consumedBy: null});
+      if (route?.kind === "telegram" && parents?.[0] && parents.every(id => id === parents[0]))
+        this.store.put("reply:pending-child:" + JSON.stringify([parents[0],threadId,turnId]),
+          {parent:parents[0], threadId, turnId, status, route});
+    });
+  }
+  reserveChildReports(parent: string, chatId: number, topicId: number) {
+    type Report = {parent:string; threadId:string; turnId:string; status:string; route:Extract<ReplyRoute,{kind:"telegram"}>};
+    const parentPrefix = JSON.stringify([parent]).slice(0,-1) + ",";
+    for (const {key,value} of this.store.list<Report>("reply:pending-child:" + parentPrefix)) {
+      if (value.route.chatId !== chatId || value.route.topicId !== topicId) continue;
+      const outcomeKey = "reply:outcome:" + JSON.stringify([value.threadId,value.turnId]);
+      const row = this.store.get<{consumedBy:string|null}>(outcomeKey);
+      if (!row || row.consumedBy !== null) continue;
+      this.store.atomic(() => {
+        const reportKey = "reply:child-report:" + JSON.stringify([parent,value.threadId,value.turnId]);
+        const marker = this.ingress(parent,value.route,undefined,reportKey);
+        this.store.put(outcomeKey,{...row,consumedBy:reportKey});
+        this.store.put(reportKey,{...value,marker,state:"reserved"});
+        this.store.del(key);
+      });
+    }
+    return this.store.list<Report & {marker:ReturnType<ReplyRoutes["ingress"]>;state:string; startedAt?:number}>("reply:child-report:" + parentPrefix)
+      .filter(({value}) => value.route.chatId === chatId && value.route.topicId === topicId &&
+        (value.state === "reserved" || (["submitting","submitted","uncertain"].includes(value.state) &&
+          value.startedAt !== undefined && Date.now() - value.startedAt > 60_000)));
   }
   retryBelongsToTurn(threadId: string, turnId: string, originalRequestId: string) {
     return this.sameTask(this.destination(threadId, turnId),
@@ -54,20 +84,27 @@ export class ReplyRoutes {
   }
   inheritOutcomes(threadId: string, requestId: string, outcomes: readonly {threadId: string; status: string; turnId?: string | null}[]) {
     if (!outcomes.length || new Set(outcomes.map(o => o.threadId)).size !== outcomes.length) return false;
-    if (outcomes.some(outcome => outcome.turnId === null)) return false;
-    const candidates = outcomes.map(outcome => this.store.list<{
-      threadId: string; turnId: string; status: string; route?: ReplyRoute; consumedBy: string | null;
-    }>("reply:outcome:").filter(({value}) => value.threadId === outcome.threadId &&
-      value.status === outcome.status &&
-      (outcome.turnId === undefined || value.turnId === outcome.turnId) &&
-      (value.consumedBy === null || value.consumedBy === threadId + ":" + requestId)));
-    if (candidates.some(rows => rows.length !== 1)) return false;
-    const rows = candidates.map(rows => rows[0]);
+    // Stock BB can omit the run ID even for a delayed or pre-turn notice.
+    // A single unconsumed ledger row does not identify that notice.
+    if (outcomes.some(outcome => !outcome.turnId)) return false;
+    const consumer = threadId + ":" + requestId;
+    type Outcome = {status: string; route?: ReplyRoute; consumedBy: string | null};
+    const rows: {key: string; value: Outcome}[] = [];
+    for (const outcome of outcomes) {
+      const key = "reply:outcome:" + JSON.stringify([outcome.threadId, outcome.turnId]);
+      const value = this.store.get<Outcome>(key);
+      if (!value || value.status !== outcome.status ||
+          (value.consumedBy !== null && value.consumedBy !== consumer)) return false;
+      rows.push({key, value});
+    }
     const route = rows[0].value.route;
     if (!route || rows.some(row => route.kind === "bb" ? row.value.route?.kind !== "bb" : !this.sameTask(route, row.value.route))) return false;
     this.store.atomic(() => {
       this.record(threadId, requestId, route);
-      for (const row of rows) this.store.put(row.key, {...row.value, consumedBy: threadId + ":" + requestId});
+      for (const [i,row] of rows.entries()) {
+        this.store.put(row.key, {...row.value, consumedBy: consumer});
+        this.store.del("reply:pending-child:" + JSON.stringify([threadId,outcomes[i].threadId,outcomes[i].turnId]));
+      }
     });
     return true;
   }
@@ -94,11 +131,16 @@ export class ReplyRoutes {
       return id ? [id] : [];
     });
     if (ids.length !== 1) return false;
-    const ingress = this.store.get<{threadId: string; route: ReplyRoute; requestId?: string}>("reply:ingress:" + ids[0]);
+    const ingress = this.store.get<{threadId: string; route: ReplyRoute; requestId?: string; delegatedBy?: string; reportKey?: string}>("reply:ingress:" + ids[0]);
     if (!ingress || ingress.threadId !== threadId ||
         (ingress.requestId && ingress.requestId !== data.requestId)) return false;
     this.record(threadId, data.requestId, ingress.route);
     this.store.put("reply:ingress:" + ids[0], {...ingress, requestId: data.requestId});
+    // A persisted native request proves BB accepted the submission even if the
+    // original SDK response was lost. Replaying this event is idempotent.
+    if (ingress.reportKey) this.store.del(ingress.reportKey);
+    const parent = ingress.delegatedBy;
+    if (parent) this.store.put("reply:request-parent:" + this.requestKey(threadId,data.requestId),parent);
     return true;
   }
   record(threadId: string, requestId: string, route: ReplyRoute) {
@@ -112,6 +154,8 @@ export class ReplyRoutes {
     const original = this.store.get<ReplyRoute>(this.requestKey(threadId, originalRequestId));
     if (!original) return false;
     this.record(threadId, requestId, original);
+    const parent = this.store.get<string>("reply:request-parent:" + this.requestKey(threadId,originalRequestId));
+    if (parent) this.store.put("reply:request-parent:" + this.requestKey(threadId,requestId),parent);
     return true;
   }
   accept(threadId: string, turnId: string, requestId: string) {

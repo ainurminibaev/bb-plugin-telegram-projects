@@ -14,6 +14,7 @@ export type HandoffJob = {
   error?: string;
   cancelRequested?: boolean;
   pickupRequests?: string[];
+  lateRetryCleanup?: boolean;
   retryAt?: number;
   errorSeenAt?: number;
   title?: string;
@@ -32,7 +33,19 @@ const ownershipNotice = (q: Queued) => q.initiator === "system" && q.payload.kin
   ["ownership-assigned", "ownership-removed", "ownership-batch"].includes(q.systemNotice?.kind ?? "");
 
 export function handoffDispatch(store: Store, ctx: MessageDispatchHookContext): MessageDispatchHookDecision | undefined {
-  const job = store.list<HandoffJob>("chat:handoff:").map(r => r.value).find(j =>
+  const jobs = store.list<HandoffJob>("chat:handoff:").map(r => r.value);
+  // A provider can enqueue a retry after rollback has already inspected its queue.
+  // Fence only a single proven pickup retry. Other work on the target can proceed.
+  const queued = ctx.queuedMessages?.length === 1 ? ctx.queuedMessages[0].payload : undefined;
+  if (queued?.kind === "retry") {
+    const cancelled = jobs.find(j => j.phase === "cancelled" && j.target === ctx.thread.id &&
+      j.pickupRequests?.includes(queued.retryOfTurnRequestId));
+    if (cancelled) {
+      store.put("chat:handoff:" + cancelled.id, {...cancelled, lateRetryCleanup:true});
+      return {action: "wait", reason: "Переключение помощника отменено.", sendAt: Date.now() + 5000};
+    }
+  }
+  const job = jobs.find(j =>
     !terminal(j) && (j.frozen.includes(ctx.thread.id) || j.target === ctx.thread.id));
   if (!job) return;
   if (job.target === ctx.thread.id) {
@@ -68,7 +81,7 @@ export class TelegramHandoff {
     this.d.store.put("chat:handoff:" + j.id, j);
   }
   jobs() { return this.d.store.list<HandoffJob>("chat:handoff:").map(r => r.value); }
-  needsPolling() { return this.jobs().some(j => !terminal(j) || (j.phase === "done" && !j.retirement)); }
+  needsPolling() { return this.jobs().some(j => j.lateRetryCleanup || !terminal(j) || (j.phase === "done" && !j.retirement)); }
   active(topic: number) { return this.jobs().find(j => j.binding.topicId === topic && !terminal(j)); }
   private owns(j: HandoffJob) {
     const b = this.d.binding(j.binding.topicId);
@@ -179,6 +192,15 @@ export class TelegramHandoff {
       owned.add(d.requestId);
     }
     if (!owned.size) return;
+    // Keep the verified identities even when cancellation finds an empty queue.
+    j.pickupRequests = [...owned];
+    this.save(j);
+    await this.deletePickupRetries(j, owned);
+    j.retryAt = undefined;
+    this.save(j);
+  }
+  private async deletePickupRetries(j: HandoffJob, owned: Set<string>) {
+    if (!j.target) return;
     const queue = await this.d.sdk.threads.queuedMessages.list({threadId: j.target});
     for (const q of queue) {
       if (q.payload.kind !== "retry" || !owned.has(q.payload.retryOfTurnRequestId)) continue;
@@ -191,8 +213,6 @@ export class TelegramHandoff {
         if (remaining.some(r => r.id === q.id)) throw error;
       }
     }
-    j.retryAt = undefined;
-    this.save(j);
   }
   private transfer(j: HandoffJob, rollback = false) {
     return new HandoffChildren(this.d.store, this.d.sdk.threads, async () => {
@@ -225,6 +245,17 @@ export class TelegramHandoff {
     } finally { this.flights.delete(j.id); }
   }
   async poll() {
+    for (const j of this.jobs().filter(j => j.phase === "cancelled" && j.lateRetryCleanup)) {
+      if (this.flights.has(j.id)) continue;
+      this.flights.add(j.id);
+      try {
+        await this.deletePickupRetries(j, new Set(j.pickupRequests));
+        delete j.lateRetryCleanup;
+        this.save(j);
+      } catch {
+        // Keep the cleanup request durable and continue servicing other handoffs.
+      } finally { this.flights.delete(j.id); }
+    }
     for (const j of this.jobs().filter(j => j.phase === "done" && !j.retirement)) {
       if (this.flights.has(j.id)) continue;
       this.flights.add(j.id);

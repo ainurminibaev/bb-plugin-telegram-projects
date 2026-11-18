@@ -108,3 +108,15 @@ Retry notices require the queued retry to belong to the same original Telegram
 task; exhausted or unrelated retries do not promise automatic recovery. A late
 child completion that produces no public activity no longer creates a generic
 progress message. Actual subsequent work and final results still appear.
+
+### Привязка тестовой группы
+
+Для группы подготовьте отдельный рабочий BB-тред в проекте с подходящими для её участников инструкциями и доступами. Владелец личного бота должен быть создателем или администратором группы. Из BB вызовите `bb plugin rpc call telegram-projects bindGroupTopic --input-file group.json --json`. Пример содержимого файла:
+
+```json
+{"confirm":true,"chatId":-1001234567890,"topicId":3,"threadId":"thr_example","ownerOnly":true,"requireMention":true}
+```
+
+Для обычной группы укажите topicId 0. Параметр ownerOnly ограничивает отправителей владельцем, requireMention требует тег, адресованную команду или ответ на сообщение бота. Telegram определяет, какие сообщения придут боту, с учётом privacy mode и прав администратора. Для отключения вызовите unbindGroupTopic с confirm, chatId и topicId. Другой топик требует другого рабочего треда.
+
+После назначения проекта группе он исчезает из личного меню выбора проекта. Уже выданные кнопки также проверяют назначение при нажатии. Для личных поручений используйте отдельную папку проекта. Отвязка топика сохраняет прежнее назначение проекта, поскольку в нём остаются история и рабочие файлы.

@@ -28,7 +28,7 @@ test("private snapshot restores settings and exact state without returning crede
     const transfer = new StateTransfer(target,root);
     let restored:any;
     await transfer.restore(receipt.id,receipt.sha256,async s => {restored=s;});
-    assert.deepEqual(restored,settings);
+    assert.deepEqual(restored,{...settings,managedChannels:""});
     for (const row of source.list("")) assert.deepEqual(target.get(row.key),row.value);
     await transfer.restore(receipt.id,receipt.sha256,async () => {});
     target.put("chat:out:x",{sentId:99});
@@ -103,5 +103,22 @@ test("restore refuses live settings, conflicting state and corrupted or public b
     await assert.rejects(transfer.restore(receipt.id,receipt.sha256,async () => {}),/not_private/);
     chmodSync(path,0o600); appendFileSync(path," ");
     await assert.rejects(transfer.restore(receipt.id,receipt.sha256,async () => {}),/checksum/);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test("personal.15 recovery preserves the KV image and respects a subsequent revocation",async()=>{
+  const root=mkdtempSync(join(tmpdir(),"tg-rollback-"));
+  try {
+    const source=store(), transfer=new StateTransfer(source,root);
+    const settings={enabled:false,chatEnabled:false,managedChannels:"2:3:-4"};
+    const backup=transfer.export(settings,"personal.15");
+    const inert="migration:personal15:managedChannels";
+    assert.equal(source.get(inert),settings.managedChannels);
+    await transfer.restore(backup.id,backup.sha256,async s=>{assert.equal(s.managedChannels,"2:3:-4");});
+    const cleared=transfer.export({...settings,managedChannels:""});
+    await transfer.restore(cleared.id,cleared.sha256,async s=>{assert.equal(s.managedChannels,"");});
+    const rollback=transfer.export({...settings,managedChannels:""},"personal.15");
+    assert.equal(source.get(inert),"");
+    await transfer.restore(rollback.id,rollback.sha256,async s=>{assert.equal(s.managedChannels,"");});
   } finally {rmSync(root,{recursive:true,force:true});}
 });

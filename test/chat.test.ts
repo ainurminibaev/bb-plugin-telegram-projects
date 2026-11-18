@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { ChatBridge, inputSchema, splitText, type ChatInput } from "../chat";
 import { TelegramFailure, type Store } from "../model";
 const OWNER_ID = 259034221;
-function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{path: string; name: string; bytes: number; sha256: string}>) {
+function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{path: string; name: string; bytes: number; sha256: string}>, transcribe?: () => Promise<string>) {
   const data = new Map<string, any>();
   const calls: any[] = [];
   const sent: any[] = [];
@@ -132,6 +132,7 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
     signal: controller.signal,
     rich: () => false,
     receiveAttachment,
+    transcribe,
   });
   let update = 0;
   const input = (text: string, topicId = 100): ChatInput => ({
@@ -546,6 +547,23 @@ test("progress is transient, final is clean and acknowledgement is a reaction", 
     assert.equal(final.text.includes("<b>Проверено</b>"),true);
     assert.equal(JSON.stringify(f.sent).includes("PRIVATE THOUGHT"),false);
     assert.equal(f.sent.filter(x=>x.text?.startsWith("Готово:")).length,1);
+  } finally { f.cleanup(); }
+});
+test("a final cancels progress still waiting later in the same flush", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn("race");
+    f.thread.status = "active";
+    f.setEvents([
+      {seq:1,type:"item/completed",scope:{kind:"turn",turnId:"race"},data:{item:{type:"agentMessage",text:"Finished"}}},
+      {seq:2,type:"turn/completed",scope:{kind:"turn",turnId:"race"},data:{status:"completed"}}
+    ]);
+    await f.bridge.observe();
+    assert.ok(f.store.list("chat:out:progress:").length > 0);
+    await f.bridge.flush();
+    assert.equal(f.sent.filter(x => x.text === "Finished").length, 1);
+    assert.equal(f.sent.filter(x => x.text?.startsWith("⏳")).length, 0);
   } finally { f.cleanup(); }
 });
 test("429 retains message and confirmed receipts avoid replay", async () => {
@@ -985,7 +1003,7 @@ test("dispatch queues steering and splits grouped tasks through the native queue
   } finally { f.cleanup(); }
 });
 
-for (const exactIdentity of [false, true]) test(`native child completion continues its original Telegram task (exact identity: ${exactIdentity})`, async () => {
+for (const exactIdentity of [false, true]) test(`native child completion requires proven run identity (exact identity: ${exactIdentity})`, async () => {
   const f = fixture();
   try {
     await f.bridge.handle(f.input("Research"));
@@ -1027,7 +1045,26 @@ for (const exactIdentity of [false, true]) test(`native child completion continu
     ];
     f.sdk.threads.events.list=async (q:any)=>(q.threadId==="child"?childEvents:parentEvents).filter(e=>e.seq>Number(q.afterSeq??0));
     await f.bridge.observe();await f.bridge.flush();
-    assert.equal(f.sent.filter(x=>x.text?.includes("DELEGATED-ROUTE-PASS")).length,1);
+    assert.equal(f.sent.filter(x=>x.text?.includes("DELEGATED-ROUTE-PASS")).length,exactIdentity ? 1 : 0);
+    if (!exactIdentity) {
+      await f.bridge.observe();
+      await f.bridge.observe();
+      const reports = f.calls.filter(c => c[0] === "send" && c[1].threadId === "thr_one" &&
+        c[1].input[0].text.includes("конкретный ход child-turn"));
+      assert.equal(reports.length,1);
+      const receipt = reports[0][1].input[1];
+      const parentScope = {kind:"turn",turnId:"receipt-turn"};
+      const extra = [
+        {seq:7,type:"client/turn/requested",scope:threadScope,data:{requestId:"receipt",originPluginId:"telegram-projects",input:[receipt]}},
+        {seq:8,type:"turn/input/accepted",scope:parentScope,data:{clientRequestId:"receipt"}},
+        {seq:9,type:"item/completed",scope:parentScope,data:{item:{type:"agentMessage",text:"EXACT-CHILD-RESULT"}}},
+        {seq:10,type:"turn/completed",scope:parentScope,data:{status:"completed"}},
+      ];
+      f.sdk.threads.events.list=async(q:any)=>(q.threadId==="child"?childEvents:[...parentEvents,...extra]).filter(e=>e.seq>Number(q.afterSeq??0));
+      await f.bridge.observe();await f.bridge.flush();
+      await f.bridge.observe();await f.bridge.flush();
+      assert.equal(f.sent.filter(x=>x.text==="EXACT-CHILD-RESULT").length,1);
+    }
   } finally {f.cleanup();}
 });
 
@@ -1039,7 +1076,7 @@ test("late child acknowledgement is silent until it actually performs work", asy
   f.thread.status="active";
   const scope={kind:"turn",turnId:"late-notice"};
   const events:any[]=[
-   {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"notice",initiator:"system",systemMessageKind:"child-completed",systemMessageSubject:{kind:"thread",threadId:"child"}}},
+   {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"notice",initiator:"system",systemMessageKind:"child-completed",systemMessageSubject:{kind:"thread",threadId:"child",outcomes:[{threadId:"child",status:"completed",turnId:"child-turn"}]}}},
    {seq:2,type:"turn/input/accepted",scope,data:{clientRequestId:"notice"}},
    {seq:3,type:"turn/started",scope,data:{}},
   ];
@@ -1075,6 +1112,16 @@ test("delegated spawn uses native project/environment and keeps one worker on RP
     assert.equal(nativeCalls[0].projectId,"target-project");
     assert.deepEqual(nativeCalls[0].environment,{type:"reuse",environmentId:"target-environment"});
     assert.equal(nativeCalls[0].parentThreadId,"thr_one");
+    const {environmentId, ...withoutEnvironment} = args;
+    const projectSource = {hostId:"tru",path:"/srv/projects/new-project"};
+    f.sdk.projects.get = async () => ({sources:[projectSource]});
+    const fromSource = {...withoutEnvironment,deliveryId:"first-project-worker",projectSource};
+    await assert.rejects(f.bridge.spawnDelegated({...fromSource,environmentId}),/choose_environment/);
+    await assert.rejects(f.bridge.spawnDelegated({...fromSource,projectSource:{...projectSource,path:"/elsewhere"}}),/project_source_mismatch/);
+    await f.bridge.spawnDelegated(fromSource);
+    await f.bridge.spawnDelegated(fromSource);
+    assert.equal(nativeCalls.length,2);
+    assert.deepEqual(nativeCalls[1].environment,{type:"host",hostId:"tru",workspace:{type:"unmanaged",path:projectSource.path}});
     routes.requested("new-child",{requestId:"work",originPluginId:"telegram-projects",input:nativeCalls[0].input});
     routes.accept("new-child","work-turn","work");
     assert.equal(routes.destination("new-child","work-turn")?.kind,"telegram");
@@ -1522,4 +1569,127 @@ test('incomplete album acknowledgement stays uncertain and is never replayed',as
   assert.equal(f.sent.filter(x=>x.method==='sendMediaGroup').length,1);
   assert.ok([...f.data.entries()].filter(([k])=>k.startsWith('chat:file:')).every(([,v])=>v==='uncertain'));
  } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+
+test("concurrent delegations cannot skip a completed turn during worker cursor setup", async () => {
+  const f = fixture();
+  try {
+    const parent = f.thread.id;
+    const routes = new ReplyRoutes(f.store);
+    const marker = routes.ingress(parent, {kind:"telegram", chatId:OWNER_ID, topicId:0, updateId:12});
+    const request = {requestId:"parent-request", originPluginId:"telegram-projects", input:[marker]};
+    routes.requested(parent, request);
+    const child = {...f.thread, id:"reused-worker", parentThreadId:parent};
+    f.sdk.threads.get = async () => child;
+    let signalRead!: () => void;
+    let resolveRead!: (events:any[]) => void;
+    const pending = new Promise<void>(resolve => {signalRead = resolve;});
+    const snapshot = new Promise<any[]>(resolve => {resolveRead = resolve;});
+    let firstRead = true;
+    f.sdk.threads.events.list = async (q:any) => {
+      if (q.threadId === parent) return [{type:"client/turn/requested",data:request}];
+      if (!firstRead) return [];
+      firstRead = false;
+      signalRead();
+      return snapshot;
+    };
+    const args = {parentThreadId:parent, threadId:child.id, routeToken:marker.text.split(":")[1].split("]")[0], text:"research"};
+    const delayed = f.bridge.sendDelegated({...args,deliveryId:"task-one"});
+    await pending;
+    await f.bridge.sendDelegated({...args,deliveryId:"task-two"});
+    resolveRead([{seq:3,type:"turn/completed",scope:{kind:"turn",turnId:"two"},data:{status:"completed"}}]);
+    await delayed;
+    assert.equal(f.store.get("reply:child-cursor:" + child.id), 0);
+    assert.equal(f.calls.filter(c => c[0] === "send").length, 2);
+  } finally {f.cleanup();}
+});
+
+test("voice at the transcription limit preserves the final words in BB and Telegram", async () => {
+  const transcript = "пример ".repeat(600) + "последние слова";
+  const f = fixture(undefined, async () => transcript);
+  try {
+    await f.bridge.handle(f.input("hello"));
+    const voice = {file_id:"audio",duration:600,file_size:15_000_000};
+    const routed = routeUpdate({update_id:2,message:{message_id:2,message_thread_id:100,
+      chat:{type:"private",id:OWNER_ID},from:{id:OWNER_ID},voice}},OWNER_ID);
+    assert.ok(routed.kind === "chat" && routed.input.voice);
+    await f.bridge.handle(routed.input);
+    await f.bridge.flush();
+    assert.equal(f.calls.find(c => c[0] === "send")[1].input[0].text,transcript);
+    assert.ok(f.sent.some(m => m.text?.includes("последние слова")));
+  } finally {f.cleanup();}
+});
+
+test("oversized voice stays a file and the owner is told after it is saved", async () => {
+  const f = fixture(async () => ({path:"/inbox/voice.ogg",name:"voice.ogg",bytes:4242,sha256:"a".repeat(64)}));
+  try {
+    await f.bridge.handle(f.input("hello"));
+    const routed = routeUpdate({update_id:2,message:{message_id:2,message_thread_id:100,
+      chat:{type:"private",id:OWNER_ID},from:{id:OWNER_ID},voice:{file_id:"audio",duration:601,file_size:4242}}},OWNER_ID);
+    assert.ok(routed.kind === "chat" && !routed.input.voice && routed.input.attachment?.kind === "voice");
+    await f.bridge.handle(routed.input);
+    await f.bridge.flush();
+    assert.match(f.calls.find(c => c[0] === "send")[1].input[0].text,/\/inbox\/voice.ogg/);
+    assert.equal(f.sent.filter(m => m.text?.includes("сохранено целиком")).length,1);
+  } finally {f.cleanup();}
+});
+
+test("child report follows BB queue retries and announces exhaustion once in the original topic", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Research"));
+    const key = 'reply:child-report:' + JSON.stringify(['thr_one','worker','original-turn']);
+    const marker = {type:"text",text:"fixture-receipt",visibility:"agent-only"};
+    const route = {kind:"telegram",chatId:OWNER_ID,topicId:100,updateId:19};
+    f.store.put(key,{state:"submitting",startedAt:0,route,marker,turnId:"original-turn",threadId:"worker"});
+    let state = "failed_retrying";
+    f.sdk.threads.queuedMessages = {list:async()=>[{state,originPluginId:"telegram-projects",content:[marker]}]};
+    await f.bridge.observe();
+    assert.equal(f.data.get(key).state,"submitted");
+    assert.equal(f.sent.some(x=>x.text?.includes("исчерпал попытки")),false);
+    state = "failed_exhausted";
+    f.store.put(key,{...f.data.get(key),startedAt:0});
+    await f.bridge.observe();await f.bridge.flush();
+    await f.bridge.observe();await f.bridge.flush();
+    const errors = f.sent.filter(x=>x.text?.includes("исчерпал попытки"));
+    assert.equal(errors.length,1);
+    assert.equal(errors[0].message_thread_id,100);
+    assert.equal(f.data.get(key).state,"failed-reported");
+    assert.equal(f.calls.filter(c=>c[0]==="send").length,0);
+  } finally {f.cleanup();}
+});
+
+test("coordinator and child receipt share one final delivery but the next Telegram request can repeat it", async () => {
+  const f=fixture();
+  try {
+    await f.bridge.handle(f.input("Ask the worker"));
+    const routes=new ReplyRoutes(f.store);
+    const events=[];
+    for (const [turnId,updateId] of [["initial",11],["receipt",11],["next",12]] as const) {
+      routes.record("thr_one",turnId,{kind:"telegram",chatId:OWNER_ID,topicId:100,updateId});
+      routes.accept("thr_one",turnId,turnId);
+      const scope={kind:"turn",turnId};
+      events.push({seq:events.length+1,type:"item/completed",scope,data:{item:{type:"agentMessage",text:"Worker result"}}});
+      events.push({seq:events.length+1,type:"turn/completed",scope,data:{status:"completed"}});
+      f.setEvents(events);
+      await f.bridge.observe();await f.bridge.flush();
+      assert.equal(f.sent.filter(m=>m.text==="Worker result").length,turnId==="next"?2:1);
+    }
+  } finally {f.cleanup();}
+});
+
+test("private project picker rejects a former group project even through a previously issued button",async()=>{
+  const f=fixture();
+  try {
+    await f.bridge.handle(f.input("/project",777));
+    const [key]=[...f.data].find(([k,v])=>k.startsWith("chat:button:") && v.kind==="project")!;
+    f.store.put("group:project:proj_one",true);
+    await f.bridge.handle({...f.input("",777),callback:"bb:"+key.slice(12)});
+    assert.equal(f.store.get("chat:binding:777"),undefined);
+    await f.bridge.handle(f.input("/project",778));
+    assert.equal([...f.data.values()].some(v=>v?.kind==="project" && v.topicId===778),false);
+    await f.bridge.handle(f.input("вопрос из личного чата",100));
+    assert.equal(f.store.get("chat:binding:100"),undefined);
+    assert.equal(f.calls.length,0);
+  } finally {f.cleanup();}
 });

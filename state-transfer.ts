@@ -11,6 +11,7 @@ const snapshotSchema = z.object({
   rows: z.array(z.object({key: z.string(), value: z.unknown()})),
 }).strict();
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
+const channelSettingsKey = "migration:personal15:managedChannels";
 const restoreKey = "migration:state-restore";
 
 // Outside BB's plugin directory: normal plugin removal must not delete this
@@ -27,16 +28,26 @@ export class StateTransfer {
     }
     return join(this.root, "telegram-projects");
   }
-  export(settings: Record<string, string | number | boolean | undefined | null>) {
+  export(settings: Record<string, string | number | boolean | undefined | null>, targetVersion?: "personal.15") {
     if (settings.enabled || settings.chatEnabled) throw Error("disable_receivers_before_transfer");
     const data = snapshotSchema.parse({version: 1, pluginId: "telegram-projects",
       settings: Object.fromEntries(Object.entries(settings).filter(([,v]) => v !== undefined)),
       rows: this.store.list("").filter(row => row.key !== restoreKey)});
+    if (targetVersion === "personal.15") {
+      const channels = data.settings.managedChannels;
+      if (typeof channels !== "string") throw Error("managed_channels_unavailable");
+      delete data.settings.managedChannels;
+      data.rows = data.rows.filter(row => row.key !== channelSettingsKey);
+      data.rows.push({key: channelSettingsKey, value: channels});
+    }
     const text = JSON.stringify(data);
     const id = randomUUID();
     const path = join(this.secureDirectory(), id + ".json");
     const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try { writeFileSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
+    // BB may keep KV across removal. Stage the identical rollback row only
+    // after the private file is durable so personal.15 accepts that store too.
+    if (targetVersion === "personal.15") this.store.put(channelSettingsKey, settings.managedChannels);
     return {id, sha256: digest(text), rows: data.rows.length};
   }
   private read(id: string, sha256: string) {
@@ -54,6 +65,12 @@ export class StateTransfer {
     if (data.settings.enabled || data.settings.chatEnabled) throw Error("backup_receivers_must_be_disabled");
     if (new Set(data.rows.map(r => r.key)).size !== data.rows.length || data.rows.some(r => r.key === restoreKey))
       throw Error("invalid_backup_rows");
+    // personal.15 preserves unknown storage rows but rejects unknown settings.
+    // Current settings (including an intentionally empty allowlist) take priority.
+    const channels = data.rows.find(row => row.key === channelSettingsKey);
+    if (data.settings.managedChannels === undefined) {
+      data.settings.managedChannels = channels ? z.string().parse(channels.value) : "";
+    }
     return data;
   }
   // Deliberate replacement, unlike ordinary restore. Require an exact exported
