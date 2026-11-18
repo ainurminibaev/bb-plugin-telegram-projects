@@ -47,7 +47,11 @@ export async function submitIsolatedGroup(
   });
   if (previous) return {state:previous.state};
   await sdk.threads.send({threadId:thread.id,mode:"queue-if-active",input:[
-    {type:"text",text:args.text,mentions:[]},
+    {type:"text",text:[
+      "Telegram group delivery: Save each requested PDF under outputs/ in this thread’s working directory. " +
+      "For revisions, use a new filename. Include a Markdown link to the absolute PDF path in the final answer.",
+      args.text,
+    ].join("\n\n"),mentions:[]},
     routeMarker(args.routeToken),
   ]});
   store.put(key,{...store.get<Receipt>(key),state:"accepted"});

@@ -17,7 +17,8 @@ test("isolated executor submits one turn across concurrent duplicate calls",asyn
   await Promise.all([submit(),submit()]);
   assert.deepEqual(await submit(),{state:"accepted"});
   assert.equal(inputs.length,1);
-  assert.equal(inputs[0].input[0].text,args.text);
+  assert.ok(inputs[0].input[0].text.endsWith(args.text));
+  assert.match(inputs[0].input[0].text,/outputs\/.*new filename.*absolute PDF path/);
   assert.ok(inputs[0].input[1].text.includes(args.routeToken));
   await assert.rejects(submitIsolatedGroup(sdk,store,"group",{...args,text:"Changed"}),/conflict/);
   assert.equal(isolatedGroupInput.safeParse({...args,chatId:123}).success,false);

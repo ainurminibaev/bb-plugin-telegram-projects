@@ -1,3 +1,8 @@
+# 0.9.1-personal.29
+
+- Isolated workers receive the PDF output directory and link format with each group request. A reply requesting changes produces a separate file.
+- Tested in a Telegram forum topic with an online Codex worker in a separate BB instance. The original PDF contained the value from the incoming file, and the revised PDF preserved that value and added the requested change.
+
 # 0.9.1-personal.28
 
 - Run participant tasks in a separately configured BB instance. The personal bridge keeps the bot token, sender permissions and original Telegram destination. The group worker receives the task and selected attachments. A PDF linked in its final answer returns to the originating message.
