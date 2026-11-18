@@ -9,7 +9,7 @@ import {
   diagnose,
 } from "./settings";
 import {channelPost,channelPostSchema} from "./channel-post";
-import { bindGroupTopic, processGroupInputs } from "./group-worker";
+import { bindGroupTopic, groupTyping, processGroupInputs } from "./group-worker";
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
@@ -1525,6 +1525,7 @@ export default async function plugin(bb: BbPluginApi) {
       let rich = true;
       let currentUrl = "";
       let language: "ru" | "en" = "ru";
+      let typing:(()=>Promise<void>)|undefined;
       let activeAbort: AbortController | undefined;
       let pendingWake = false;
       let resume: (() => void) | undefined;
@@ -1555,6 +1556,7 @@ export default async function plugin(bb: BbPluginApi) {
                 activeAbort.signal,
                 lifetime.signal,
               ]);
+              typing=groupTyping(store,ownerId,botId,chatId=>telegram(botToken,bridgeSignal,3000,()=>chatId,apiRoot),bridgeSignal);
               bridge = new ChatBridge({
                 collectMs: 4000,
                 store,
@@ -1585,6 +1587,7 @@ export default async function plugin(bb: BbPluginApi) {
             const owner = ownerId(), bot = botId();
             if (owner && bot) {
               try {
+                void typing?.();
                 await processGroupInputs(store,bb.sdk,owner,bot,
                   chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,

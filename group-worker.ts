@@ -44,6 +44,44 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
   });
 }
 
+// Telegram clears typing on delivery or expiry. Renew it independently of long
+// transcription, file downloads and BB turns. Status failures never block work.
+export function groupTyping(store:Store, owner:()=>number|undefined, bot:()=>number|undefined,
+  transport:(chatId:number)=>Telegram, signal:AbortSignal) {
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  let running=false;
+  async function pulse() {
+    if (signal.aborted || running || timer) return;
+    const ownerId=owner(), botId=bot();
+    if (!ownerId || !botId) return;
+    const topics=new Map<string,GroupInput>();
+    for (const {value:job} of store.list<Job>(`group:in:${botId}:`)) {
+      if (job.state!=="pending" && job.state!=="submitted") continue;
+      const r=job.route;
+      if (r.waitUntil && !r.voice && Date.now()<r.waitUntil) continue;
+      const key=`group:policy:${r.chatId}:${r.topicId}`;
+      const policy=store.get<GroupTopicPolicy>(key);
+      if (policy?.botId===botId && job.ownerId===ownerId && (policy.ownerId===undefined || policy.ownerId===ownerId) &&
+          policy.revision===job.revision && policy.threadId===r.threadId && canInvokeGroup(policy,ownerId,r.senderId))
+        topics.set(key,r);
+    }
+    if (!topics.size) return;
+    running=true;
+    const started=Date.now();
+    try {
+      await Promise.allSettled([...topics.values()].map(r=>transport(r.chatId)("sendChatAction",{
+        chat_id:r.chatId,message_thread_id:r.topicId || undefined,action:"typing"
+      })));
+    } finally {
+      running=false;
+      if (!signal.aborted) timer=setTimeout(()=>{timer=undefined;void pulse().catch(()=>{});},
+        Math.max(500,3600-(Date.now()-started)));
+    }
+  }
+  signal.addEventListener("abort",()=>clearTimeout(timer),{once:true});
+  return ()=>pulse().catch(()=>{});
+}
+
 // Called serially by the chat service. Never retry a send with an unknown outcome.
 export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   owner:number, botId:number, transport:(chatId:number)=>Telegram, signal:AbortSignal,

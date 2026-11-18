@@ -1,3 +1,7 @@
+# 0.9.1-personal.23
+
+- Show Telegram’s native typing indicator in the originating group topic while the assistant handles an authorized request.
+
 # 0.9.1-personal.22
 
 - Collect example photos and documents for an addressed group request, including voice replies to a PDF. Match the sender, topic and pending request. Reuse the local Bot API file receiver on the bound host.
