@@ -1,3 +1,7 @@
+# 0.9.1-personal.26
+
+- Send `/work` in a connected assistant chat to list active direct child tasks across all pages. The command reads BB thread status without starting a model turn.
+
 # 0.9.1-personal.25
 
 - The bridge CLI restricts commands issued from a registered group project or its bound thread to topic-scoped history search. This also covers child threads in the same group project. OS-level isolation remains necessary for untrusted participants.

@@ -47,6 +47,14 @@ export const BOT_COMMANDS: BotCommand[] = [
     hintEn: "Project threads with preview and connect.",
   },
   {
+    command: "work",
+    group: "chat",
+    ru: "Что сейчас в работе",
+    en: "Work in progress",
+    hintRu: "Показывает активные и ожидающие запуска рабочие треды подключённого чата без запроса к модели.",
+    hintEn: "Show this chat's active and pending child threads without calling a model.",
+  },
+  {
     command: "history",
     group: "chat",
     ru: "Последний ответ",

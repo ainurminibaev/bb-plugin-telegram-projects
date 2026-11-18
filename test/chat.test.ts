@@ -1847,3 +1847,22 @@ test("later reply carries the selected Telegram quote from its own topic", async
     assert.ok(other.kind==="chat" && !other.input.replyExcerpt);
   } finally {f.cleanup();}
 });
+
+test("/work lists visible active children of the current binding without a model turn", async () => {
+  const f = fixture();
+  try {
+    f.store.put("chat:binding:100", {topicId:100, projectId:"proj_one", threadId:"thr_one", revision:"r", ready:true, cursor:0});
+    const child = {...f.thread, parentThreadId:"thr_one", status:"active", id:"child", title:"PDF"};
+    f.sdk.threads.list = async (args: any) => {
+      assert.equal(args.parentThreadId, "thr_one");
+      if (args.offset === 0) return Array.from({length:100}, (_, i) => ({...child, id:"idle"+i, status:"idle"}));
+      assert.equal(args.offset, 100);
+      return [child, {...child, id:"follow", status:"pending", title:"Follow-up"}, {...child, visibility:"hidden", title:"Hidden"},
+        {...child, parentThreadId:"other", title:"Other"}, {...child, status:"idle", title:"Idle"}];
+    };
+    await f.bridge.handle(f.input("/work"));
+    const queued = f.store.list<any>("chat:out:").map(row => row.value.text);
+    assert.deepEqual(queued, ["В работе — PDF\nВ очереди — Follow-up"]);
+    assert.equal(f.calls.length, 0);
+  } finally { f.cleanup(); }
+});

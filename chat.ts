@@ -1561,6 +1561,35 @@ export class ChatBridge {
       );
       return;
     }
+    if (cmd === "/work") {
+      const parentThreadId = b.threadId;
+      if (!parentThreadId) {
+        this.enqueue(b.topicId, this.tr("Сначала выбери чат в /chats."));
+        return;
+      }
+      const labels = {
+        active: "В работе", pending: "В очереди",
+        starting: "Запускается", stopping: "Останавливается",
+      };
+      const lines = new Map<string, string>();
+      const pageSize = 100;
+      for (let offset = 0; ; offset += pageSize) {
+        const children = await this.d.sdk.threads.list({
+          parentThreadId, archived: false, includeHidden: false,
+          limit: pageSize, offset, signal: this.d.signal,
+        });
+        if (this.binding(b.topicId)?.revision !== b.revision) return;
+        for (const child of children) {
+          if (child.parentThreadId !== parentThreadId || child.visibility !== "visible" ||
+              child.archivedAt || child.deletedAt || child.status === "idle" || child.status === "error") continue;
+          const title = (child.title || child.id).replace(/[\r\n]+/g, " ").slice(0, 160);
+          lines.set(child.id, this.tr(labels[child.status]) + " — " + title);
+        }
+        if (children.length < pageSize) break;
+      }
+      this.enqueue(b.topicId, [...lines.values()].join("\n") || this.tr("Активных рабочих тредов нет."));
+      return;
+    }
     const commands: Record<string, string> = {
       "/chats": "sessions",
       "/sessions": "sessions",

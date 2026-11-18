@@ -1,6 +1,11 @@
 // Telegram texts are written in Russian; English replaces them through this table.
 export type Language = "ru" | "en";
 export const english: Record<string, string> = {
+  "Сначала выбери чат в /chats.": "Select a chat with /chats first.",
+  "В очереди": "Queued",
+  "Запускается": "Starting",
+  "Останавливается": "Stopping",
+  "Активных рабочих тредов нет.": "No active child threads.",
   "Этот проект используется в группе. Выбери другой проект.": "This project is used in a group. Choose another project.",
   "Можно сменить модель или продолжить эту переписку с другим агентом.": "Change the model or continue this conversation with another agent.",
   "Другой агент → сохранить историю": "Another agent → keep history",
