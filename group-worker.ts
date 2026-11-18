@@ -52,6 +52,14 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
   });
 }
 
+// The owner manages the bridge from the private thread or an administrator
+// terminal. Group workers, including children in a group project, only need
+// the search command; its handler separately checks the bound topic.
+export function groupCliRestricted(store: Store, projectId?: string, threadId?: string) {
+  return Boolean((projectId && store.get("group:project:" + projectId)) ||
+    (threadId && store.get("group:thread:" + threadId)));
+}
+
 // Telegram clears typing on delivery or expiry. Renew it independently of long
 // transcription, file downloads and BB turns. Status failures never block work.
 export function groupTyping(store:Store, owner:()=>number|undefined, bot:()=>number|undefined,

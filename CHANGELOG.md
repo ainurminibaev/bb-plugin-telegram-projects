@@ -1,3 +1,8 @@
+# 0.9.1-personal.25
+
+- The bridge CLI restricts commands issued from a registered group project or its bound thread to topic-scoped history search. This also covers child threads in the same group project. OS-level isolation remains necessary for untrusted participants.
+- Updated the public description and linked the assistant installer. The plugin ID remains `telegram-projects`.
+
 # 0.9.1-personal.24
 
 - Inspect administrator permissions of the paired owner and the bot in a configured channel. An owner can request an edit to a manually published text post. This never grants a receipt for deletion.

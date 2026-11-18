@@ -10,7 +10,7 @@ import {
   diagnose,
 } from "./settings";
 import {channelPost,channelPostSchema,inspectChannelRights} from "./channel-post";
-import { bindGroupTopic, groupTyping, processGroupInputs } from "./group-worker";
+import { bindGroupTopic, groupCliRestricted, groupTyping, processGroupInputs } from "./group-worker";
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
@@ -1395,6 +1395,8 @@ export default async function plugin(bb: BbPluginApi) {
       },
     ],
     async run(argv,ctx) {
+      if (argv[0] !== "search-history" && groupCliRestricted(store, ctx.projectId, ctx.threadId))
+        return {exitCode: 1, stderr: "bridge_admin_command_unavailable_in_group"};
       if(argv[0]==="search-history"){
         const threadId=ctx.threadId;
         const scope=threadId && store.get<string>("group:thread:"+threadId);

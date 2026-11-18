@@ -5,7 +5,7 @@ import {saveLocalTelegramFile} from "../telegram-files";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {acceptGroupUpdate} from "../ingress";
-import {bindGroupTopic,processGroupInputs} from "../group-worker";
+import {bindGroupTopic,groupCliRestricted,processGroupInputs} from "../group-worker";
 
 test("worker delivers only its completed turn into the bound forum topic",async()=>{
  const rows=new Map<string,any>();
@@ -49,6 +49,10 @@ test("a private project and another topic cannot claim the same group thread",()
  assert.throws(()=>bindGroupTopic(store,policy,"previous-picker-choice"),/private_thread_or_project/);
  bindGroupTopic(store,policy,"group-project");
  assert.equal(store.get("group:project:group-project"),true);
+ assert.ok(groupCliRestricted(store,"group-project","group-thread"));
+ assert.ok(groupCliRestricted(store,"group-project","child-thread"));
+ assert.ok(groupCliRestricted(store,undefined,"group-thread"));
+ assert.equal(groupCliRestricted(store,"private-project","private"),false);
  bindGroupTopic(store,{...policy,revision:"unused"},"group-project");
  assert.equal(rows.get("group:policy:-1001:3").revision,"one");
  const cutoff=rows.get("group:policy:-1001:3").acceptAfterSecond;

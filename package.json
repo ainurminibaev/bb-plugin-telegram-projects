@@ -1,14 +1,14 @@
 {
   "name": "bb-plugin-telegram-projects",
-  "version": "0.9.1-personal.24",
+  "version": "0.9.1-personal.25",
   "type": "module",
   "engines": {
     "bb": ">=0.43",
     "bbPluginSdk": ">=0.4.87"
   },
   "bb": {
-    "name": "Telegram Projects",
-    "description": "BB projects as Telegram topics: agent reports and summaries, Tasks events, and chat with BB threads by text or voice.",
+    "name": "Telegram Bridge for BB",
+    "description": "Connect Telegram chats and group topics to BB project threads. Send files, follow up on answers and publish to authorized channels.",
     "branding": {
       "icon": "MessageSquare"
     },
@@ -70,8 +70,8 @@
     "type": "git",
     "url": "git+https://github.com/ainurminibaev/bb-plugin-telegram-projects.git"
   },
-  "homepage": "https://github.com/VKirill/bb-plugin-telegram-projects#readme",
+  "homepage": "https://github.com/ainurminibaev/bb-plugin-telegram-projects#readme",
   "bugs": {
-    "url": "https://github.com/VKirill/bb-plugin-telegram-projects/issues"
+    "url": "https://github.com/ainurminibaev/bb-plugin-telegram-projects/issues"
   }
 }

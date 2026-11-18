@@ -1,6 +1,10 @@
-> This is the personal-assistant fork. See [FORK.md](FORK.md) for scope, installation and validation. Upstream documentation follows.
+# Telegram Bridge for BB — use BB agent threads from Telegram
 
-# Telegram Projects for BB
+Send a file or a follow-up from Telegram to a BB thread and receive the result in the chat where you asked. This fork connects a personal bot to an existing assistant conversation and supports group topics and channel publishing. For the complete assistant, start with [Personal Agent for BB](https://github.com/ainurminibaev/bb-personal-assistant).
+
+**Русский.** Telegram-мост для BB связывает личный чат с рабочим тредом. Отправь документ боту с телефона, получи результат в Telegram и продолжи тот же разговор в BB. Для группы можно подключить отдельную тему. Условия установки и отличия форка описаны в [FORK.md](FORK.md).
+
+## Upstream Telegram Projects documentation
 
 [![BB](https://img.shields.io/badge/BB-%3E%3D0.43-blue.svg)](https://getbb.app)
 [![Plugin SDK](https://img.shields.io/badge/Plugin%20SDK-%3E%3D0.4.87-green.svg)](https://getbb.app)
