@@ -13,6 +13,7 @@ import {refersToExamples, promisesExamples, canInvokeGroup, type GroupTopicPolic
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
+import {accessModeKey,groupSettings,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
 type Job = {
@@ -85,7 +86,7 @@ export function groupTyping(store:Store, owner:()=>number|undefined, bot:()=>num
       const key=`group:policy:${r.chatId}:${r.topicId}`;
       const policy=store.get<GroupTopicPolicy>(key);
       if (policy?.botId===botId && job.ownerId===ownerId && (policy.ownerId===undefined || policy.ownerId===ownerId) &&
-          policy.revision===job.revision && policy.threadId===r.threadId && (r.senderId===ownerId || policy.isolated===true) && canInvokeGroup(policy,ownerId,r.senderId))
+          policy.revision===job.revision && policy.threadId===r.threadId && (policy.isolated===true ? canInvokeGroup(policy,ownerId,r.senderId) : senderRole(store,botId,ownerId,r.chatId,r.senderId)!=="none"))
         topics.set(key,r);
     }
     if (!topics.size) return;
@@ -148,7 +149,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const p=store.get<GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`);
       sourceDenied=!sourcesVisible(p?.deliverySources,botId,r.chatId,r.topicId);
       return !sourceDenied && p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && p.threadId===r.threadId &&
-        owner===job.ownerId && (r.senderId===owner || p.isolated===true) && canInvokeGroup(p,owner,r.senderId);
+        owner===job.ownerId && (p.isolated===true ? canInvokeGroup(p,owner,r.senderId) : senderRole(store,botId,owner,r.chatId,r.senderId)!=="none");
     };
     if (!allowed()) {finish("revoked");continue;}
     const topicKey = `group:policy:${r.chatId}:${r.topicId}`;
@@ -286,14 +287,24 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     if (job.state==="pending") {
       const thread = await sdk.threads.get({threadId:r.threadId,signal});
       if (!belongsToGroup(thread)) {finish("revoked");continue;}
+      const provider=(thread as {providerId?:string}).providerId;
+      const role=senderRole(store,botId,owner,r.chatId,r.senderId,provider);
+      if (role==="none") {finish("revoked");continue;}
+      const settings=groupSettings(store,botId,r.chatId);
+      const title=store.get<{title?:string}>(`visibility:${botId}:group:${r.chatId}`)?.title ?? "эта группа";
+      const senderName=r.senderName ?? "участник";
+      const rules=rulesNote({title,settings,role,senderName});
+      const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
       if (!allowed()) continue;
       const marker=routes.ingress(r.threadId,dest);
       job.cursor=latest[0]?.seq ?? 0;
       job.state="submitted";
       store.put(key,job);
-      await sdk.threads.send({threadId:r.threadId,mode:"queue-if-active",
-        input:[{type:"text",text:r.text,mentions:[]},marker,...(taskNote ? [{type:"text" as const,visibility:"agent-only" as const,text:taskNote,mentions:[]}] : [])]});
+      // The mode persists for later messages of the thread, so every group message sets it.
+      await sdk.threads.send({threadId:r.threadId,mode:"queue-if-active",permissionMode,
+        input:[{type:"text",text:r.text,mentions:[]},marker,{type:"text" as const,visibility:"agent-only" as const,text:rules,mentions:[]},
+          ...(taskNote ? [{type:"text" as const,visibility:"agent-only" as const,text:taskNote,mentions:[]}] : [])]});
     }
     if (job.state==="submitted") {
       const events=await sdk.threads.events.list({threadId:r.threadId,afterSeq:String(job.cursor??0),limit:"100",signal,

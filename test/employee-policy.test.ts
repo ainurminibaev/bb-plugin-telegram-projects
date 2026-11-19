@@ -334,6 +334,8 @@ test("registered Telegram poller opens the owner keyboard and lists the invited 
   const previous = process.env.BB_TELEGRAM_EMPLOYEE_PROFILE,
     original = globalThis.fetch;
   process.env.BB_TELEGRAM_EMPLOYEE_PROFILE = path;
+  const previousLegacy = process.env.BB_TELEGRAM_LEGACY_OPERATIONS;
+  process.env.BB_TELEGRAM_LEGACY_OPERATIONS = "1";
   const { bb, harness } = createFakePluginHost({
     pluginId: "telegram-projects",
     settings: { enabled: true, chatEnabled: false, botToken: "5:fixture" },
@@ -413,6 +415,8 @@ test("registered Telegram poller opens the owner keyboard and lists the invited 
   } finally {
     await harness.lifecycle.dispose();
     globalThis.fetch = original;
+    if (previousLegacy === undefined) delete process.env.BB_TELEGRAM_LEGACY_OPERATIONS;
+    else process.env.BB_TELEGRAM_LEGACY_OPERATIONS = previousLegacy;
     if (previous === undefined) delete process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
     else process.env.BB_TELEGRAM_EMPLOYEE_PROFILE = previous;
     rmSync(root, { recursive: true, force: true });

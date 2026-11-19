@@ -1,5 +1,6 @@
 import {historyCutoff,historyPrefix,topicPassages} from "./topic-search";
 import type { Store } from "./model";
+import { effectiveGroupPolicy } from "./rights";
 import type { ChatInput } from "./chat";
 
 export type GroupTopicPolicy = {
@@ -47,7 +48,7 @@ function groupExample(message:any):GroupExample|undefined {
 }
 
 export type Ingress =
-  | {kind: "group"; chatId: number; topicId: number; senderId: number; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]}
+  | {kind: "group"; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
   | { kind: "tasks"; topicId: number }
   | { kind: "pair"; userId: number }
@@ -95,7 +96,8 @@ export function routeUpdate(
     const examples=[groupExample(m), repliedToMessage && reply?.from?.id===from.id ? groupExample(reply) : undefined]
       .filter((file):file is GroupExample=>!!file);
     const prompt = target ? "Ответ на сообщение в этой теме: " + JSON.stringify(target) + "\n" + text : text;
-    return {kind: "group", chatId: group.chatId, topicId, senderId: from.id,
+    const senderName = [from.first_name, from.last_name].filter(Boolean).join(" ").slice(0, 64) || undefined;
+    return {kind: "group", chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
       threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice}), ...(examples.length && {examples})};
   }
   if (!m || m.chat?.type !== "private" || from?.id !== m.chat?.id)
@@ -218,9 +220,11 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
   if (!Number.isSafeInteger(chatId) || chatId >= 0 || !Number.isSafeInteger(topicId) || topicId < 0) return false;
   let accepted = false;
   store.atomic(() => {
-    const policy = store.get<GroupTopicPolicy>(`group:policy:${chatId}:${topicId}`);
-    if (!policy || (policy.ownerId !== undefined && owner !== policy.ownerId) || policy.botId !== botId || typeof policy.ownerOnly !== "boolean" ||
-        typeof policy.requireMention !== "boolean" || !policy.botUsername) return;
+    const bound = store.get<GroupTopicPolicy>(`group:policy:${chatId}:${topicId}`);
+    if (!bound || (bound.ownerId !== undefined && owner !== bound.ownerId) || bound.botId !== botId || typeof bound.ownerOnly !== "boolean" ||
+        typeof bound.requireMention !== "boolean" || !bound.botUsername) return;
+    // Who may call the bot here follows the access list and the group settings.
+    const policy = effectiveGroupPolicy(store, bound, owner);
     // Telegram dates have second precision. The binding second is ambiguous.
     if (policy.acceptAfterSecond !== undefined && (!Number.isSafeInteger(message.date) ||
         message.date <= policy.acceptAfterSecond)) return;

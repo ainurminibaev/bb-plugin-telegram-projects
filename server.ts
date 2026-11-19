@@ -21,6 +21,8 @@ import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
 import { acceptGroupUpdate, routeUpdate, skipExcludedForumUpdate } from "./ingress";
+import { accessList, accessModeKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, setAccess } from "./rights";
+import { handleConsentCallback, watchConsents } from "./consent";
 import { menuCommands } from "./commands";
 import {
   classifyThread,
@@ -101,7 +103,21 @@ const statusSchema = z.object({
   tasks: z.number(),
 });
 const handoffStatusSchema = z.object({id: z.string(), phase: z.string(), sourceThreadId: z.string(), targetThreadId: z.string().nullable(), error: z.string().nullable(), retirement: z.string().nullable(), retirementReason: z.string().nullable()});
+const personSchema = z.object({ id: z.number().int().positive().safe(), name: z.string().max(64) });
+const groupRightsSchema = z.object({
+  version: z.number(), who: z.enum(["access", "all"]), reply: z.enum(["mention", "auto"]),
+  members: z.enum(["silent", "read", "propose"]), zones: z.array(z.string().max(64)).max(50), note: z.string().max(500),
+});
 export const rpcContract = defineRpcContract({
+  rightsAccess: { input: z.null(), output: z.array(personSchema) },
+  rightsAccessSet: { input: z.object({ people: z.array(personSchema).max(200) }).strict(), output: z.array(personSchema) },
+  rightsGroup: { input: z.object({ chatId: z.number().int() }).strict(), output: groupRightsSchema.nullable() },
+  rightsGroupSet: {
+    input: z.object({ chatId: z.number().int(), who: z.enum(["access", "all"]).optional(), reply: z.enum(["mention", "auto"]).optional(),
+      members: z.enum(["silent", "read", "propose"]).optional(), zones: z.array(z.string().max(64)).max(50).optional(),
+      note: z.string().max(500).optional() }).strict(),
+    output: groupRightsSchema,
+  },
   reconcileEmployeeTicket:{input:z.object({idempotencyKey:z.string().regex(/^[a-f0-9]{32}$/)}).strict(),output:z.object({state:z.string(),messageId:z.number().optional()})},
   checkEmployeeWrite:{input:employeeWriteCheck,output:z.object({allowed:z.boolean()})},
   readIsolatedPdf:{input:isolatedPdfInput,output:isolatedPdfPart},
@@ -247,6 +263,17 @@ export default async function plugin(bb: BbPluginApi) {
     isolatedGroupProject:{type:"string",label:"Проект отдельного группового исполнителя",default:""},
     isolatedFileHost:{type:"string",label:"Машина с рабочими файлами группового исполнителя",default:""},
     agencyEnabled: {type:"boolean",label:"Уведомления из Агентства",default:false},
+    accessPermissionMode: {
+      type: "select",
+      label: "Режим хода для тех, кто может поручать (в группах)",
+      options: ["auto", "full"],
+      default: "auto",
+    },
+    consentMinutes: {
+      type: "number",
+      label: "Сколько минут ждать согласия на действие участника без доступа",
+      default: 30,
+    },
     language: {
       type: "select",
       label: "Language / Язык",
@@ -442,6 +469,21 @@ export default async function plugin(bb: BbPluginApi) {
   // Owner and bot are learned at runtime: pairing sets the owner, the first getMe the bot.
   const ownerId = () => store.get<number>("owner:id");
   const botId = () => store.get<number>("bot:id");
+  // The former catalog of operations and adapters runs only when explicitly re-enabled.
+  const legacyOperations = process.env.BB_TELEGRAM_LEGACY_OPERATIONS === "1";
+  const profilePeople = () => {
+    const path = process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
+    if (!path) return [];
+    try {
+      const p = readEmployeeProfile(path);
+      return p.botId === botId() && p.owner === ownerId() ? [...p.admins, ...p.members] : [];
+    } catch { return []; }
+  };
+  let consentTtlMs = 30 * 60_000;
+  const consentContext = (signal: AbortSignal) => ({
+    store, sdk: bb.sdk, bot: botId()!, owner: ownerId()!, ttlMs: consentTtlMs, signal,
+    tg: (chat: number) => telegram(botToken, signal, 15_000, () => chat, apiRoot),
+  });
   let stateTransferBusy = false;
   let activeChannelWrites = 0;
   function pairCode() {
@@ -486,11 +528,11 @@ export default async function plugin(bb: BbPluginApi) {
       if (!owner || !bot || !bridge || stateTransferBusy) throw Error("bot_unavailable");
       const policyKey=store.get<string>("group:thread:"+threadId);
       const origin=store.get<{threadId:string;sender:number;owner:number;bot:number}>("group:origin:"+args.taskId);
-      if (!policyKey || !origin || origin.threadId!==threadId || origin.owner!==owner || origin.bot!==bot || origin.sender!==owner)
+      if (!policyKey || !origin || origin.threadId!==threadId || origin.owner!==owner || origin.bot!==bot || !hasAccess(store,bot,owner,origin.sender))
         throw Error("owner_group_request_required");
       const active=store.list<{taskId?:string;state:string;ownerId:number;route:{threadId:string;senderId:number}}>(`group:in:${bot}:`)
         .some(({value:j})=>j.taskId===args.taskId && j.state==="submitted" && j.ownerId===owner &&
-          j.route.threadId===threadId && j.route.senderId===owner);
+          j.route.threadId===threadId && j.route.senderId===origin.sender);
       if (!active) throw Error("owner_group_request_required");
       if (args.dueAt<=Date.now()) throw Error("due_time_in_past");
       const receipt=queueGroupReminder(store,owner,bot,{taskId:args.taskId,dueAt:args.dueAt,waitingFor:"agent",text:args.text});
@@ -1181,6 +1223,16 @@ export default async function plugin(bb: BbPluginApi) {
     return project;
   }
   bb.rpc.register(rpcContract, {
+    rightsAccess: async () => botId() ? accessList(store, botId()!) : [],
+    rightsAccessSet: async ({ people }) => {
+      if (!botId()) throw Error("bot_unavailable");
+      return setAccess(store, botId()!, people);
+    },
+    rightsGroup: async ({ chatId }) => botId() ? groupSettings(store, botId()!, chatId) ?? null : null,
+    rightsGroupSet: async ({ chatId, ...change }) => {
+      if (!botId()) throw Error("bot_unavailable");
+      return saveGroupSettings(store, botId()!, chatId, change);
+    },
     reconcileEmployeeTicket: async ({idempotencyKey})=>{
       const read=()=>{
         const path=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
@@ -1296,14 +1348,11 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
       const executor=groupExecutor(chatId,topicId);
-      if (!executor && (!ownerOnly || allowedSenderIds?.some(id=>id!==owner)))
-        throw Error("Настройте изолированный BB для участников группы и повторите привязку темы.");
       if (executor && executor.threadId!==threadId) throw Error("isolated_thread_required");
       const thread=executor ?? await bb.sdk.threads.get({threadId});
       if (!thread.projectId || ("visibility" in thread && (thread.archivedAt || thread.deletedAt || thread.visibility==="hidden")))
         throw Error("thread_unavailable");
       if (owner!==ownerId() || bot!==botId() || stateTransferBusy) throw Error("bot_changed");
-      if (!ownerOnly && allowedSenderIds?.length) throw Error("allowlist_requires_owner_only");
       bindGroupTopic(store,{deliverySources:deliverySources ? [...new Set(deliverySources)].sort() : store.get<{deliverySources?:string[]}>(`group:policy:${chatId}:${topicId}`)?.deliverySources,isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},thread.projectId);
       return warning ? {bound:true as const,warning} : {bound:true as const};
@@ -1884,6 +1933,21 @@ export default async function plugin(bb: BbPluginApi) {
         : "")
     ).slice(0, 3900);
   }
+  bb.background.service("rights-consent", {
+    async start(signal) {
+      const pause = (ms: number) => new Promise<void>((resolve) => {
+        const timer = setTimeout(done, ms);
+        function done() { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); }
+        signal.addEventListener("abort", done, { once: true });
+      });
+      while (!signal.aborted) {
+        const cfg = await settings.get();
+        if (cfg.enabled && cfg.chatEnabled && botId() && ownerId() && !stateTransferBusy)
+          await watchConsents(consentContext(signal)).catch(() => {});
+        await pause(4000);
+      }
+    },
+  });
   bb.background.service("telegram-ingress", {
     async start(signal) {
       const pause = (ms: number) =>
@@ -1898,13 +1962,17 @@ export default async function plugin(bb: BbPluginApi) {
         });
       const tg = telegram(botToken, signal, 40_000, ownerId, apiRoot);
       const sendGroupVisibility = () => {
-        const path=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
+        const path=legacyOperations ? process.env.BB_TELEGRAM_EMPLOYEE_PROFILE : undefined;
         const profile=path ? readEmployeeProfile(path) : undefined;
-        const managers=profile?.botId===botId() && profile?.owner===ownerId() ? profile?.admins : [];
+        const managers=profile ? (profile.botId===botId() && profile.owner===ownerId() ? profile.admins : [])
+          : [ownerId()!, ...accessList(store,botId()!).map(p=>p.id)];
         return sendVisibilityUpdates(store,botId()!,chat=>telegram(botToken,signal,15000,()=>chat,apiRoot),managers);
       };
       while (!signal.aborted) {
         const cfg = await settings.get();
+        store.put(accessModeKey, cfg.accessPermissionMode);
+        consentTtlMs = Math.max(1, Number(cfg.consentMinutes) || 30) * 60_000;
+        if (botId() && ownerId()) migrateLegacyRights(store, botId()!, profilePeople());
         // Hold updates until the chat bridge exists, so none is consumed and lost.
         if (!cfg.enabled || stateTransferBusy || (cfg.chatEnabled && ownerId() && !bridge)) {
           ingressError = null;
@@ -1930,9 +1998,13 @@ export default async function plugin(bb: BbPluginApi) {
               if (ownerId()) await sendGroupVisibility();
             }
             if (skipExcludedForumUpdate(store, u)) continue;
-            const profilePath=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
+            const profilePath=legacyOperations ? process.env.BB_TELEGRAM_EMPLOYEE_PROFILE : undefined;
             const configured=profilePath!==undefined ? readEmployeeProfile(profilePath) : undefined;
-            if (profilePath !== undefined && configured && isEmployeeUpdate(store, botId() ?? 0, u, ownerId(), configured.settingsTitle,configured.personalGrants.map(g=>g.subject),configured.personalAccess?.subjects)) {
+            if (botId() && ownerId() && await handleConsentCallback(consentContext(signal), u)) {
+              store.put("ingress:offset", u.update_id + 1);
+              continue;
+            }
+            if (legacyOperations && profilePath !== undefined && configured && isEmployeeUpdate(store, botId() ?? 0, u, ownerId(), configured.settingsTitle,configured.personalGrants.map(g=>g.subject),configured.personalAccess?.subjects)) {
               const profile = () => {
                 const current = readEmployeeProfile(profilePath);
                 if (current.botId !== botId() || current.owner !== ownerId())
