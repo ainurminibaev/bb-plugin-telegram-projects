@@ -1,3 +1,7 @@
+# 0.9.20
+
+- Keep the personal coordinator’s instructions and skills bound to the private chat after changing providers. Pending messages wait for the binding to be saved, including after a restart.
+
 # 0.9.19
 
 - Retain the latest structural guest delivery metadata for configured forums to diagnose topic routing.

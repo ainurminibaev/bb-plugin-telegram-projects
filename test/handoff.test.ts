@@ -4,7 +4,7 @@ import {createFakePluginHost, makeThreadResponse} from "@get-bb/plugin-sdk/testi
 import {TelegramHandoff, type HandoffJob} from "../handoff";
 import type {Store} from "../model";
 
-function fixture() {
+function fixture(syncCoordinator?: (job: HandoffJob) => Promise<void>) {
   const row = (id: string, providerId = "claude-code", parentThreadId: string | null = null) => ({
     ...makeThreadResponse({id, projectId: "assistant", environmentId: "env", providerId, parentThreadId}),
     title: "Личный помощник", status: "idle", model: providerId + "-model", hasPendingInteraction: false,
@@ -91,7 +91,7 @@ function fixture() {
   };
   store.put("binding", {threadId: "source", topicId: 0, revision: "r1", projectId: "assistant"});
   const binding = () => store.get<any>("binding")!;
-  const create = () => new TelegramHandoff({store, sdk: bb.sdk, binding,
+  const create = () => new TelegramHandoff({store, sdk: bb.sdk, binding, syncCoordinator,
     assertDeliveryDrained: () => {},
     commit: (job, cursor) => store.put("binding", {...binding(), threadId: job.target, revision: job.id, cursor}),
     notify: job => notices.push(structuredClone(job)),
@@ -362,5 +362,31 @@ test("a late queued pickup retry after cancellation is fenced on the target only
     assert.equal(retry("source","request-target-1"),undefined);
     assert.equal(f.binding().threadId,"source");
     assert.equal(f.rows[1].parentThreadId,"source");
+  } finally {await f.harness.lifecycle.dispose();}
+});
+
+test("a committed handoff holds input across a lost settings receipt and a restart", async () => {
+  let coordinator = "source";
+  let writes = 0;
+  const f = fixture(async job => {
+    if (coordinator === job.source) {
+      coordinator = job.target!;
+      writes++;
+      throw Error("response lost");
+    }
+    assert.equal(coordinator, job.target);
+  });
+  try {
+    await f.create().begin(f.binding(), "codex", "codex-model");
+    await f.create().poll();
+    assert.equal(f.create().active(0)?.phase, "bindingPolicy");
+    assert.equal(f.binding().threadId, coordinator);
+    await f.create().cancel(0);
+    assert.equal(f.create().active(0)?.phase, "bindingPolicy");
+    await f.create().poll();
+    assert.equal(f.create().jobs()[0].phase, "done");
+    assert.equal(writes, 1);
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.rows[1].parentThreadId, coordinator);
   } finally {await f.harness.lifecycle.dispose();}
 });
