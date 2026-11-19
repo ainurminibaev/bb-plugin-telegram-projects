@@ -1,5 +1,10 @@
 # 0.9.25
 
+## 0.9.26
+
+- Execute an explicitly requested, fully specified personal action from a managed group without an extra DM when the operation permits immediate execution. Preserve private selection and configured approvals, source visibility checks, and write-time revocation.
+
+
 - Apply per-person resource grants across managed groups, with explicit private or group delivery and an independent audience source check.
 
 # 0.9.24

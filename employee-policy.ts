@@ -126,6 +126,7 @@ type Ticket = {
   sender: number;
   destination?: "here" | "dm";
   personalSources?: string[];
+  direct?: boolean;
   version: number;
   profileHash: string;
   operation: string;
@@ -156,7 +157,7 @@ function directDestination(m: any): Destination | undefined {
     return;
   const matches = [
     ...m.text.matchAll(
-      /(?:ответь|пришли|отправь|скинь)\s+(?:результат\s+)?(сюда|в эту группу|мне в личку|в личку)(?=$|[.,!;?\s])/giu,
+      /(?:ответь|пришли|отправь|скинь|сообщи)\s+(?:результат\s+)?(сюда|в эту группу|в эту тему|мне в личку|в личку)(?=$|[.,!;?\s])/giu,
     ),
   ];
   if (matches.length !== 1) return;
@@ -358,6 +359,12 @@ const response = z.discriminatedUnion("kind", [
       input: z.string().min(1).max(2000),
     })
     .strict(),
+  z.object({
+    kind: z.literal("direct"),
+    operation: id,
+    revision: z.number().int().positive().safe(),
+    item: proposalInput.shape.items.element,
+  }).strict(),
   z
     .object({
       kind: z.literal("selection"),
@@ -927,7 +934,7 @@ export async function employeeUpdate(
       !rules.topics.includes(String(t.topic)) ||
       op.id !== t.operation ||
       (!t.destination && !rules.members.includes(String(t.sender))) ||
-      ((t.items || op.approval || rules.requireApproval.includes(op.id)) &&
+      ((t.destination ? !isDirect(t, op) : t.items || op.approval || rules.requireApproval.includes(op.id)) &&
         (!approver ||
           !current.approvers.includes(approver) ||
           (t.destination
@@ -1100,7 +1107,7 @@ export async function employeeUpdate(
       ? personal.operations
       : p.operations.filter((o) => opFor(p, r, o.id))
   ).map((o) => ({ id: o.id, resource: o.resource }));
-  const result = response.parse(
+  const decision = response.parse(
     await call(
       personal ? personal.grant.conversationSocket : p.conversationSocket,
       {
@@ -1119,6 +1126,10 @@ export async function employeeUpdate(
       },
     ),
   );
+  if (decision.kind === "direct" && !personal) return;
+  const result = decision.kind === "direct"
+    ? { ...decision, kind: "selection" as const, items: [decision.item] }
+    : decision;
   if (hash(read()) !== hash(p) || generation(s, p, chat) !== group.version)
     return;
   if (
@@ -1140,12 +1151,13 @@ export async function employeeUpdate(
     );
     return;
   }
-  if (personal && (result.kind !== "selection" || !p.approvers.includes(actor)))
-    return;
+  if (personal && result.kind !== "selection") return;
   const op = personal
     ? personal.operations.find((o) => o.id === result.operation)
     : opFor(p, r, result.operation);
   if (!op || (result.kind === "selection" && !op.resultHost)) return;
+  const direct = decision.kind === "direct" && !op.approval;
+  if (personal && !direct && !p.approvers.includes(actor)) return;
   const token = createHash("sha256")
     .update([p.botId, chat, topic, m.message_id].join(":"))
     .digest("hex")
@@ -1157,6 +1169,7 @@ export async function employeeUpdate(
     message: m.message_id,
     sender: actor,
     destination,
+    direct: direct || undefined,
     personalSources: personal ? personal.sources : undefined,
     version: group.version,
     profileHash: hash(p),
@@ -1175,6 +1188,10 @@ export async function employeeUpdate(
     state: "pending",
   };
   s.put(ticketKey(p, token), t);
+  if (direct) {
+    await execute(t, token);
+    return;
+  }
   if (t.items) {
     const text = [
       `Группа ${chat}, тема ${topic} · ${op.id} / ${op.resource}`,
@@ -1220,6 +1237,11 @@ export async function employeeUpdate(
         },
       },
     );
+}
+
+function isDirect(ticket: Ticket, operation: {approval: boolean} | undefined) {
+  return !!ticket.destination && ticket.direct === true &&
+    ticket.items?.length === 1 && operation?.approval === false;
 }
 
 // Read-only recheck for a trusted adapter just before each delayed external write.
@@ -1277,7 +1299,7 @@ export function employeeWriteAllowed(
     (t.destination
       ? t.sender === check.actor
       : group.rules.approvers.includes(String(check.actor))) &&
-    current.approvers.includes(check.actor) &&
+    (isDirect(t, op) || current.approvers.includes(check.actor)) &&
     (t.destination
       ? !!scope
       : group.rules.members.includes(String(t.sender))) &&
