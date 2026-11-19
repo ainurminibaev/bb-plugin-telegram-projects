@@ -71,6 +71,7 @@ export class TelegramHandoff {
   constructor(private d: {store: Store; sdk: Sdk;
     binding: (topic: number) => HandoffBinding | undefined;
     commit: (job: HandoffJob, cursor: number) => void;
+    coordinatorNote?: (job: HandoffJob) => Promise<string>;
     syncCoordinator?: (job: HandoffJob) => Promise<void>;
     notify: (job: HandoffJob) => void;
     assertDeliveryDrained: (source: string, topic: number) => void;
@@ -153,12 +154,13 @@ export class TelegramHandoff {
       this.d.assertDeliveryDrained(j.source, binding.topicId);
       j.sourceSeq = await this.seq(j.source);
       j.priorTargets = (await this.history()).filter(h => h.sourceThreadId === j.source).map(h => h.targetThreadId);
+      const note = await this.d.coordinatorNote?.(j);
       // No briefing turn: it would mutate source context while held.
       j.phase = "creating";
       this.save(j);
       const result = await this.d.sdk.plugins.callRpc({pluginId: "handoff", method: "startHandoff",
         input: {threadId: j.source, providerId, model, workspace: "reuse", briefing: false,
-          extraInstructions: `Это только проверка передачи истории. Прочитай переданную историю как контекст, не выполняй прежние поручения повторно. Не меняй файлы, настройки, память, сервисы и проекты, не отправляй сообщения и не делегируй. Ответь только HANDOFF-READY:${j.id} и жди нового поручения.`},
+          extraInstructions: (note ? note + "\n\n" : "") + `Это только проверка передачи истории. Прочитай переданную историю как контекст, не выполняй прежние поручения повторно. Не меняй файлы, настройки, память, сервисы и проекты, не отправляй сообщения и не делегируй. Ответь только HANDOFF-READY:${j.id} и жди нового поручения.`},
         outputSchema: startedSchema});
       j.target = result.newThreadId;
       j.phase = "waiting";

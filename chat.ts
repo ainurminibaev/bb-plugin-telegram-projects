@@ -1,5 +1,5 @@
 import { ReplyRoutes, type ReplyRoute } from "./reply-routing";
-import { syncCoordinator } from "./handoff-coordinator";
+import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
 import { TelegramHandoff, type HandoffJob } from "./handoff";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
@@ -220,6 +220,7 @@ export class ChatBridge {
           revision: fresh(), cursor, ready: false, profileId: undefined, profileTarget: undefined,
           status: undefined, progressId: undefined, progressText: undefined, activity: undefined, toolActivity: undefined});
       },
+      coordinatorNote: job => coordinatorHandoffNote(d.sdk, job),
       syncCoordinator: job => syncCoordinator(d.sdk, job),
       notify: job => this.handoffStatus(job),
       sourceRetired: job => {

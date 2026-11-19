@@ -1,3 +1,7 @@
+# 0.9.21
+
+- Carry the private assistant’s current project and one-off task routing into a provider handoff. The successor can use the existing project and child threads even when the old conversation is abbreviated.
+
 # 0.9.20
 
 - Keep the personal coordinator’s instructions and skills bound to the private chat after changing providers. Pending messages wait for the binding to be saved, including after a restart.
