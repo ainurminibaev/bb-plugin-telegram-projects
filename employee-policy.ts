@@ -7,7 +7,7 @@ import {
 } from "./owner-selection";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { request } from "node:http";
+import {callProjectAdapter as realCall} from "./project-adapter";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { TelegramFailure, type Store, type Telegram } from "./model";
@@ -301,38 +301,6 @@ function opFor(p: Profile, r: Rules, name: string) {
 const generation = (s: Store, p: Profile, chat: number) =>
   saved(s, p, chat).version;
 type ProfileReader = () => Profile;
-const realCall: Call = (path, payload) =>
-  new Promise((resolve, reject) => {
-    const req = request(
-      {
-        method: "POST",
-        socketPath: path,
-        path: "/",
-        headers: { "content-type": "application/json" },
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        let size = 0;
-        res.on("error", reject);
-        res.on("data", (b: Buffer) => {
-          size += b.length;
-          if (size > 65536) req.destroy(Error("adapter response too large"));
-          else chunks.push(b);
-        });
-        res.on("end", () => {
-          try {
-            if (res.statusCode !== 200) throw Error("adapter failed");
-            resolve(JSON.parse(Buffer.concat(chunks).toString()));
-          } catch (e) {
-            reject(e);
-          }
-        });
-      },
-    );
-    req.setTimeout(30000, () => req.destroy(Error("adapter timeout")));
-    req.on("error", reject);
-    req.end(JSON.stringify(payload));
-  });
 export function readEmployeeProfile(path: string) {
   if (!isAbsolute(path)) throw Error("absolute employee profile required");
   return employeeProfile.parse(JSON.parse(readFileSync(path, "utf8")));

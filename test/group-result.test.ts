@@ -180,3 +180,60 @@ test("private forum links identify only an active original message for this owne
   store.del("group:policy:-1001:7");
   assert.throws(()=>resolveGroupMessage(store,2,1,link));
 });
+
+test("checkpoint reads fresh project state at the deadline, rechecks access and preserves one receipt across restart",async()=>{
+  const {createServer}=await import("node:http");
+  const {mkdtempSync,writeFileSync,rmSync}=await import("node:fs");
+  const dir=mkdtempSync("/tmp/bb-cp-"),socket=dir+"/read.sock",cfg=dir+"/adapters",sources=dir+"/sources";
+  const mode=process.env.BB_TELEGRAM_CHECKPOINT_ADAPTERS,grants=process.env.BB_TELEGRAM_SOURCE_GRANTS;
+  const grant=(yes:boolean)=>writeFileSync(sources,JSON.stringify({"1:-1001:7":yes?["file"]:[]}));
+  let file=false,confirmed=false,fail=false,calls=0,revoke=()=>{};
+  const server=createServer(async(req,res)=>{
+    let json="";for await(const part of req)json+=part;
+    const data=JSON.parse(json);calls++;
+    assert.equal(req.method,"POST");assert.equal(data.chatId,-1001);assert.equal(data.topicId,7);
+    assert.equal(data.messageId,42);assert.equal(data.projectId,"team");assert.equal(data.taskId,"0");
+    assert.equal(data.kind,"checkpoint");revoke();
+    res.writeHead(fail?503:200);res.end(JSON.stringify(confirmed?{kind:"complete"}:{kind:"reply",text:file?"Олег, подтвердите файл":"Лена, приложите файл"}));
+  });
+  await new Promise<void>(r=>server.listen(socket,r));
+  const now=Date.now;let clock=now();
+  try {
+    Date.now=()=>clock;
+    process.env.BB_TELEGRAM_CHECKPOINT_ADAPTERS=cfg;process.env.BB_TELEGRAM_SOURCE_GRANTS=sources;
+    writeFileSync(cfg,JSON.stringify({team:{socket,sources:["file"]}}));grant(true);
+    for(const scenario of ["missing","present","confirmed","read-error","revoked","binding-revoked"]){
+      const before=fixture(),args={taskId:"0",dueAt:clock+500,waitingFor:"checkpoint" as const};
+      file=false;confirmed=false;fail=false;revoke=()=>{};grant(true);
+      queueGroupReminder(before.store,2,1,args);
+      const count=calls;await before.tick();assert.equal(calls,count);
+      const f=fixture(before.snapshot());clock+=501;
+      file=scenario!=="missing";confirmed=scenario==="confirmed";
+      if(scenario==="revoked") revoke=()=>grant(false);
+      if(scenario==="binding-revoked") revoke=()=>f.store.del("group:policy:-1001:7");
+      if(scenario==="read-error"){
+        fail=true;await f.tick();await f.tick();
+        assert.equal(calls,count+1);assert.equal(f.sent.length,0);
+        assert.equal(queueGroupReminder(f.store,2,1,args).state,"queued");
+        clock+=30001;fail=false;
+      }
+      await f.tick();
+      const status=queueGroupReminder(f.store,2,1,args);
+      if(["missing","present","read-error"].includes(scenario)){
+        assert.deepEqual(status,{state:"sent",messageId:90});
+        assert.equal(f.sent[0].text,file?"Олег, подтвердите файл":"Лена, приложите файл");
+        assert.deepEqual(f.sent[0].reply_parameters,{message_id:42,allow_sending_without_reply:false});
+      }else{
+        assert.equal(f.sent.length,0);
+        assert.equal(status.state,scenario==="confirmed"?"cancelled":scenario==="revoked"?"source_unavailable":"revoked");
+      }
+      const restored=fixture(f.snapshot()),after=calls;await restored.tick();
+      assert.equal(calls,after);assert.equal(restored.sent.length,0);
+    }
+  }finally{
+    Date.now=now;
+    if(mode===undefined) delete process.env.BB_TELEGRAM_CHECKPOINT_ADAPTERS;else process.env.BB_TELEGRAM_CHECKPOINT_ADAPTERS=mode;
+    if(grants===undefined) delete process.env.BB_TELEGRAM_SOURCE_GRANTS;else process.env.BB_TELEGRAM_SOURCE_GRANTS=grants;
+    await new Promise<void>(r=>server.close(()=>r()));rmSync(dir,{recursive:true,force:true});
+  }
+});

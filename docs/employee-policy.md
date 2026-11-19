@@ -88,3 +88,13 @@ An administrator calls `bb plugin rpc call telegram-projects reconcileEmployeeTi
 ### Group Privacy Mode
 
 Token setup displays getMe's Privacy Mode. When a bot joins a group the bridge checks the actual Telegram administrator list and sends a private summary to the inviting administrator or group creator. It describes the global setting, the bot's role, ordinary message visibility, addressing and group rules. Membership and visibility transitions are tracked independently per group. A denied DM is recorded as unavailable. No group posting or permission changes are performed by this notification.
+
+### Project checkpoint at a group task deadline
+
+For an existing task with an active group binding, the paired owner schedules `telegram_group_reminder` in the direct BB thread or calls the existing owner-turn RPC `scheduleGroupReminder`. Supply taskId, dueAt (Unix milliseconds), waitingFor="checkpoint"; omit text. The RPC also requires the authenticated threadId and routeToken. One reminder slot belongs to each task. Repeating the identical request returns its current state.
+
+Set BB_TELEGRAM_CHECKPOINT_ADAPTERS to an absolute path to an administrator-owned JSON file. Each project ID maps to {"socket":"/run/team/checkpoint.sock","sources":["meeting","tracker"]}. Assign all sources to the originating bot/chat/topic in BB_TELEGRAM_SOURCE_GRANTS. The bridge derives the route and calls the project socket with HTTP POST / and JSON {kind:"checkpoint",taskId,projectId,threadId,chatId,topicId,messageId,dueAt}. The adapter looks up the card by the stored task ID and reads the current authorized topic and card. Return HTTP 200 with {"kind":"reply","text":"..."} or {"kind":"complete"}. A read failure must return a non-success status. Read-only calls may be repeated. Responses cannot override the recipient.
+
+An unsuccessful read leaves the reminder queued for retry after 30 seconds. A successful read is followed by a fresh thread, binding, adapter and source check. The bridge replies under the original message or records cancelled for a silent completion. Revoked access prevents delivery. A Telegram send with an uncertain outcome remains unknown and is never automatically repeated. The bridge supplies no project-specific readers or decision logic.
+
+Run `node_modules/.bin/tsx --test test/group-result.test.ts` from the plugin checkout for the Unix-socket and restart fixture.

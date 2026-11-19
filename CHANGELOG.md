@@ -1,3 +1,7 @@
+# 0.9.30
+
+Evaluate group task checkpoints against a project read adapter at the deadline and deliver one reply to the original topic or finish silently.
+
 # 0.9.29
 
 Show Telegram Privacy Mode in setup and notify the administrator about group visibility changes. Recover a started action by reading its verified receipt and returning one result to the original destination.

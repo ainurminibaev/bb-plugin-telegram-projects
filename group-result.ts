@@ -1,3 +1,6 @@
+import {readFileSync} from "node:fs";
+import {isAbsolute} from "node:path";
+import {callProjectAdapter} from "./project-adapter";
 import {sourcesVisible} from "./source-access";
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {z} from "zod";
@@ -70,13 +73,31 @@ export function queueGroupResult(store:Store, owner:number, bot:number, taskId:s
   return messageId===undefined ? {state} : {state,messageId};
 }
 
-export const groupReminderInput=groupResultInput.extend({
+const reminderFields = groupResultInput.extend({
   dueAt:z.number().int().positive().safe(),
-  waitingFor:z.enum(["pdf","decision"]),
+  waitingFor:z.enum(["pdf","decision","checkpoint"]),
+  text:groupResultInput.shape.text.optional(),
 });
-type Reminder = Result & Pick<z.infer<typeof groupReminderInput>,"dueAt"|"waitingFor">;
+function validReminder(r:{waitingFor:string;text?:string}) {
+  return r.waitingFor==="checkpoint" ? r.text===undefined : !!r.text;
+}
+export const groupReminderInput=reminderFields.refine(validReminder);
+export const bbReminderInput=reminderFields.omit({threadId:true,routeToken:true}).refine(validReminder);
+type Reminder = Status & z.infer<typeof bbReminderInput> & {retryAt?:number};
 
-export const bbReminderInput=groupReminderInput.omit({threadId:true,routeToken:true});
+const checkpointConfig=z.object({socket:z.string().refine(isAbsolute),sources:z.array(z.string().min(1)).min(1)}).strict();
+function checkpoint(project:string) {
+  const path=process.env.BB_TELEGRAM_CHECKPOINT_ADAPTERS;
+  if (!path || !isAbsolute(path)) return;
+  try {
+    const rows=JSON.parse(readFileSync(path,"utf8"));
+    if(Object.hasOwn(rows,project)) return checkpointConfig.parse(rows[project]);
+  } catch {return;}
+}
+const decision=z.discriminatedUnion("kind",[
+  z.object({kind:z.literal("reply"),text:groupResultInput.shape.text}).strict(),
+  z.object({kind:z.literal("complete")}).strict(),
+]);
 
 export function isDirectOwnerRequest(request:{
   initiator:string; senderThreadId:string|null; originPluginId?:string; systemMessageKind?:string;
@@ -97,6 +118,8 @@ export function queueGroupReminder(store:Store,owner:number,bot:number,args:z.in
         throw Error("group_reminder_conflict");
       return;
     }
+    if(args.waitingFor==="checkpoint" && (!groupBindingActive(store,origin) || !checkpoint(origin.projectId)))
+      throw Error("checkpoint_unavailable");
     store.put(key,{state:"queued",text:args.text,dueAt:args.dueAt,waitingFor:args.waitingFor});
     store.put("group:reminder-queue:"+args.taskId,true);
   });
@@ -116,7 +139,7 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     const result=store.get<Result>(key);
     if (!result || result.state!=="queued") continue;
     const scheduled=reminder ? store.get<Reminder>(key) : undefined;
-    if (scheduled && scheduled.dueAt>Date.now()) continue;
+    if (scheduled && Math.max(scheduled.dueAt,scheduled.retryAt ?? 0)>Date.now()) continue;
     const satisfied=()=>scheduled && (scheduled.waitingFor==="pdf"
       ? !!store.get("group:completed-pdf:"+taskId) : !!store.get("group:result:"+taskId));
     const origin=store.get<GroupOrigin>("group:origin:"+taskId);
@@ -131,31 +154,62 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     if (!allowed()) {finish("revoked");continue;}
     const sourceAllowed=()=>sourcesVisible(store.get<GroupTopicPolicy>(policyKey)?.deliverySources,bot,chatId,topicId);
     if (!sourceAllowed()) {finish("source_unavailable");continue;}
-    const isolated=store.get<GroupTopicPolicy>(policyKey)!.isolated;
-    if (isolated) {
-      const worker=groupExecutor(chatId,topicId);
-      if (worker?.threadId!==threadId || worker.projectId!==projectId || !origin.executionToken) {finish("revoked");continue;}
-      // The isolated service checks the thread's current project and visibility.
-      try {
-        const receipt=await worker.read(origin.executionToken,signal);
-        if (receipt.state==="missing") {finish("revoked");continue;}
-      } catch { continue; }
-    } else {
-      // A temporary SDK failure must not block other groups or ordinary replies.
-      let thread;
-      try { thread=await sdk.threads.get({threadId,signal}); }
-      catch { continue; }
-      if (thread.id!==threadId || thread.projectId!==projectId || thread.visibility!=="visible" ||
-          thread.archivedAt || thread.deletedAt) {finish("revoked");continue;}
-    }
-    if (signal.aborted) return;
+    const threadAccess=async()=>{
+      if (!allowed()) return "revoked";
+      const isolated=store.get<GroupTopicPolicy>(policyKey)!.isolated;
+      if (isolated) {
+        const worker=groupExecutor(chatId,topicId);
+        if (worker?.threadId!==threadId || worker.projectId!==projectId || !origin.executionToken) return "revoked";
+        // The isolated service checks the thread's current project and visibility.
+        try {
+          const receipt=await worker.read(origin.executionToken,signal);
+          if (receipt.state==="missing") return "revoked";
+        } catch { return "unavailable"; }
+      } else {
+        // A temporary SDK failure must not block other groups or ordinary replies.
+        let thread;
+        try { thread=await sdk.threads.get({threadId,signal}); }
+        catch { return "unavailable"; }
+        if (thread.id!==threadId || thread.projectId!==projectId || thread.visibility!=="visible" ||
+            thread.archivedAt || thread.deletedAt) return "revoked";
+      }
+      return "active";
+    };
+    const checkThread=async()=>{
+      const state=await threadAccess();
+      if(state==="revoked") finish("revoked");
+      return state==="active";
+    };
+    if (!await checkThread() || signal.aborted) continue;
     if (!allowed()) {finish("revoked");continue;}
     if (!sourceAllowed()) {finish("source_unavailable");continue;}
-    if (satisfied()) {finish("cancelled");continue;}
+    let text=result.text;
+    if(scheduled?.waitingFor==="checkpoint") {
+      const adapter=checkpoint(projectId);
+      const readable=()=>adapter && sourcesVisible(adapter.sources,bot,chatId,topicId);
+      if(!adapter || !readable()) {finish("source_unavailable");continue;}
+      let answer;
+      try {
+        answer=decision.parse(await callProjectAdapter(adapter.socket,{kind:"checkpoint",taskId,projectId,
+          chatId,topicId,messageId:origin.messageId,threadId,dueAt:scheduled.dueAt},AbortSignal.any([signal,AbortSignal.timeout(15000)])));
+      } catch {
+        if(!signal.aborted && store.get<Result>(key)?.state==="queued")
+          store.put(key,{...scheduled,retryAt:Date.now()+30000});
+        continue;
+      }
+      if(signal.aborted || !await checkThread() || signal.aborted) continue;
+      if(!allowed()) {finish("revoked");continue;}
+      if(!sourceAllowed() || !readable() || JSON.stringify(checkpoint(projectId))!==JSON.stringify(adapter)) {
+        finish("source_unavailable");continue;
+      }
+      if(store.get<Result>(key)?.state!=="queued") continue;
+      if(answer.kind==="complete") {finish("cancelled");continue;}
+      text=answer.text;
+    } else if (satisfied()) {finish("cancelled");continue;}
     finish("unknown");
     try {
       const sent=await transport(chatId)("sendMessage",{chat_id:chatId,message_thread_id:topicId||undefined,
-        reply_parameters:{message_id:origin.messageId,allow_sending_without_reply:false},text:result.text});
+        reply_parameters:{message_id:origin.messageId,allow_sending_without_reply:false},text});
       if (Number.isSafeInteger(sent?.message_id) && sent.message_id>0) finish("sent",sent.message_id);
     } catch (error) {
       if (error instanceof TelegramFailure && !error.ambiguous) finish("rejected");
