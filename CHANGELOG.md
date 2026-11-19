@@ -1,5 +1,9 @@
 # 0.9.25
 
+## 0.9.27
+
+The owner can view existing legacy topic bindings in My groups. The list preserves existing topic routing.
+
 ## 0.9.26
 
 - Execute an explicitly requested, fully specified personal action from a managed group without an extra DM when the operation permits immediate execution. Preserve private selection and configured approvals, source visibility checks, and write-time revocation.

@@ -132,6 +132,16 @@ test("one subject, two groups, private action scope and independent recipient gr
   const A = -1001,
     B = -1002;
   try {
+    const legacy = { botId: 5, chatId: -300, topicId: 20, ownerId: 1 };
+    rows.set("group:policy:-300:20", legacy);
+    await run({
+      from: { id: 1 },
+      chat: { id: 1, type: "private" },
+      text: "Мои группы",
+    });
+    assert.match(sent.at(-1).text, /-300 · тема 20 .*только просмотр/);
+    assert.equal(rows.size, 1);
+    assert.deepEqual(rows.get("group:policy:-300:20"), legacy);
     disclose(false);
     for (const chat of [A, B]) {
       rows.set("employee:5:directory:" + chat, { chat, title: String(chat) });

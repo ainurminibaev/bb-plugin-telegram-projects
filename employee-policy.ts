@@ -793,20 +793,56 @@ export async function employeeUpdate(
     const groups = s
       .list<{ chat: number; title: string }>(directory)
       .sort((a, b) => a.key.localeCompare(b.key));
+    const legacy =
+      actor === p.owner
+        ? s
+            .list<{
+              botId: number;
+              ownerId?: number;
+              chatId: number;
+              topicId: number;
+            }>("group:policy:")
+            .filter(
+              ({ value: v, key }) =>
+                v.botId === p.botId &&
+                (v.ownerId === undefined || v.ownerId === actor) &&
+                Number.isSafeInteger(v.chatId) &&
+                Number.isSafeInteger(v.topicId) &&
+                key === `group:policy:${v.chatId}:${v.topicId}`,
+            )
+            .sort(
+              (a, b) =>
+                a.value.chatId - b.value.chatId ||
+                a.value.topicId - b.value.topicId,
+            )
+        : [];
+    const count = groups.length + legacy.length;
     const page = Number(cb?.data?.split(":")[2] ?? 0);
+    const offset = page * 8;
     const rows = groups
-      .slice(page * 8, page * 8 + 8)
+      .slice(offset, offset + 8)
       .map(({ value }) => [
         { text: value.title, callback_data: "emp:open:" + value.chat },
       ]);
+    const lines = legacy
+      .slice(
+        Math.max(0, offset - groups.length),
+        Math.max(0, offset + 8 - groups.length),
+      )
+      .map(({ value }) => {
+        const title =
+          groups.find((g) => g.value.chat === value.chatId)?.value.title ??
+          value.chatId;
+        return `${title} · тема ${value.topicId} (только просмотр)`;
+      });
     if (page > 0)
       rows.push([{ text: "Назад", callback_data: "emp:list:" + (page - 1) }]);
-    if (groups.length > (page + 1) * 8)
+    if (offset + 8 < count)
       rows.push([{ text: "Дальше", callback_data: "emp:list:" + (page + 1) }]);
     await sendText(
       actor,
-      groups.length ? "Мои группы" : "Группы пока не добавлены.",
-      { reply_markup: { inline_keyboard: rows } },
+      count ? ["Мои группы", ...lines].join("\n") : "Группы пока не добавлены.",
+      rows.length ? { reply_markup: { inline_keyboard: rows } } : {},
     );
     return;
   }
