@@ -1,13 +1,16 @@
-# 0.9.25
+# 0.9.28
 
-## 0.9.27
+Give a verified user binary personal access to an employee across direct messages and enrolled groups. Honor the requested reply destination for that one result and keep older restricted grants intact.
+
+# 0.9.27
 
 The owner can view existing legacy topic bindings in My groups. The list preserves existing topic routing.
 
-## 0.9.26
+# 0.9.26
 
 - Execute an explicitly requested, fully specified personal action from a managed group without an extra DM when the operation permits immediate execution. Preserve private selection and configured approvals, source visibility checks, and write-time revocation.
 
+# 0.9.25
 
 - Apply per-person resource grants across managed groups, with explicit private or group delivery and an independent audience source check.
 
