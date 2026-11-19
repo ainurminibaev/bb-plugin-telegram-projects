@@ -169,6 +169,22 @@ export function routeUpdate(
   };
 }
 
+/** Drop out-of-scope group updates before any routing, analytics or content storage. */
+export function skipExcludedForumUpdate(store: Store, update: any): boolean {
+  const scope = process.env.BB_TELEGRAM_FORUM_TOPIC_SCOPE;
+  if (scope === undefined) return false;
+  const message = update.message ?? update.edited_message ?? update.guest_message ?? update.callback_query?.message;
+  if (message?.chat?.type !== "supergroup") return false;
+  const match = /^(-[1-9]\d*):([1-9]\d*)$/.exec(scope);
+  // Invalid explicit configuration fails closed for supergroups.
+  if (match && Number.isSafeInteger(Number(match[1])) && Number.isSafeInteger(Number(match[2]))) {
+    if (String(message.chat.id) !== match[1]) return false;
+    if (message.is_topic_message === true && message.message_thread_id === Number(match[2])) return false;
+  }
+  store.put("ingress:offset", update.update_id + 1);
+  return true;
+}
+
 /** A receipt pins the original destination even if the topic is rebound before processing. */
 export function acceptGroupUpdate(store: Store, update: any, owner: number | undefined, botId: number | undefined): boolean {
   const guest=update?.guest_message;

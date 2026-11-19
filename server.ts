@@ -18,7 +18,7 @@ import { bindGroupTopic, groupCliRestricted, groupTyping, processGroupInputs } f
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
-import { acceptGroupUpdate, routeUpdate } from "./ingress";
+import { acceptGroupUpdate, routeUpdate, skipExcludedForumUpdate } from "./ingress";
 import { menuCommands } from "./commands";
 import {
   classifyThread,
@@ -1871,6 +1871,7 @@ export default async function plugin(bb: BbPluginApi) {
           } finally { ingressPolling = false; }
           ingressError = null;
           for (const u of updates) {
+            if (skipExcludedForumUpdate(store, u)) continue;
             if (cfg.chatEnabled && await handleOwnerSelection(store,u,ownerId(),botId(),tg)) {
               store.put("ingress:offset",u.update_id+1);
               continue;

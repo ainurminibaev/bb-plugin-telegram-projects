@@ -1,3 +1,7 @@
+# 0.9.22
+
+- Set `BB_TELEGRAM_FORUM_TOPIC_SCOPE=<negative-chat-id>:<positive-topic-id>` on the receiver to process only that topic in one supergroup. The poller discards other topics before routing or storing content, including guest mentions and edits. Other groups and saved bindings keep their existing policy. Unset the variable and restart the receiver to restore the previous routing. An invalid setting suppresses all supergroup ingress.
+
 # 0.9.21
 
 - Carry the private assistant’s current project and one-off task routing into a provider handoff. The successor can use the existing project and child threads even when the old conversation is abbreviated.

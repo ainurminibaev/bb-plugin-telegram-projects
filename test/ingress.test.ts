@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { acceptGroupUpdate, routeUpdate as route } from "../ingress";
+import { acceptGroupUpdate, skipExcludedForumUpdate, routeUpdate as route } from "../ingress";
 const routeUpdate = (u: unknown) => route(u, OWNER_ID);
 const OWNER_ID = 259034221;
 const chat = { id: OWNER_ID, type: "private" };
@@ -219,4 +219,35 @@ test("guest mentions require the assigned topic and sender; ordinary replay crea
     assert.equal(acceptGroupUpdate(store,{update_id:6,message},7,55),true);
     assert.equal([...rows.keys()].filter(k=>k.startsWith("group:in:")).length,1);
   } finally {if (prior===undefined) delete process.env.BB_TELEGRAM_GUEST_TOPICS; else process.env.BB_TELEGRAM_GUEST_TOPICS=prior;}
+});
+
+test("forum scope precedes active bindings and guest diagnostics", () => {
+  const rows = new Map<string, any>();
+  const store = {get:<T>(k:string)=>rows.get(k) as T, put:(k:string,v:unknown)=>{rows.set(k,v);},
+    del:(k:string)=>{rows.delete(k);}, list:()=>[], atomic:(fn:()=>void)=>fn()};
+  const message = {message_id:42, chat:{type:"supergroup",id:-1001}, message_thread_id:3,
+    is_topic_message:true, from:{id:7}, text:"@test_bot check", entities:[{type:"mention",offset:0,length:9}]};
+  for (const topicId of [3,20]) {
+    store.put("group:policy:-1001:"+topicId,{chatId:-1001,topicId,botId:55,ownerOnly:true,requireMention:true,
+      botUsername:"test_bot",threadId:"thread"+topicId});
+  }
+  const prior = process.env.BB_TELEGRAM_FORUM_TOPIC_SCOPE;
+  try {
+    process.env.BB_TELEGRAM_FORUM_TOPIC_SCOPE = "-1001:20";
+    for (const payload of [{message},{edited_message:message},{guest_message:message},
+        {callback_query:{message}},{message:{...message,message_thread_id:undefined}}]) {
+      assert.equal(skipExcludedForumUpdate(store,{update_id:10,...payload}),true);
+      assert.equal(rows.get("ingress:offset"),11);
+      assert.equal(rows.size,3);
+    }
+    const allowed = {update_id:11,message:{...message,message_thread_id:20}};
+    assert.equal(skipExcludedForumUpdate(store,allowed),false);
+    assert.equal(acceptGroupUpdate(store,allowed,7,55),true);
+    assert.equal(skipExcludedForumUpdate(store,{message:{...message,chat:{type:"supergroup",id:-1002}}}),false);
+    delete process.env.BB_TELEGRAM_FORUM_TOPIC_SCOPE;
+    assert.equal(skipExcludedForumUpdate(store,{message}),false);
+  } finally {
+    if (prior === undefined) delete process.env.BB_TELEGRAM_FORUM_TOPIC_SCOPE;
+    else process.env.BB_TELEGRAM_FORUM_TOPIC_SCOPE = prior;
+  }
 });
