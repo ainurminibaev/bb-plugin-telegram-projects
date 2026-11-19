@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   employeeUpdate,
   employeeProfile,
+  employeeHome,
   isEmployeeUpdate,
   employeeWriteAllowed,
 } from "../employee-policy";
@@ -294,6 +295,11 @@ test("private admin cards govern two groups and gate a real adapter socket", asy
       }),
       false,
     );
+    assert.match(employeeHome(store,p).text,/Действуют локальные назначения/);
+    const updated={...p,connections:[...p.connections,"future-connection"]};
+    assert.equal(employeeHome(store,updated).text.includes("board-A"),false);
+    assert.equal(employeeHome(store,{...updated,botId:999}).text.includes("Действуют назначения из комплекта"),true);
+    assert.match(employeeHome(store,{...p,botId:999,approvers:[]}).text,/назначить согласующего/);
     assert.throws(() => employeeProfile.parse({ ...p, connections: [] }));
   } finally {
     await new Promise<void>((r) => server.close(() => r()));

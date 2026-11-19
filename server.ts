@@ -1,4 +1,4 @@
-import {employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
+import {employeeHome,employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
 import {proposalInput,presentProposal,handleOwnerSelection,collectDecisionResults,presentProjectProposals} from "./owner-selection";
 import {bbReminderInput,isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
@@ -1924,7 +1924,7 @@ export default async function plugin(bb: BbPluginApi) {
               if(profilePath!==undefined) {
                 const p=readEmployeeProfile(profilePath);
                 if(p.botId===botId() && p.owner===route.userId)
-                  await tg("sendMessage",{text:"Управление сотрудником",reply_markup:{keyboard:[[p.settingsTitle,"Мои группы"]],resize_keyboard:true}});
+                  await tg("sendMessage",employeeHome(store,p));
               }
               wake?.();
             } else if (route.kind === "chat" && cfg.chatEnabled && bridge) {

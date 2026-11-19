@@ -1,3 +1,7 @@
+# 0.9.24
+
+- Show active packaged or local assignments and missing assignments immediately after pairing and on /start.
+
 # 0.9.23
 
 - Add opt-in employee limits, private group settings cards, scoped conversation and action adapters, selective approvals and verified return links. See [setup and adapter contract](docs/employee-policy.md).

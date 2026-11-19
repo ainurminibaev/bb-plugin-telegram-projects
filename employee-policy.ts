@@ -325,6 +325,19 @@ function defaults(p: Profile): Limits {
     confirm: p.operations.filter((o) => o.approval).map((o) => o.id),
   };
 }
+export function employeeHome(store:Store,profile:Profile) {
+  const applied=effective(store,profile);
+  const local=store.get<{revision:number}>(globalKey(profile));
+  const missing:string[]=[];
+  if(!applied.members.length)missing.push("назначить участников для подключения групп");
+  if(applied.operations.some(op=>op.approval) && !applied.approvers.length)missing.push("назначить согласующего для действий с подтверждением");
+  const text=[local?"Действуют локальные назначения · версия "+local.revision:"Действуют назначения из комплекта сотрудника.",
+    "Роль: "+applied.role,"Источники: "+(applied.sources.join(", ")||"—"),
+    "Действия: "+(applied.operations.map(op=>op.id+" / "+op.resource).join(", ")||"—"),
+    "Согласующие: "+(applied.approvers.join(", ")||"—"),
+    ...(missing.length?["Требует настройки: "+missing.join(", ")]:["Обязательные назначения заполнены."])];
+  return {text:text.join("\n").slice(0,4000),reply_markup:{keyboard:[[profile.settingsTitle,"Мои группы"]],resize_keyboard:true}};
+}
 type GlobalDraft = {
   token: string;
   base: number;
@@ -605,13 +618,7 @@ export async function employeeUpdate(
     send(target)("sendMessage", { text, ...extra });
   if (privateChat && actor === p.owner) {
     if (!cb && m.text === "/start") {
-      await send(actor)("sendMessage", {
-        text: "Управление сотрудником",
-        reply_markup: {
-          keyboard: [[p.settingsTitle, "Мои группы"]],
-          resize_keyboard: true,
-        },
-      });
+      await send(actor)("sendMessage",employeeHome(s,boundary()));
       return;
     }
     if (
