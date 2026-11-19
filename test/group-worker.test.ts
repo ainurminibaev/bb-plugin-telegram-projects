@@ -300,3 +300,27 @@ test("work queued by a participant under an old local policy is revoked before a
     assert.equal(rows.has("group:in:5:2"),false);
   }
 });
+
+test("an ordinary group turn that answers NO_REPLY stays silent",async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"через 5 минут проверь, только если срок прошёл"}},7,5));
+ const events:any[]=[];
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+ send:async(q:any)=>{
+   const event=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"g"}});
+   event("client/turn/requested",{requestId:"g",originPluginId:"telegram-projects",input:q.input});
+   event("turn/input/accepted",{clientRequestId:"g"});
+   event("item/completed",{item:{type:"agentMessage",text:"NO_REPLY"}});
+   event("turn/completed",{status:"completed"});
+ }}};
+ const sent:any[]=[];
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{sent.push([id,p]);return {} as T},new AbortController().signal);
+ await tick(); await tick();
+ assert.equal(rows.get("group:receipt:5:8").state,"done");
+ assert.equal(sent.filter(([,p])=>typeof p.text==="string").length,0);
+});

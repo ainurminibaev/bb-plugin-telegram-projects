@@ -330,7 +330,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       }
       store.put(key,job);
     }
-    if (job.state==="ready" && r.updateId<0 && job.answer?.trim()===NO_REPLY) {finish("done");continue;}
+    // NO_REPLY means "say nothing" in any group turn, not only in a scheduled check.
+    if (job.state==="ready" && job.answer?.trim()===NO_REPLY) {finish("done");continue;}
     if (job.state==="ready") {
       // Ready jobs may be resumed long after submission, including between reply parts.
       if (!allowed()) {finish("revoked");continue;}
