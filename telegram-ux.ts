@@ -21,14 +21,21 @@ export function publicActivity(type: string): string {
 import { markdownExcerpt } from "./events";
 
 /** Resolve local artifacts before sanitizing visible text. */
-export function localArtifacts(text: string): {markdown: string; path: string; label: string; asDocument?: boolean}[] {
-  const found: {markdown: string; path: string; label: string; asDocument?: boolean}[] = [];
-  for (const m of text.matchAll(/!?\[([^\]]+)\]\((<[^>]+>|[^\n)]+)\)/g)) {
+/** File types a private chat answer may deliver as Telegram media or documents. */
+export const ARTIFACT_EXTENSIONS = /\.(pdf|png|jpe?g|webp|gif|mp4|mov|txt|md|csv|xlsx|docx|pptx|html|json|zip)$/i;
+export function localArtifacts(text: string, options: {relative?: boolean} = {}): {markdown: string; path: string; label: string; asDocument?: boolean; relative?: boolean}[] {
+  const found: {markdown: string; path: string; label: string; asDocument?: boolean; relative?: boolean}[] = [];
+  // With options.relative an empty label (![](shot.jpg)) and a relative file
+  // name with a known artifact extension also count; the caller resolves them.
+  const pattern = options.relative ? /!?\[([^\]]*)\]\((<[^>]+>|[^\n)]+)\)/g : /!?\[([^\]]+)\]\((<[^>]+>|[^\n)]+)\)/g;
+  for (const m of text.matchAll(pattern)) {
     const titled = m[2].match(/^(.*?)\s+"telegram:document"$/);
     let path = (titled ? titled[1] : m[2]).replace(/^<|>$/g, "").replace(/^file:\/\//, "");
     try { path = decodeURIComponent(path); } catch { continue; }
-    if (!path.startsWith("/")) continue;
-    found.push({markdown: m[0], path, label: m[1], ...(titled ? {asDocument: true} : {})});
+    const relative = !path.startsWith("/");
+    if (relative && !(options.relative && !/^[a-z][a-z0-9+.-]*:/i.test(path) && !path.startsWith("#") &&
+        !path.split("/").includes("..") && ARTIFACT_EXTENSIONS.test(path))) continue;
+    found.push({markdown: m[0], path, label: m[1], ...(titled ? {asDocument: true} : {}), ...(relative ? {relative: true} : {})});
   }
   return found;
 }

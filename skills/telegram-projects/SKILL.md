@@ -98,6 +98,12 @@ extra delivery, not a change to the destination of future requests.
 Call the plugin RPC with a JSON input file containing `threadId`, the bound
 `topicId`, `text`, a stable unique `deliveryId` (8–100 ASCII letters/digits/_/-),
 and `explicit: true`. Reuse the same delivery ID for retries of the same delivery.
+Images, videos and files are delivered as in an ordinary routed answer: put
+absolute paths in `files` (up to 20; text may then be omitted) or keep the
+answer's local Markdown links, including `![](name.jpg)` or a relative name
+that identifies exactly one file in the thread's or its children's workspaces.
+Images become photos or an album, mp4/mov become videos, other supported files
+documents. Paths outside those workspaces or in hidden folders are not sent.
 A successful RPC means the output was queued, not that Telegram acknowledged it;
 inspect delivery status before claiming it arrived. Never put secrets in the
 message or command arguments. The thread/topic binding must match.

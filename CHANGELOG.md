@@ -1,3 +1,8 @@
+# 0.9.20
+
+- `sendToTelegram` delivers images, videos and files like an ordinary routed answer. It accepts `files` (absolute paths; text becomes optional) and recognizes images with an empty label (`![](shot.jpg)`) and relative file names that identify exactly one file in the thread's or its children's workspaces. Images go as photos or an album, mp4/mov as videos, other supported files as documents, with the same path and size checks and the same idempotency by `deliveryId`.
+- Ordinary routed answers get the same recognition: mp4/mov links go as Telegram videos, and empty-label or uniquely resolvable relative links are sent instead of left as text.
+
 # 0.9.19
 
 - Retain the latest structural guest delivery metadata for configured forums to diagnose topic routing.
