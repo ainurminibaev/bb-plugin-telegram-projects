@@ -66,7 +66,7 @@ function publish(path:string, body:string) {
     try {fsyncSync(parent);} finally {closeSync(parent);}
   } finally {unlinkSync(temp);}
 }
-function selectedItems(text:string,count:number):number[] | undefined {
+export function selectedItems(text:string,count:number):number[] | undefined {
   const reply=text.trim().toLowerCase().replace(/ё/g,"е").replace(/[.!]+$/,"").trim();
   if (/^(?:да,? )?(?:давай|сделай|делай|выполни|одобряю) все(?: пункты)?$/.test(reply))
     return Array.from({length:count},(_,i)=>i+1);
@@ -156,6 +156,20 @@ const completionSchema=z.object({
   selected:z.array(z.number().int()).max(10),links:z.array(z.string().max(2048)).min(1).max(10),
 }).strict();
 
+export function verifiedCompletionLinks(raw:unknown,selected:number[],host:string) {
+  const result=completionSchema.parse(raw);
+  if (JSON.stringify(result.selected)!==JSON.stringify(selected) || result.links.length!==selected.length ||
+      new Set(result.links).size!==result.links.length) throw Error("invalid_completion");
+      for (const link of result.links) {
+        const url=new URL(link);
+        if (url.protocol!=="https:" || url.host!==host || url.username || url.password ||
+            url.pathname==="/" || /[\s\\<>]/u.test(link) || url.href!==link) throw Error("invalid_result_link");
+      }
+      const text=result.links.join("\n");
+      if (text.length>4096) throw Error("invalid_result_length");
+      return text;
+}
+
 // The adapter publishes verified links by atomic rename. The bridge owns destination and delivery state.
 export function collectDecisionResults(store:Store,owner:number,bot:number) {
   for (const {key:pending} of store.list("selection:await-result:")) {
@@ -171,13 +185,7 @@ export function collectDecisionResults(store:Store,owner:number,bot:number) {
       if (result.actor!==owner || result.taskId!==task || result.revision!==row.revision ||
           result.draftHash!==row.draftHash || JSON.stringify(result.selected)!==JSON.stringify(row.selected) ||
           result.links.length!==row.selected.length || new Set(result.links).size!==result.links.length) continue;
-      for (const link of result.links) {
-        const url=new URL(link);
-        if (url.protocol!=="https:" || url.host!==target.host || url.username || url.password ||
-            url.pathname==="/" || /[\s\\<>]/u.test(link) || url.href!==link) throw Error("invalid_result_link");
-      }
-      const text=result.links.join("\n");
-      if (text.length>4096) continue;
+      const text=verifiedCompletionLinks(result,row.selected,target.host);
       queueGroupResult(store,owner,bot,task,text);
       store.del(pending);
     } catch {

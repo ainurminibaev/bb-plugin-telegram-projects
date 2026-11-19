@@ -162,3 +162,5 @@ Bind a normal group with `topicId=0`. Enable `includeTopicContext`, `searchableH
 Configure the bot/owner/channel triple under managedChannels and run the inspectChannelRights RPC. The owner needs to be a Telegram channel administrator. For a manually published text post the bot needs can_edit_messages. Give the assistant an unambiguous target. An earlier message, message link or forward may identify it. Manual edits never grant deletion rights to that post.
 
 The local inbox is temporary storage. Save durable files into the project. Hourly maintenance removes completed managed downloads after 30 days, or oldest first above 8 GiB, with a minimum age of one day. Unknown legacy entries and busy thread trees are retained; the storage target is therefore a soft cap.
+
+For private employee settings, per-group administration and scoped action adapters, see [Employee and group setup](docs/employee-policy.md).

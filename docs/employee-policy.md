@@ -1,0 +1,46 @@
+# Employee and group setup
+
+This opt-in mode runs in the existing Telegram Bridge poller. Use a training installation for acceptance. The Telegram account that pairs must match the bootstrap owner. Configure the authenticated bot ID and username. Set the profile's settingsTitle to the desired localized button label.
+
+## Server administrator
+
+From the release checkout with dependencies installed, provision from [the example](employee-profile.example.json).
+
+```sh
+node_modules/.bin/tsx tools/create-employee-profile.ts /admin/bootstrap.json /admin/employee.json
+```
+
+Give the trusted receiver read access to the resulting file. Keep the containing directory, file, socket endpoints, grants and credentials outside the model's writable space. Set BB_TELEGRAM_EMPLOYEE_PROFILE to the absolute published file path in the receiver service and restart. Bootstrap publishes a complete validated file and refuses to replace an existing file. For a maintenance change, prepare and validate a new file, then atomically replace the old one. Validate socket ownership and service reachability on that installation. Use one receiver per bot token.
+
+Only the host administrator installs isolated adapters, credentials, sockets and the outer catalog. Each operation ID names a single target resource, connection reference, required sources and minimum approval requirement. Credentials stay with the action adapter. An allowed connection is a reference, never a token. Adapter services must have only their assigned data and must validate inputs against their fixed resource. The conversation service must enforce the supplied source list and keep contexts separate by group and topic. Give it no direct tracker credentials or alternative execution path.
+
+## Private administration
+
+After owner pairing, or with /start in the paired owner's DM, the keyboard shows the profile settings button and «Мои группы». /employee also opens the owner's profile. The owner selects the active role, administrators, members, sources, connections, operations, approvers and events within the installed catalog. Save checks the current catalog and profile revision. The bootstrap owner retains administration; a server-required approval cannot be removed. Group administrators can modify group cards; only the owner edits the employee-wide profile.
+
+On joining a group, the bot offers its administrators «Мои группы» in their private chats. Telegram requires each admin to start a private conversation before the bot can contact them. Use «Мои группы» or /groups to reopen the directory by group name. An existing unbound group can register via /setup by an employee administrator inside the group. Forum topics become selectable when an update for that topic reaches the bot. In a new group all rule selections start empty. Saved selections include topics, senders, sources, operations, approvers, mention/reply triggers and optional proactive greetings for allowed senders' member-joined and topic-created events. A group can require extra approval for an operation. The note stays in the admin card and never enters a grant or adapter request. A profile or group change invalidates open group drafts and pending action confirmations.
+
+Existing legacy group bindings keep their original handlers and outstanding work. The managed group component does not import or override those policies. Switching an already bound group requires a separate controlled migration. Ordinary private messages retain the original bridge routing. Group privacy settings determine which Telegram events actually reach the bot. Other BB ingress channels and autonomous timers are outside this Telegram release.
+
+## Adapter contract
+
+Both adapters receive HTTP POST / with UTF-8 JSON over local Unix sockets.
+
+- Conversation input includes kind=conversation, role, chat, topic, actor, text, optional event, allowed sources and permitted operations (id and resource). Return either {"kind":"answer","text":"..."} or {"kind":"proposal","operation":"task.create.training","input":"..."}. A proposal may only select an allowed ID. Free text cannot change configuration.
+- The action adapter receives kind=execute, operation, resource, connection, input, actor, chat, topic and idempotencyKey. Reply HTTP 200 with a JSON object after verified execution. A required approval is bound to the displayed input and resource, actor eligibility, group and current policy revision. The receiver reserves the execution before calling the socket. An ambiguous write remains started for adapter-side reconciliation by the same key. Do not resend it blindly. The built-in receipt reports completion; use the selection contract below for verified links.
+
+### Versioned multi-item decisions
+
+Configure `resultHost` on the server's operation to enable verified links. Return `{"kind":"selection","operation":"task.create.training","revision":1,"items":["First title","Second title","Third title"]}` from the conversation socket. Items must be printable single lines (1–10 items, at most 300 characters each). Each inbound group message creates one immutable offer. The approver replies to the delivered private list, for instance «первый и третий». Selection uses the shared owner-selection parser. Old offers cannot execute after a group or global policy change. A new offer needs a fresh decision.
+
+The action request carries the trusted `choice` with `actor,taskId,revision,draftHash,selected`, the displayed `items` and the filtered `selectedItems`. The hash is SHA-256 of UTF-8 JSON.stringify(items). Use the stable idempotency key with the item number in the project adapter. Before each external write, use a restricted trusted transport to the read-only `checkEmployeeWrite` RPC with `{...choice,idempotencyKey,item,operation,resource,connection}`. Require `allowed:true` and keep the adapter call synchronous through verification of the external effect. It becomes false once the call completes, if a selection is stale or if the item wasn't selected. Return `{...choice,links:[...verifiedHttpsLinks]}` after independent project verification. The bridge validates the receipt, host, count and uniqueness with the same link checks as the legacy return path, rechecks the policy and sends the links to the original group message. Failure of a socket call after reservation is recorded as unconfirmed and needs reconciliation. The supplied adapter must implement this contract and restrict its own network credentials; no grant is inferred from the note or from returned prose.
+
+Run the offline acceptance from the bridge checkout.
+
+```sh
+npm ci --ignore-scripts
+node_modules/.bin/tsx --test test/employee-policy.test.ts
+npm run check
+```
+
+The test sends Telegram-shaped updates through the managed handler and calls a listening Unix socket. It exercises private cards, concurrent saves, an inert note, a second group, source and operation limits, stale approval, current approver and one external operation on the configured training board. Live acceptance on a project bot also requires the two project adapters.

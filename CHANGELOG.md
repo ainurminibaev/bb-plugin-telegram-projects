@@ -1,3 +1,7 @@
+# 0.9.23
+
+- Add opt-in employee limits, private group settings cards, scoped conversation and action adapters, selective approvals and verified return links. See [setup and adapter contract](docs/employee-policy.md).
+
 # 0.9.22
 
 - Set `BB_TELEGRAM_FORUM_TOPIC_SCOPE=<negative-chat-id>:<positive-topic-id>` on the receiver to process only that topic in one supergroup. The poller discards other topics before routing or storing content, including guest mentions and edits. Other groups and saved bindings keep their existing policy. Unset the variable and restart the receiver to restore the previous routing. An invalid setting suppresses all supergroup ingress.

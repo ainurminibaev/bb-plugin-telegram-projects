@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "owner": 101,
+  "botId": 555,
+  "username": "example_employee_bot",
+  "settingsTitle": "Настройки сотрудника",
+  "role": "coordinator",
+  "alternateRoles": ["secretary"],
+  "admins": [101, 102],
+  "members": [101, 102, 103],
+  "approvers": [101, 102],
+  "sources": ["minutes"],
+  "connections": ["tracker-training"],
+  "events": ["member_joined", "topic_created"],
+  "operations": [
+    {"id":"task.create.training","resource":"training-board","connection":"tracker-training",
+     "sources":["minutes"],"resultHost":"example.invalid","approval":true,"socket":"/run/employee-training/action.sock"}
+  ],
+  "conversationSocket": "/run/employee-training/conversation.sock"
+}

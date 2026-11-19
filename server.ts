@@ -1,3 +1,4 @@
+import {employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
 import {proposalInput,presentProposal,handleOwnerSelection,collectDecisionResults,presentProjectProposals} from "./owner-selection";
 import {bbReminderInput,isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
@@ -100,6 +101,7 @@ const statusSchema = z.object({
 });
 const handoffStatusSchema = z.object({id: z.string(), phase: z.string(), sourceThreadId: z.string(), targetThreadId: z.string().nullable(), error: z.string().nullable(), retirement: z.string().nullable(), retirementReason: z.string().nullable()});
 export const rpcContract = defineRpcContract({
+  checkEmployeeWrite:{input:employeeWriteCheck,output:z.object({allowed:z.boolean()})},
   readIsolatedPdf:{input:isolatedPdfInput,output:isolatedPdfPart},
   readIsolatedGroup:{input:isolatedLookup,output:isolatedAnswer},
   submitIsolatedGroup:{input:isolatedGroupInput,output:isolatedGroupResult},
@@ -1151,6 +1153,12 @@ export default async function plugin(bb: BbPluginApi) {
     return project;
   }
   bb.rpc.register(rpcContract, {
+    checkEmployeeWrite: args=>{
+      const path=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
+      if(!path)return {allowed:false};
+      const p=readEmployeeProfile(path);
+      return {allowed:p.botId===botId() && p.owner===ownerId() && employeeWriteAllowed(store,p,args)};
+    },
     submitIsolatedGroup: async args => submitIsolatedGroup(bb.sdk,store,await isolatedProject(),args),
     readIsolatedPdf: async args => readIsolatedPdf(bb.sdk,store,await isolatedProject(),(await settings.get()).isolatedFileHost,args),
     readIsolatedGroup: async args => readIsolatedGroup(bb.sdk,store,await isolatedProject(),args),
@@ -1866,12 +1874,37 @@ export default async function plugin(bb: BbPluginApi) {
             updates = await tg<any[]>("getUpdates", {
               offset: store.get<number>("ingress:offset") ?? 0,
               timeout: 25,
-              allowed_updates: ["message", "edited_message", "callback_query", ...(process.env.BB_TELEGRAM_GUEST_TOPICS ? ["guest_message"] : [])],
+              allowed_updates: ["message", "edited_message", "callback_query", ...(process.env.BB_TELEGRAM_GUEST_TOPICS ? ["guest_message"] : []), ...(process.env.BB_TELEGRAM_EMPLOYEE_PROFILE!==undefined ? ["my_chat_member"] : [])],
             });
           } finally { ingressPolling = false; }
           ingressError = null;
           for (const u of updates) {
             if (skipExcludedForumUpdate(store, u)) continue;
+            const profilePath=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
+            if (profilePath !== undefined && isEmployeeUpdate(store, botId() ?? 0, u, ownerId(), readEmployeeProfile(profilePath).settingsTitle)) {
+              const profile = () => {
+                const current = readEmployeeProfile(profilePath);
+                if (current.botId !== botId() || current.owner !== ownerId())
+                  throw Error("employee_identity_mismatch");
+                return current;
+              };
+              if (ownerId()) {
+                profile(); // Configuration errors hold the update until the operator corrects them.
+                const receipt = "employee:ingress:" + botId() + ":" + u.update_id;
+                if (!store.get(receipt)) {
+                  store.put(receipt, "started");
+                  try {
+                    await employeeUpdate(store, profile, u, chat => telegram(botToken, signal, 30000, () => chat, apiRoot));
+                    store.atomic(()=>{store.put("ingress:offset",u.update_id+1);store.del(receipt);});
+                  } catch {
+                    // Keep only the update ID for operator reconciliation. An adapter may already have committed.
+                    store.put(receipt, "unconfirmed");
+                  }
+                }
+              }
+              store.put("ingress:offset", u.update_id + 1);
+              continue;
+            }
             if (cfg.chatEnabled && await handleOwnerSelection(store,u,ownerId(),botId(),tg)) {
               store.put("ingress:offset",u.update_id+1);
               continue;
@@ -1879,6 +1912,7 @@ export default async function plugin(bb: BbPluginApi) {
             if (cfg.chatEnabled && acceptGroupUpdate(store, u, ownerId(), botId())) continue;
             const route = routeUpdate(u, ownerId(), store.get("pair:code"));
             if (route.kind === "pair") {
+              if (profilePath!==undefined && route.userId!==readEmployeeProfile(profilePath).owner) {store.put("ingress:offset",u.update_id+1);continue;}
               store.put("owner:id", route.userId);
               store.del("pair:code");
               await tg("sendMessage", {
@@ -1887,6 +1921,11 @@ export default async function plugin(bb: BbPluginApi) {
                   "✅ Бот привязан к BB. Темы проектов появятся в этом чате в течение минуты.",
                 ),
               });
+              if(profilePath!==undefined) {
+                const p=readEmployeeProfile(profilePath);
+                if(p.botId===botId() && p.owner===route.userId)
+                  await tg("sendMessage",{text:"Управление сотрудником",reply_markup:{keyboard:[[p.settingsTitle,"Мои группы"]],resize_keyboard:true}});
+              }
               wake?.();
             } else if (route.kind === "chat" && cfg.chatEnabled && bridge) {
               bridge.accept(route.input);
