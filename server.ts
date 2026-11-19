@@ -1,7 +1,7 @@
 import { privacyKey, privacySummary, rememberMembership, sendVisibilityUpdates } from "./group-visibility";
 import {reconcileEmployeeTicket,employeeHome,employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
 import {proposalInput,presentProposal,handleOwnerSelection,collectDecisionResults,presentProjectProposals} from "./owner-selection";
-import {bbReminderInput,isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
+import {groupFollowUpInput,bbReminderInput,isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
 import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf} from "./isolated-group";
 import {cleanInbox} from "./inbox-retention";
@@ -469,6 +469,29 @@ export default async function plugin(bb: BbPluginApi) {
           ownerId()!==owner || botId()!==bot || binding()?.revision!==before.revision)
         throw Error("bot_unavailable");
       const receipt=queueGroupReminder(store,owner,bot,args);
+      chatWake?.();
+      return JSON.stringify(receipt);
+    },
+  });
+  // The owner can ask the employee right in the group: "on Friday check X and report here".
+  // Only the bound group thread may schedule, only for the task of the owner's current request.
+  bb.agents.registerTool({
+    name:"telegram_group_followup",
+    description:"Schedule one follow-up turn of this employee for the current Telegram group task. At dueAt the employee itself re-reads the topic and its tools and answers under the original message, or stays silent with NO_REPLY. Use only when the owner asked for a later check in this group request.",
+    parameters:groupFollowUpInput,
+    async execute(args,{threadId}) {
+      const owner=ownerId(),bot=botId();
+      if (!owner || !bot || !bridge || stateTransferBusy) throw Error("bot_unavailable");
+      const policyKey=store.get<string>("group:thread:"+threadId);
+      const origin=store.get<{threadId:string;sender:number;owner:number;bot:number}>("group:origin:"+args.taskId);
+      if (!policyKey || !origin || origin.threadId!==threadId || origin.owner!==owner || origin.bot!==bot || origin.sender!==owner)
+        throw Error("owner_group_request_required");
+      const active=store.list<{taskId?:string;state:string;ownerId:number;route:{threadId:string;senderId:number}}>(`group:in:${bot}:`)
+        .some(({value:j})=>j.taskId===args.taskId && j.state==="submitted" && j.ownerId===owner &&
+          j.route.threadId===threadId && j.route.senderId===owner);
+      if (!active) throw Error("owner_group_request_required");
+      if (args.dueAt<=Date.now()) throw Error("due_time_in_past");
+      const receipt=queueGroupReminder(store,owner,bot,{taskId:args.taskId,dueAt:args.dueAt,waitingFor:"agent",text:args.text});
       chatWake?.();
       return JSON.stringify(receipt);
     },

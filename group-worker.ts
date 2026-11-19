@@ -1,4 +1,5 @@
 import {awaitProjectProposal} from "./owner-selection";
+import {NO_REPLY} from "./group-result";
 import {sourcesVisible} from "./source-access";
 import {randomUUID} from "node:crypto";
 import {groupExecutor} from "./isolated-client";
@@ -214,7 +215,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       }
       if (r.waitUntil!==undefined) {delete r.waitUntil;store.put(key,job);}
     }
-    if (visibleProgress && job.state==="pending" && job.progressId===undefined) {
+    if (visibleProgress && r.updateId>0 && job.state==="pending" && job.progressId===undefined) {
       // A lost Telegram acknowledgement must not create a second status on restart.
       job.progressId=null;
       store.put(key,job);
@@ -318,6 +319,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       }
       store.put(key,job);
     }
+    if (job.state==="ready" && r.updateId<0 && job.answer?.trim()===NO_REPLY) {finish("done");continue;}
     if (job.state==="ready") {
       // Ready jobs may be resumed long after submission, including between reply parts.
       if (!allowed()) {finish("revoked");continue;}

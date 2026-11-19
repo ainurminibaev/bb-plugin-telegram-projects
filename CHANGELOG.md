@@ -1,3 +1,7 @@
+# 0.9.31
+
+Let the owner ask an employee in a group to check something later: at the due time the employee's own turn re-reads the topic and its tools, then answers under the original message or stays silent.
+
 # 0.9.30
 
 Evaluate group task checkpoints against a project read adapter at the deadline and deliver one reply to the original topic or finish silently.
