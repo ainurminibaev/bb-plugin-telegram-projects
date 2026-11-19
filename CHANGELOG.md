@@ -1,3 +1,7 @@
+# 0.9.33
+
+A group answer of exactly NO_REPLY stays silent in any group turn. A scheduled check does exactly its own task, re-reads its tools first and ignores the conditions of other requests in the topic.
+
 # 0.9.32
 
 Explicit delivery from BB sends images (also without alt text or by a short file name), videos and files like a routed answer, reports each file in `telegramDeliveryStatus`, and status shows a bound private chat as ready.
