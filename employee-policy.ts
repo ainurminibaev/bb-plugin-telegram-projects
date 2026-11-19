@@ -47,6 +47,10 @@ export const employeeProfile = z
     operations: z.array(operation).max(100),
     events: z.array(z.enum(["member_joined", "topic_created"])).max(2),
     conversationSocket: socket,
+    personalAccess: z
+      .object({ subjects: ids, conversationSocket: socket })
+      .strict()
+      .optional(),
     personalGrants: z
       .array(
         z
@@ -72,7 +76,10 @@ export const employeeProfile = z
       p.connections,
       p.events,
       p.operations.map((o) => o.id),
-      p.personalGrants.map((g) => g.subject),
+      [
+        ...(p.personalAccess?.subjects ?? []),
+        ...p.personalGrants.map((g) => g.subject),
+      ],
     ];
     if (
       lists.some((v) => new Set<string | number>(v).size !== v.length) ||
@@ -171,25 +178,41 @@ function personalScope(
   destination: Destination,
   required: string[] = [],
 ) {
+  const full = p.personalAccess?.subjects.includes(subject)
+    ? p.personalAccess
+    : undefined;
   const grant = p.personalGrants.find((g) => g.subject === subject);
   if (
-    !grant ||
-    !p.members.includes(subject) ||
+    (!full && (!grant || !p.members.includes(subject))) ||
     !s.get("employee:" + p.botId + ":dm:" + subject) ||
-    !s.get("employee:" + p.botId + ":directory:" + chat) ||
-    !saved(s, p, chat).rules.topics.includes(String(topic))
+    (chat === subject
+      ? !full || topic !== 0 || destination !== "dm"
+      : !s.get("employee:" + p.botId + ":directory:" + chat) ||
+        !saved(s, p, chat).rules.topics.includes(String(topic)))
   )
     return;
   const operations = p.operations.filter(
     (o) =>
-      grant.operations.includes(o.id) &&
-      (destination === "dm" ||
-        (grant.allowHere && sourcesVisible(o.sources, p.botId, chat, topic))),
+      !!full ||
+      (!!grant &&
+        grant.operations.includes(o.id) &&
+        (destination === "dm" ||
+          (grant.allowHere &&
+            sourcesVisible(o.sources, p.botId, chat, topic)))),
   );
-  const sources = [...new Set(operations.flatMap((o) => o.sources))];
-  if (!operations.length || !required.every((id) => sources.includes(id)))
+  const sources = full
+    ? p.sources
+    : [...new Set(operations.flatMap((o) => o.sources))];
+  if (
+    (!full && !operations.length) ||
+    !required.every((id) => sources.includes(id))
+  )
     return;
-  return { grant, operations, sources };
+  return {
+    conversationSocket: (full ?? grant)!.conversationSocket,
+    operations,
+    sources,
+  };
 }
 type Send = (chat: number) => Telegram;
 type Call = (
@@ -376,6 +399,7 @@ type Limits = {
   operations: string[];
   approvers: string[];
   events: string[];
+  personal: string[];
   confirm: string[];
 };
 const limitFields = [
@@ -386,6 +410,7 @@ const limitFields = [
   "operations",
   "approvers",
   "events",
+  "personal",
   "confirm",
 ] as const;
 const limitLabels = {
@@ -396,6 +421,7 @@ const limitLabels = {
   operations: "Действия",
   approvers: "Согласующие",
   events: "События",
+  personal: "Личный доступ",
   confirm: "Всегда согласовывать",
 };
 const globalKey = (p: Profile) => `employee:${p.botId}:limits`;
@@ -409,6 +435,7 @@ function defaults(p: Profile): Limits {
     operations: p.operations.map((o) => o.id),
     approvers: p.approvers.map(String),
     events: p.events,
+    personal: (p.personalAccess?.subjects ?? []).map(String),
     confirm: p.operations.filter((o) => o.approval).map((o) => o.id),
   };
 }
@@ -458,6 +485,12 @@ function effective(s: Store, p: Profile) {
     connections = filter("connections", p.connections);
   return {
     ...p,
+    personalAccess: p.personalAccess && {
+      ...p.personalAccess,
+      subjects: p.personalAccess.subjects.filter((x) =>
+        selection.personal?.includes(String(x)),
+      ),
+    },
     policyRevision: row?.revision ?? 0,
     role: [p.role, ...p.alternateRoles].includes(selection.role)
       ? selection.role
@@ -554,7 +587,11 @@ async function configureLimits(
       base: row?.revision ?? 0,
       bounds: hash(p),
       page: 0,
-      selected: structuredClone(row?.selected ?? defaults(p)),
+      selected: structuredClone(
+        row
+          ? { ...row.selected, personal: row.selected.personal ?? [] }
+          : defaults(p),
+      ),
     };
     s.put(dk, d);
     await send(p.owner)("sendMessage", limitsCard(p, d));
@@ -562,7 +599,11 @@ async function configureLimits(
   }
   const d = s.get<GlobalDraft>(dk);
   if (!d || !cb.data.startsWith("el:" + d.token + ":")) return;
-  if (d.bounds !== hash(p) || d.base !== (row?.revision ?? 0)) {
+  if (
+    !Array.isArray(d.selected.personal) ||
+    d.bounds !== hash(p) ||
+    d.base !== (row?.revision ?? 0)
+  ) {
     s.del(dk);
     await send(p.owner)("sendMessage", {
       text: "Настройки изменились. Откройте карточку заново.",
@@ -622,6 +663,7 @@ export function isEmployeeUpdate(
   owner?: number,
   settingsTitle?: string,
   personalSubjects: readonly number[] = [],
+  fullSubjects: readonly number[] = [],
 ) {
   const cb = update.callback_query,
     m = cb?.message ?? update.message ?? update.edited_message;
@@ -653,6 +695,7 @@ export function isEmployeeUpdate(
       .includes(m.text)
   )
     return true;
+  if (owner && fullSubjects.includes(m.chat.id)) return true;
   if (m.text === "/start" && personalSubjects.includes(m.chat.id) && owner)
     return true;
   if (["/groups", "Мои группы"].includes(m.text)) return true;
@@ -729,7 +772,8 @@ export async function employeeUpdate(
     m.text === "/start" &&
     !m.forward_origin &&
     !m.via_bot &&
-    p.personalGrants.some((g) => g.subject === actor)
+    (p.personalAccess?.subjects.includes(actor) ||
+      p.personalGrants.some((g) => g.subject === actor))
   ) {
     s.put("employee:" + p.botId + ":dm:" + actor, true);
     if (actor !== p.owner) {
@@ -786,20 +830,56 @@ export async function employeeUpdate(
     const groups = s
       .list<{ chat: number; title: string }>(directory)
       .sort((a, b) => a.key.localeCompare(b.key));
+    const legacy =
+      actor === p.owner
+        ? s
+            .list<{
+              botId: number;
+              ownerId?: number;
+              chatId: number;
+              topicId: number;
+            }>("group:policy:")
+            .filter(
+              ({ value: v, key }) =>
+                v.botId === p.botId &&
+                (v.ownerId === undefined || v.ownerId === actor) &&
+                Number.isSafeInteger(v.chatId) &&
+                Number.isSafeInteger(v.topicId) &&
+                key === `group:policy:${v.chatId}:${v.topicId}`,
+            )
+            .sort(
+              (a, b) =>
+                a.value.chatId - b.value.chatId ||
+                a.value.topicId - b.value.topicId,
+            )
+        : [];
+    const count = groups.length + legacy.length;
     const page = Number(cb?.data?.split(":")[2] ?? 0);
+    const offset = page * 8;
     const rows = groups
-      .slice(page * 8, page * 8 + 8)
+      .slice(offset, offset + 8)
       .map(({ value }) => [
         { text: value.title, callback_data: "emp:open:" + value.chat },
       ]);
+    const lines = legacy
+      .slice(
+        Math.max(0, offset - groups.length),
+        Math.max(0, offset + 8 - groups.length),
+      )
+      .map(({ value }) => {
+        const title =
+          groups.find((g) => g.value.chat === value.chatId)?.value.title ??
+          value.chatId;
+        return `${title} · тема ${value.topicId} (только просмотр)`;
+      });
     if (page > 0)
       rows.push([{ text: "Назад", callback_data: "emp:list:" + (page - 1) }]);
-    if (groups.length > (page + 1) * 8)
+    if (offset + 8 < count)
       rows.push([{ text: "Дальше", callback_data: "emp:list:" + (page + 1) }]);
     await sendText(
       actor,
-      groups.length ? "Мои группы" : "Группы пока не добавлены.",
-      { reply_markup: { inline_keyboard: rows } },
+      count ? ["Мои группы", ...lines].join("\n") : "Группы пока не добавлены.",
+      rows.length ? { reply_markup: { inline_keyboard: rows } } : {},
     );
     return;
   }
@@ -924,7 +1004,7 @@ export async function employeeUpdate(
       hash(current) !== t.profileHash ||
       group.version !== t.version ||
       !op ||
-      !rules.topics.includes(String(t.topic)) ||
+      (!scope && !rules.topics.includes(String(t.topic))) ||
       op.id !== t.operation ||
       (!t.destination && !rules.members.includes(String(t.sender))) ||
       ((t.items || op.approval || rules.requireApproval.includes(op.id)) &&
@@ -1051,10 +1131,13 @@ export async function employeeUpdate(
     return;
   }
   if (
-    privateChat ||
-    !["supergroup", "group"].includes(m.chat.type) ||
+    (privateChat
+      ? !p.personalAccess?.subjects.includes(actor)
+      : !["supergroup", "group"].includes(m.chat.type) ||
+        !s.get(directory + chat)) ||
     m.forward_origin ||
-    !s.get(directory + chat)
+    m.via_bot ||
+    m.is_automatic_forward
   )
     return;
   const event = m.forum_topic_created
@@ -1069,7 +1152,7 @@ export async function employeeUpdate(
       options(p, s.get<number[]>(topicsKey(p, chat)) ?? []),
     ),
     topic = m.message_thread_id ?? 0;
-  if (!r.topics.includes(String(topic))) return;
+  if (!privateChat && !r.topics.includes(String(topic))) return;
   const mentioned =
     typeof m.text === "string" &&
     m.entities?.some(
@@ -1086,8 +1169,14 @@ export async function employeeUpdate(
       reply.chat?.id === chat &&
       (reply.message_thread_id ?? 0) === topic);
 
-  const requested = mentioned && !event ? directDestination(m) : undefined;
-  const hasPersonal = p.personalGrants.some((g) => g.subject === actor);
+  const requested = privateChat
+    ? "dm"
+    : mentioned && !event
+      ? directDestination(m)
+      : undefined;
+  const hasPersonal =
+    p.personalAccess?.subjects.includes(actor) ||
+    p.personalGrants.some((g) => g.subject === actor);
   if (requested === "dm" && !hasPersonal) return;
   const destination = hasPersonal && requested ? requested : undefined;
   const personal =
@@ -1101,23 +1190,18 @@ export async function employeeUpdate(
       : p.operations.filter((o) => opFor(p, r, o.id))
   ).map((o) => ({ id: o.id, resource: o.resource }));
   const result = response.parse(
-    await call(
-      personal ? personal.grant.conversationSocket : p.conversationSocket,
-      {
-        kind: "conversation",
-        role: p.role,
-        chat,
-        topic,
-        actor,
-        text: m.text ?? "",
-        event,
-        ...(personal
-          ? { principal: actor, destination, scope: "personal" }
-          : {}),
-        sources: personal ? personal.sources : r.sources,
-        operations: permitted,
-      },
-    ),
+    await call(personal ? personal.conversationSocket : p.conversationSocket, {
+      kind: "conversation",
+      role: p.role,
+      chat,
+      topic,
+      actor,
+      text: m.text ?? "",
+      event,
+      ...(personal ? { principal: actor, destination, scope: "personal" } : {}),
+      sources: personal ? personal.sources : r.sources,
+      operations: permitted,
+    }),
   );
   if (hash(read()) !== hash(p) || generation(s, p, chat) !== group.version)
     return;
@@ -1281,7 +1365,7 @@ export function employeeWriteAllowed(
     (t.destination
       ? !!scope
       : group.rules.members.includes(String(t.sender))) &&
-    group.rules.topics.includes(String(t.topic)) &&
+    (!!scope || group.rules.topics.includes(String(t.topic))) &&
     op?.resource === check.resource &&
     op.connection === check.connection
   );

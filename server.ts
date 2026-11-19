@@ -1882,7 +1882,7 @@ export default async function plugin(bb: BbPluginApi) {
             if (skipExcludedForumUpdate(store, u)) continue;
             const profilePath=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
             const configured=profilePath!==undefined ? readEmployeeProfile(profilePath) : undefined;
-            if (profilePath !== undefined && configured && isEmployeeUpdate(store, botId() ?? 0, u, ownerId(), configured.settingsTitle,configured.personalGrants.map(g=>g.subject))) {
+            if (profilePath !== undefined && configured && isEmployeeUpdate(store, botId() ?? 0, u, ownerId(), configured.settingsTitle,configured.personalGrants.map(g=>g.subject),configured.personalAccess?.subjects)) {
               const profile = () => {
                 const current = readEmployeeProfile(profilePath);
                 if (current.botId !== botId() || current.owner !== ownerId())

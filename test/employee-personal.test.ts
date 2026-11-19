@@ -130,6 +130,16 @@ test("one subject, two groups, private action scope and independent recipient gr
   const A = -1001,
     B = -1002;
   try {
+    const legacy = { botId: 5, chatId: -300, topicId: 20, ownerId: 1 };
+    rows.set("group:policy:-300:20", legacy);
+    await run({
+      from: { id: 1 },
+      chat: { id: 1, type: "private" },
+      text: "Мои группы",
+    });
+    assert.match(sent.at(-1).text, /-300 · тема 20 .*только просмотр/);
+    assert.equal(rows.size, 1);
+    assert.deepEqual(rows.get("group:policy:-300:20"), legacy);
     disclose(false);
     for (const chat of [A, B]) {
       rows.set("employee:5:directory:" + chat, { chat, title: String(chat) });
@@ -195,6 +205,33 @@ test("one subject, two groups, private action scope and independent recipient gr
     revokeAtWrite = true;
     await assert.rejects(accept(sent.length), /revoked before write/);
     assert.equal(date, "2026-11-26");
+    // Enable the new binary access explicitly. The group still has zero operations.
+    revokeAtWrite = false;
+    p.personalAccess = { subjects: [3], conversationSocket: "/leader" };
+    disclose(false);
+    for (const chat of [A, B]) {
+      await request(chat, here);
+      const confirmation = sent.length;
+      await accept(confirmation);
+      assert.equal(sent.at(-1).chat, chat);
+      assert.equal(sent.at(-1).text, "https://board.invalid/cards/17");
+      const count = sent.length;
+      await accept(confirmation);
+      assert.equal(sent.length, count);
+    }
+    await run({
+      from: { id: 3 },
+      chat: { id: 3, type: "private" },
+      message_id: seq,
+      text: "Перенеси срок карточки 17",
+    });
+    await accept(sent.length);
+    assert.equal(sent.at(-1).chat, 3);
+    assert.equal(sent.at(-1).text, "https://board.invalid/cards/17");
+    const writes = calls.filter((x) => x.path === "/action").length;
+    await request(A, here, 2);
+    assert.equal(sent.at(-1).text, "ordinary");
+    assert.equal(calls.filter((x) => x.path === "/action").length, writes);
   } finally {
     if (previous === undefined) delete process.env.BB_TELEGRAM_SOURCE_GRANTS;
     else process.env.BB_TELEGRAM_SOURCE_GRANTS = previous;
