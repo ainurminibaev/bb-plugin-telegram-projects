@@ -1,3 +1,7 @@
+# 0.9.32 (not published)
+
+Send images without alt text from an explicit delivery, report each file in `telegramDeliveryStatus`, and show a bound private chat as ready.
+
 # 0.9.31
 
 Let the owner ask an employee in a group to check something later: at the due time the employee's own turn re-reads the topic and its tools, then answers under the original message or stays silent.

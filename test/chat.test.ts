@@ -1526,6 +1526,28 @@ test("image-only final has a media receipt, no caption or extra text, and dedupl
  } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
 });
 
+test("explicit delivery sends images without alt text and reports each file", async () => {
+ const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'image-empty-alt-'));
+ try {
+  writeFileSync(join(dir,'a.png'),'image');f.sdk.environments.get=async()=>({path:dir});
+  await f.bridge.handle(f.input('bind')); await f.bridge.flush(); f.sent.length=0;
+  const args={threadId:'thr_one',topicId:100,text:`Готово.\n\n![](${dir}/a.png)\n\n[Отчёт](${dir}/missing.pdf)`,deliveryId:'image_empty_alt_001'};
+  f.bridge.sendExplicit(args);await f.bridge.flush();
+  assert.equal(f.sent.filter(x=>x.method==='sendPhoto').length,1);
+  assert.ok(!f.sent.some(x=>String(x.text??'').includes('a.png)')));
+  const receipt=f.bridge.explicitDeliveryStatus(args.deliveryId);
+  assert.equal(receipt.state,'delivered');
+  assert.deepEqual(receipt.files.map(x=>[x.name,x.state]).sort(),[['a.png','delivered'],['missing.pdf','failed']]);
+ } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+
+test("a bound private chat reports ready in status", async () => {
+  const f=fixture();try {
+    await f.bridge.handle(f.input("bind"));
+    assert.ok(f.bridge.status().bindings.every(b=>!b.threadId || b.ready));
+  }finally{f.cleanup();}
+});
+
 test("multiple images use Russian link captions; document image retains explicit format", async () => {
  const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'image-captions-'));
  try {

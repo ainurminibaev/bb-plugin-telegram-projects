@@ -98,8 +98,13 @@ extra delivery, not a change to the destination of future requests.
 Call the plugin RPC with a JSON input file containing `threadId`, the bound
 `topicId`, `text`, a stable unique `deliveryId` (8–100 ASCII letters/digits/_/-),
 and `explicit: true`. Reuse the same delivery ID for retries of the same delivery.
-A successful RPC means the output was queued, not that Telegram acknowledged it;
-inspect delivery status before claiming it arrived. Never put secrets in the
+Files go in the same text as Markdown links to absolute local paths, for example
+`[Схема](/workspace/outputs/scheme.png)`; images are sent as photos, other files
+as documents. Each file must be inside the workspace of this thread or one of its
+child threads, outside hidden directories. A successful RPC means the output was
+queued, not that Telegram acknowledged it. Before claiming it arrived, call
+`telegramDeliveryStatus` with the same `deliveryId` until `state` is `delivered`
+and every entry in `files` is `delivered`; report any other state as it is. Never put secrets in the
 message or command arguments. The thread/topic binding must match.
 # Private source migration
 

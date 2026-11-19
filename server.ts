@@ -178,7 +178,8 @@ export const rpcContract = defineRpcContract({
   },
   telegramDeliveryStatus: {
     input: z.object({deliveryId: z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/)}),
-    output: z.object({state: z.string(), messageId: z.number().nullable()}),
+    output: z.object({state: z.string(), messageId: z.number().nullable(),
+      files: z.array(z.object({name: z.string(), state: z.enum(["delivered", "failed", "uncertain"])}))}),
   },
   sendDelegated: {
     input:z.object({parentThreadId:z.string().min(1),routeToken:z.string().uuid(),threadId:z.string().min(1),

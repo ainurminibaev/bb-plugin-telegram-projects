@@ -294,7 +294,12 @@ export class ChatBridge {
     const row = this.s.get<Outbox>("chat:out:explicit:" + deliveryId);
     const state = !row ? "unknown" : row.sentId && row.sentId > 0 ? "delivered" :
       row.sentId === -1 ? "cancelled" : row.error ? "retrying" : "queued";
-    return {state, messageId: row?.sentId && row.sentId > 0 ? row.sentId : null};
+    const prefix = "chat:file:chat:out:explicit:" + deliveryId + ":";
+    const files = this.s.list<string | number>(prefix).map(({key, value}) => ({
+      name: basename(key.slice(prefix.length)),
+      state: typeof value === "number" ? "delivered" as const : value === "uncertain" ? "uncertain" as const : "failed" as const,
+    }));
+    return {state, messageId: row?.sentId && row.sentId > 0 ? row.sentId : null, files};
   }
   async sendDelegated(args: {parentThreadId: string; routeToken: string; threadId: string; text: string; deliveryId: string}): Promise<{accepted: true}> {
     const child = await this.d.sdk.threads.get({threadId: args.threadId, signal: this.d.signal});
@@ -2849,7 +2854,8 @@ export class ChatBridge {
         topicId: b.topicId,
         projectId: b.projectId,
         threadId: b.threadId,
-        ready: b.ready,
+        // `ready` only matters while no thread is selected; a bound thread receives messages directly.
+        ready: Boolean(b.threadId) || b.ready,
       })),
       pending: this.s
         .list<Inbox>("chat:in:")

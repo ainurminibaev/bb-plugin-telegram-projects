@@ -23,7 +23,7 @@ import { markdownExcerpt } from "./events";
 /** Resolve local artifacts before sanitizing visible text. */
 export function localArtifacts(text: string): {markdown: string; path: string; label: string; asDocument?: boolean}[] {
   const found: {markdown: string; path: string; label: string; asDocument?: boolean}[] = [];
-  for (const m of text.matchAll(/!?\[([^\]]+)\]\((<[^>]+>|[^\n)]+)\)/g)) {
+  for (const m of text.matchAll(/!?\[([^\]]*)\]\((<[^>]+>|[^\n)]+)\)/g)) {
     const titled = m[2].match(/^(.*?)\s+"telegram:document"$/);
     let path = (titled ? titled[1] : m[2]).replace(/^<|>$/g, "").replace(/^file:\/\//, "");
     try { path = decodeURIComponent(path); } catch { continue; }
