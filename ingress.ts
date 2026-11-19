@@ -174,6 +174,17 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
   const guest=update?.guest_message;
   if (guest) {
     const topics=(process.env.BB_TELEGRAM_GUEST_TOPICS??"").split(",");
+    if (topics.some(topic=>topic.startsWith(guest.chat?.id+":"))) {
+      store.put("guest:last-structure:"+guest.chat.id,{
+        messageId:guest.message_id??null,topicId:guest.message_thread_id??null,
+        parentId:guest.reply_to_message?.message_id??null,parentTopic:guest.reply_to_message?.message_thread_id??null,
+        isTopic:guest.is_topic_message===true,hasGuestQuery:!!guest.guest_query_id,
+        hasSender:!!guest.from,botSender:guest.from?.is_bot===true,hasSenderChat:!!guest.sender_chat,
+        hasText:typeof guest.text==="string",entityTypes:(guest.entities??[]).map((e:any)=>e.type),
+        forwarded:!!guest.forward_origin,viaBot:!!guest.via_bot,business:!!guest.business_connection_id,
+        callerUser:!!guest.guest_bot_caller_user,callerChat:!!guest.guest_bot_caller_chat
+      });
+    }
     if (!guest.guest_query_id || guest.chat?.type!=="supergroup" || !guest.is_topic_message ||
         !Number.isSafeInteger(guest.message_thread_id) || guest.message_thread_id<=0 ||
         !topics.includes(guest.chat.id+":"+guest.message_thread_id) || typeof guest.text!=="string" ||

@@ -1,3 +1,7 @@
+# 0.9.19
+
+- Retain the latest structural guest delivery metadata for configured forums to diagnose topic routing.
+
 # 0.9.18
 
 - Receive explicitly addressed guest text messages in assigned forum topics.
