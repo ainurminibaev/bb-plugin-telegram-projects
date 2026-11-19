@@ -10,6 +10,7 @@ function harness(provider="claude-code",admins=[OWNER]){
     list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
   store.put(`visibility:${BOT}:group:${CHAT}`,{chat:CHAT,title:"Склад",administrator:true,inviter:OWNER,event:4});
   store.put(`group:policy:${CHAT}:3`,{chatId:CHAT,topicId:3,threadId:"t",botId:BOT});
+  store.put("rights:install-kind","employee");
   const sent:any[]=[];
   const tg=(chat:number)=>(async(method:string,p:any)=>{
     sent.push({chat,method,...p});
@@ -127,4 +128,14 @@ test("the welcome tells the owner what to do next",()=>{
   const screen=welcomeScreen({role:"Я — помощник проекта.",botUsername:"acme_bot"});
   assert.match(screen.text,/Сейчас поручения мне можете давать только вы/);
   assert.equal(screen.reply_markup.inline_keyboard[0][0].url,"https://t.me/acme_bot?startgroup=setup");
+});
+
+test("a personal assistant keeps «only who may give tasks» and says why",async()=>{
+  const h=harness();
+  h.store.put("rights:install-kind","assistant");
+  await h.tap(OWNER,`rs:g:${CHAT}`);
+  assert.match(h.last("editMessageText").text,/личный помощник/);
+  await h.tap(OWNER,`rs:w:${CHAT}`);
+  assert.equal(groupSettings(h.store as any,BOT,CHAT),undefined);
+  assert.equal(h.last("answerCallbackQuery").show_alert,true);
 });

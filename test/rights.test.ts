@@ -17,12 +17,14 @@ function boundStore(){
   store.put("group:thread:t",`group:policy:${CHAT}:${TOPIC}`);
   store.put(`group:policy:${CHAT}:${TOPIC}`,{chatId:CHAT,topicId:TOPIC,threadId:"t",botId:BOT,botUsername:"bot",requireMention:false,ownerOnly:true,revision:"r"});
   store.put(`visibility:${BOT}:group:${CHAT}`,{chat:CHAT,title:"Склад",administrator:true,event:1});
+  store.put("rights:install-kind","employee");
   return store;
 }
 const message=(id:number,from:number,text:string)=>({update_id:id,message:{message_id:100+id,chat:{type:"supergroup",id:CHAT},from:{id:from,first_name:from===STRANGER?"Лена":"Айнур"},message_thread_id:TOPIC,text}});
 
 test("people with access, strangers and Codex employees get distinct roles",()=>{
   const store=memoryStore();
+  store.put("rights:install-kind","employee");
   setAccess(store as any,BOT,[{id:LENA,name:"Лена"}]);
   assert.equal(senderRole(store as any,BOT,OWNER,CHAT,OWNER),"access");
   assert.equal(senderRole(store as any,BOT,OWNER,CHAT,LENA),"access");
@@ -172,4 +174,11 @@ test("approval payloads become plain words",()=>{
   assert.equal(describeInteraction({kind:"approval",subject:{kind:"command",command:"rm -rf memory"},reason:"This command requires approval"}),"выполнить команду: rm -rf memory");
   assert.equal(describeInteraction({kind:"approval",subject:{kind:"file_change"},reason:"изменить файл memory/notes.md"}),"изменить файл memory/notes.md");
   assert.equal(describeInteraction({kind:"approval",subject:{kind:"file_change"}}),"изменить файлы в рабочей папке");
+});
+
+test("a personal assistant never answers strangers in groups, even when the group is open",()=>{
+  const store=memoryStore();
+  saveGroupSettings(store as any,BOT,CHAT,{who:"all",members:"read"});
+  assert.equal(senderRole(store as any,BOT,OWNER,CHAT,STRANGER),"none");
+  assert.equal(senderRole(store as any,BOT,OWNER,CHAT,OWNER),"access");
 });
