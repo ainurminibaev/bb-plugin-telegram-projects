@@ -1881,7 +1881,8 @@ export default async function plugin(bb: BbPluginApi) {
           for (const u of updates) {
             if (skipExcludedForumUpdate(store, u)) continue;
             const profilePath=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
-            if (profilePath !== undefined && isEmployeeUpdate(store, botId() ?? 0, u, ownerId(), readEmployeeProfile(profilePath).settingsTitle)) {
+            const configured=profilePath!==undefined ? readEmployeeProfile(profilePath) : undefined;
+            if (profilePath !== undefined && configured && isEmployeeUpdate(store, botId() ?? 0, u, ownerId(), configured.settingsTitle,configured.personalGrants.map(g=>g.subject))) {
               const profile = () => {
                 const current = readEmployeeProfile(profilePath);
                 if (current.botId !== botId() || current.owner !== ownerId())

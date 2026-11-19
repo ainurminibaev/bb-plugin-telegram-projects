@@ -1,3 +1,7 @@
+# 0.9.25
+
+- Apply per-person resource grants across managed groups, with explicit private or group delivery and an independent audience source check.
+
 # 0.9.24
 
 - Show active packaged or local assignments and missing assignments immediately after pairing and on /start.

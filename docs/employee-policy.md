@@ -46,3 +46,18 @@ npm run check
 ```
 
 The test sends Telegram-shaped updates through the managed handler and calls a listening Unix socket. It exercises private cards, concurrent saves, an inert note, a second group, source and operation limits, stale approval, current approver and one external operation on the configured training board. Live acceptance on a project bot also requires the two project adapters.
+
+
+## Direct personal requests from a managed group
+
+Version 0.9.25 adds an optional server-provisioned personal grant. Assign it once per authenticated Telegram user. It applies in every enrolled group with an enabled topic. The grant has no chat or topic field. The normal rule for other group members remains unchanged.
+
+```json
+{"personalGrants":[{"subject":103,"operations":["task.create.training"],"conversationSocket":"/run/employee-training/private-conversation.sock","allowHere":true}]}
+```
+
+Each operation must already be in the employee catalog with a fixed resource, sources and resultHost. The subject must be an active employee member. For this version's write flow the subject must also be an eligible approver. The subject opens the bot's DM with /start once. A trusted Telegram sender ID, the active topic and a native mention address the request. A single explicit destination phrase such as «ответь мне в личку» or «ответь сюда» selects delivery. Forwarded messages, Telegram quote blocks and quoted instructions cannot initiate the personal lane.
+
+The private conversation adapter receives scope=personal, principal, destination=dm|here, actor, originating chat/topic and its permitted operations/sources. Isolate this conversation from group history and other subjects. For a here request also isolate by audience and allowed source set, including for the same subject. Never retrieve other private material or reuse a DM transcript in the group answer. The adapter validates the specific project record, exact date and request wording. It can answer directly or return a versioned selection. Writes in this lane use selection, the subject's private confirmation and checkEmployeeWrite immediately before each write. The action call includes the principal and destination. The checked HTTPS result goes only to the subject's verified DM or the exact original group message. This version does not delegate a personal confirmation to a third person.
+
+For here delivery the subject must have allowHere and the independent administrator-owned BB_TELEGRAM_SOURCE_GRANTS file must allow the operation's sources for the exact bot:chat:topic. The bridge filters operations before reading, rechecks the set of conversational sources after preparing the response, checks before action dispatch, in the adapter's pre-write check, and again before delivery. A missing file or missing audience grant blocks disclosure. Group-wide tool rights are not changed. Test both recipients and the revocation race with `node_modules/.bin/tsx --test test/employee-personal.test.ts`.

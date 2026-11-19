@@ -1,3 +1,4 @@
+import { sourcesVisible } from "./source-access";
 import {
   proposalInput,
   selectedItems,
@@ -46,6 +47,19 @@ export const employeeProfile = z
     operations: z.array(operation).max(100),
     events: z.array(z.enum(["member_joined", "topic_created"])).max(2),
     conversationSocket: socket,
+    personalGrants: z
+      .array(
+        z
+          .object({
+            subject: user,
+            operations: catalog.min(1),
+            conversationSocket: socket,
+            allowHere: z.boolean().default(false),
+          })
+          .strict(),
+      )
+      .max(200)
+      .default([]),
   })
   .strict()
   .superRefine((p, ctx) => {
@@ -58,9 +72,21 @@ export const employeeProfile = z
       p.connections,
       p.events,
       p.operations.map((o) => o.id),
+      p.personalGrants.map((g) => g.subject),
     ];
     if (
       lists.some((v) => new Set<string | number>(v).size !== v.length) ||
+      p.personalGrants.some(
+        (g) =>
+          !p.members.includes(g.subject) ||
+          new Set(g.operations).size !== g.operations.length ||
+          g.operations.some(
+            (id) =>
+              !p.operations.some(
+                (o) => o.id === id && o.sources.length && o.resultHost,
+              ),
+          ),
+      ) ||
       p.operations.some(
         (o) =>
           !p.connections.includes(o.connection) ||
@@ -98,6 +124,8 @@ type Ticket = {
   topic: number;
   message: number;
   sender: number;
+  destination?: "here" | "dm";
+  personalSources?: string[];
   version: number;
   profileHash: string;
   operation: string;
@@ -110,6 +138,59 @@ type Ticket = {
   state: "pending" | "started" | "done";
   actor?: number;
 };
+type Destination = "here" | "dm";
+function directDestination(m: any): Destination | undefined {
+  if (
+    typeof m.text !== "string" ||
+    m.forward_origin ||
+    m.is_automatic_forward ||
+    m.via_bot ||
+    m.quote ||
+    m.external_reply ||
+    m.edit_date ||
+    /[«»“”"\n>]/u.test(m.text) ||
+    m.entities?.some((e: any) =>
+      ["blockquote", "expandable_blockquote", "pre", "code"].includes(e.type),
+    )
+  )
+    return;
+  const matches = [
+    ...m.text.matchAll(
+      /(?:ответь|пришли|отправь|скинь)\s+(?:результат\s+)?(сюда|в эту группу|мне в личку|в личку)(?=$|[.,!;?\s])/giu,
+    ),
+  ];
+  if (matches.length !== 1) return;
+  return /личку/iu.test(matches[0][1]) ? "dm" : "here";
+}
+function personalScope(
+  s: Store,
+  p: Profile,
+  subject: number,
+  chat: number,
+  topic: number,
+  destination: Destination,
+  required: string[] = [],
+) {
+  const grant = p.personalGrants.find((g) => g.subject === subject);
+  if (
+    !grant ||
+    !p.members.includes(subject) ||
+    !s.get("employee:" + p.botId + ":dm:" + subject) ||
+    !s.get("employee:" + p.botId + ":directory:" + chat) ||
+    !saved(s, p, chat).rules.topics.includes(String(topic))
+  )
+    return;
+  const operations = p.operations.filter(
+    (o) =>
+      grant.operations.includes(o.id) &&
+      (destination === "dm" ||
+        (grant.allowHere && sourcesVisible(o.sources, p.botId, chat, topic))),
+  );
+  const sources = [...new Set(operations.flatMap((o) => o.sources))];
+  if (!operations.length || !required.every((id) => sources.includes(id)))
+    return;
+  return { grant, operations, sources };
+}
 type Send = (chat: number) => Telegram;
 type Call = (
   socket: string,
@@ -150,7 +231,13 @@ const empty = (): Saved => ({
   note: "",
 });
 const hash = (p: Profile) =>
-  createHash("sha256").update(JSON.stringify(p)).digest("hex");
+  createHash("sha256")
+    .update(
+      JSON.stringify(p, (k, v) =>
+        k === "personalGrants" && Array.isArray(v) && !v.length ? undefined : v,
+      ),
+    )
+    .digest("hex");
 const key = (p: Profile, chat: number) => `employee:${p.botId}:group:${chat}`;
 const saved = (s: Store, p: Profile, chat: number) =>
   s.get<Saved>(key(p, chat)) ?? empty();
@@ -325,18 +412,35 @@ function defaults(p: Profile): Limits {
     confirm: p.operations.filter((o) => o.approval).map((o) => o.id),
   };
 }
-export function employeeHome(store:Store,profile:Profile) {
-  const applied=effective(store,profile);
-  const local=store.get<{revision:number}>(globalKey(profile));
-  const missing:string[]=[];
-  if(!applied.members.length)missing.push("назначить участников для подключения групп");
-  if(applied.operations.some(op=>op.approval) && !applied.approvers.length)missing.push("назначить согласующего для действий с подтверждением");
-  const text=[local?"Действуют локальные назначения · версия "+local.revision:"Действуют назначения из комплекта сотрудника.",
-    "Роль: "+applied.role,"Источники: "+(applied.sources.join(", ")||"—"),
-    "Действия: "+(applied.operations.map(op=>op.id+" / "+op.resource).join(", ")||"—"),
-    "Согласующие: "+(applied.approvers.join(", ")||"—"),
-    ...(missing.length?["Требует настройки: "+missing.join(", ")]:["Обязательные назначения заполнены."])];
-  return {text:text.join("\n").slice(0,4000),reply_markup:{keyboard:[[profile.settingsTitle,"Мои группы"]],resize_keyboard:true}};
+export function employeeHome(store: Store, profile: Profile) {
+  const applied = effective(store, profile);
+  const local = store.get<{ revision: number }>(globalKey(profile));
+  const missing: string[] = [];
+  if (!applied.members.length)
+    missing.push("назначить участников для подключения групп");
+  if (applied.operations.some((op) => op.approval) && !applied.approvers.length)
+    missing.push("назначить согласующего для действий с подтверждением");
+  const text = [
+    local
+      ? "Действуют локальные назначения · версия " + local.revision
+      : "Действуют назначения из комплекта сотрудника.",
+    "Роль: " + applied.role,
+    "Источники: " + (applied.sources.join(", ") || "—"),
+    "Действия: " +
+      (applied.operations.map((op) => op.id + " / " + op.resource).join(", ") ||
+        "—"),
+    "Согласующие: " + (applied.approvers.join(", ") || "—"),
+    ...(missing.length
+      ? ["Требует настройки: " + missing.join(", ")]
+      : ["Обязательные назначения заполнены."]),
+  ];
+  return {
+    text: text.join("\n").slice(0, 4000),
+    reply_markup: {
+      keyboard: [[profile.settingsTitle, "Мои группы"]],
+      resize_keyboard: true,
+    },
+  };
 }
 type GlobalDraft = {
   token: string;
@@ -517,6 +621,7 @@ export function isEmployeeUpdate(
   update: any,
   owner?: number,
   settingsTitle?: string,
+  personalSubjects: readonly number[] = [],
 ) {
   const cb = update.callback_query,
     m = cb?.message ?? update.message ?? update.edited_message;
@@ -547,6 +652,8 @@ export function isEmployeeUpdate(
       .filter(Boolean)
       .includes(m.text)
   )
+    return true;
+  if (m.text === "/start" && personalSubjects.includes(m.chat.id) && owner)
     return true;
   if (["/groups", "Мои группы"].includes(m.text)) return true;
   return !!s.get<{ d: Draft }>(`employee:${bot}:draft:${m.chat.id}`)?.d
@@ -616,9 +723,23 @@ export async function employeeUpdate(
   if (cb && m.from?.id !== p.botId) return;
   const sendText = (target: number, text: string, extra = {}) =>
     send(target)("sendMessage", { text, ...extra });
+  if (
+    privateChat &&
+    !cb &&
+    m.text === "/start" &&
+    !m.forward_origin &&
+    !m.via_bot &&
+    p.personalGrants.some((g) => g.subject === actor)
+  ) {
+    s.put("employee:" + p.botId + ":dm:" + actor, true);
+    if (actor !== p.owner) {
+      await sendText(actor, "Личка подключена для ваших поручений.");
+      return;
+    }
+  }
   if (privateChat && actor === p.owner) {
     if (!cb && m.text === "/start") {
-      await send(actor)("sendMessage",employeeHome(s,boundary()));
+      await send(actor)("sendMessage", employeeHome(s, boundary()));
       return;
     }
     if (
@@ -785,17 +906,33 @@ export async function employeeUpdate(
     const current = read(),
       group = saved(s, current, t.chat),
       rules = group.rules,
-      op = opFor(current, rules, t.operation);
+      scope =
+        t.destination &&
+        personalScope(
+          s,
+          current,
+          t.sender,
+          t.chat,
+          t.topic,
+          t.destination,
+          t.personalSources,
+        ),
+      op = t.destination
+        ? scope?.operations.find((o) => o.id === t.operation)
+        : opFor(current, rules, t.operation);
     if (
       hash(current) !== t.profileHash ||
       group.version !== t.version ||
       !op ||
       !rules.topics.includes(String(t.topic)) ||
-      !rules.members.includes(String(t.sender)) ||
+      op.id !== t.operation ||
+      (!t.destination && !rules.members.includes(String(t.sender))) ||
       ((t.items || op.approval || rules.requireApproval.includes(op.id)) &&
         (!approver ||
           !current.approvers.includes(approver) ||
-          !rules.approvers.includes(String(approver))))
+          (t.destination
+            ? approver !== t.sender
+            : !rules.approvers.includes(String(approver)))))
     )
       return;
     const k = ticketKey(current, token);
@@ -822,6 +959,9 @@ export async function employeeUpdate(
           }
         : { input: t.input }),
       actor: approver ?? t.sender,
+      ...(t.destination
+        ? { principal: t.sender, destination: t.destination, scope: "personal" }
+        : {}),
       chat: t.chat,
       topic: t.topic,
     });
@@ -854,12 +994,28 @@ export async function employeeUpdate(
     });
     if (
       hash(read()) === t.profileHash &&
-      generation(s, current, t.chat) === t.version
+      generation(s, current, t.chat) === t.version &&
+      (!t.destination ||
+        personalScope(
+          s,
+          read(),
+          t.sender,
+          t.chat,
+          t.topic,
+          t.destination,
+          t.personalSources,
+        ))
     )
-      await sendText(t.chat, resultText, {
-        message_thread_id: t.topic || undefined,
-        reply_parameters: { message_id: t.message },
-      });
+      await sendText(
+        t.destination === "dm" ? t.sender : t.chat,
+        resultText,
+        t.destination === "dm"
+          ? {}
+          : {
+              message_thread_id: t.topic || undefined,
+              reply_parameters: { message_id: t.message },
+            },
+      );
   };
   if (
     !cb &&
@@ -913,8 +1069,7 @@ export async function employeeUpdate(
       options(p, s.get<number[]>(topicsKey(p, chat)) ?? []),
     ),
     topic = m.message_thread_id ?? 0;
-  if (!r.members.includes(String(actor)) || !r.topics.includes(String(topic)))
-    return;
+  if (!r.topics.includes(String(topic))) return;
   const mentioned =
     typeof m.text === "string" &&
     m.entities?.some(
@@ -930,33 +1085,66 @@ export async function employeeUpdate(
       reply?.from?.id === p.botId &&
       reply.chat?.id === chat &&
       (reply.message_thread_id ?? 0) === topic);
-  if (!addressed && !(event && r.events.includes(event))) return;
-  const permitted = p.operations
-    .filter((o) => opFor(p, r, o.id))
-    .map((o) => ({ id: o.id, resource: o.resource }));
+
+  const requested = mentioned && !event ? directDestination(m) : undefined;
+  const hasPersonal = p.personalGrants.some((g) => g.subject === actor);
+  if (requested === "dm" && !hasPersonal) return;
+  const destination = hasPersonal && requested ? requested : undefined;
+  const personal =
+    destination && personalScope(s, p, actor, chat, topic, destination);
+  if (destination && !personal) return;
+  if (!personal && !addressed && !(event && r.events.includes(event))) return;
+  if (!personal && !r.members.includes(String(actor))) return;
+  const permitted = (
+    personal
+      ? personal.operations
+      : p.operations.filter((o) => opFor(p, r, o.id))
+  ).map((o) => ({ id: o.id, resource: o.resource }));
   const result = response.parse(
-    await call(p.conversationSocket, {
-      kind: "conversation",
-      role: p.role,
-      chat,
-      topic,
-      actor,
-      text: m.text ?? "",
-      event,
-      sources: r.sources,
-      operations: permitted,
-    }),
+    await call(
+      personal ? personal.grant.conversationSocket : p.conversationSocket,
+      {
+        kind: "conversation",
+        role: p.role,
+        chat,
+        topic,
+        actor,
+        text: m.text ?? "",
+        event,
+        ...(personal
+          ? { principal: actor, destination, scope: "personal" }
+          : {}),
+        sources: personal ? personal.sources : r.sources,
+        operations: permitted,
+      },
+    ),
   );
   if (hash(read()) !== hash(p) || generation(s, p, chat) !== group.version)
     return;
+  if (
+    destination &&
+    personal &&
+    !personalScope(s, read(), actor, chat, topic, destination, personal.sources)
+  )
+    return;
   if (result.kind === "answer") {
-    await sendText(chat, result.text, {
-      message_thread_id: topic || undefined,
-      reply_parameters: { message_id: m.message_id },
-    });
+    await sendText(
+      destination === "dm" ? actor : chat,
+      result.text,
+      destination === "dm"
+        ? {}
+        : {
+            message_thread_id: topic || undefined,
+            reply_parameters: { message_id: m.message_id },
+          },
+    );
     return;
   }
-  const op = opFor(p, r, result.operation);
+  if (personal && (result.kind !== "selection" || !p.approvers.includes(actor)))
+    return;
+  const op = personal
+    ? personal.operations.find((o) => o.id === result.operation)
+    : opFor(p, r, result.operation);
   if (!op || (result.kind === "selection" && !op.resultHost)) return;
   const token = createHash("sha256")
     .update([p.botId, chat, topic, m.message_id].join(":"))
@@ -968,6 +1156,8 @@ export async function employeeUpdate(
     topic,
     message: m.message_id,
     sender: actor,
+    destination,
+    personalSources: personal ? personal.sources : undefined,
     version: group.version,
     profileHash: hash(p),
     operation: op.id,
@@ -988,11 +1178,17 @@ export async function employeeUpdate(
   if (t.items) {
     const text = [
       `Группа ${chat}, тема ${topic} · ${op.id} / ${op.resource}`,
+      ...(destination
+        ? [
+            "Получатель результата: " +
+              (destination === "dm" ? "ваша личка" : "эта группа и тема"),
+          ]
+        : []),
       `Поручение: ${t.taskId} (версия ${t.revision})`,
       ...t.items.map((item, i) => `${i + 1}. ${item}`),
       "Ответьте на это сообщение, например «первый и третий».",
     ].join("\n");
-    for (const actor of r.approvers) {
+    for (const actor of destination ? [t.sender] : r.approvers) {
       const delivered = await sendText(Number(actor), text, {
         reply_markup: { force_reply: true },
       });
@@ -1062,12 +1258,29 @@ export function employeeWriteAllowed(
   )
     return false;
   const group = saved(s, p, t.chat),
-    op = opFor(current, group.rules, t.operation);
+    scope =
+      t.destination &&
+      personalScope(
+        s,
+        current,
+        t.sender,
+        t.chat,
+        t.topic,
+        t.destination,
+        t.personalSources,
+      ),
+    op = t.destination
+      ? scope?.operations.find((o) => o.id === t.operation)
+      : opFor(current, group.rules, t.operation);
   return (
     group.version === t.version &&
-    group.rules.approvers.includes(String(check.actor)) &&
+    (t.destination
+      ? t.sender === check.actor
+      : group.rules.approvers.includes(String(check.actor))) &&
     current.approvers.includes(check.actor) &&
-    group.rules.members.includes(String(t.sender)) &&
+    (t.destination
+      ? !!scope
+      : group.rules.members.includes(String(t.sender))) &&
     group.rules.topics.includes(String(t.topic)) &&
     op?.resource === check.resource &&
     op.connection === check.connection
