@@ -28,6 +28,7 @@ export const diagnosisSchema = z.object({
   username: z.string(),
   topics: z.boolean(),
   userTopics: z.boolean(),
+  privacyMode: z.boolean().optional(),
   webhook: z.boolean(),
   error: z.string().nullable(),
 });
@@ -68,6 +69,7 @@ export async function diagnose(
   try {
     const me = await call("getMe");
     d.valid = true;
+    d.privacyMode = me.can_read_all_group_messages !== true;
     d.sameBot = !expectedBot || me.id === expectedBot;
     d.username = String(me.username ?? "");
     d.topics = me.has_topics_enabled === true;

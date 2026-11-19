@@ -80,3 +80,11 @@ Provision `personalAccess: {"subjects":[123],"conversationSocket":"/run/employee
 After /start a personal-access subject can send a request in the bot DM. In an enrolled group a native mention and «ответь сюда» address one result to that exact topic, including when the topic has no access to the source. «Ответь мне в личку» selects the private route. Approval of a write is still required for a versioned selection. Scope the personal adapter to the authenticated principal, and expose only the requested result for public delivery. Ordinary group requests still use their group policy.
 
 «Мои группы» also lists the owner's existing legacy topic bindings as read-only text. Viewing them preserves routing and does not enroll the group.
+
+### Recover a started selection after an uncertain external write
+
+An administrator calls `bb plugin rpc call telegram-projects reconcileEmployeeTicket --input-file ticket.json --json`. Supply only the original `{"idempotencyKey":"<32 lowercase hex characters>"}`. The bridge loads the actor, destination, selection and route from the original ticket. The same action socket receives the original payload with kind `reconcile`. Implement this as a read-only lookup of the external effects and original reservation. Return the verified receipt in the same format as execute; return an error if the effect cannot be verified. The bridge rechecks current grants before lookup and delivery and reserves one Telegram send. A confirmed delivery returns sent and messageId, including on repetition. An ambiguous delivery or interruption after reserving the send requires independent Telegram readback. The RPC never reissues execute.
+
+### Group Privacy Mode
+
+Token setup displays getMe's Privacy Mode. When a bot joins a group the bridge checks the actual Telegram administrator list and sends a private summary to the inviting administrator or group creator. It describes the global setting, the bot's role, ordinary message visibility, addressing and group rules. Membership and visibility transitions are tracked independently per group. A denied DM is recorded as unavailable. No group posting or permission changes are performed by this notification.

@@ -1,3 +1,7 @@
+# 0.9.29
+
+Show Telegram Privacy Mode in setup and notify the administrator about group visibility changes. Recover a started action by reading its verified receipt and returning one result to the original destination.
+
 # 0.9.28
 
 Give a verified user binary personal access to an employee across direct messages and enrolled groups. Honor the requested reply destination for that one result and keep older restricted grants intact.

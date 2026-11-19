@@ -7,6 +7,7 @@ import {
   employeeProfile,
   employeeUpdate,
   employeeWriteAllowed,
+  reconcileEmployeeTicket,
 } from "../employee-policy";
 import type { Store, Telegram } from "../model";
 
@@ -68,6 +69,8 @@ test("one subject, two groups, private action scope and independent recipient gr
       return { message_id: sent.length } as T;
     };
   let seq = 50,
+    hold: Promise<void> | undefined,
+    lost = false,
     direct = false,
     revokeAtWrite = false,
     date = "2026-11-26";
@@ -114,6 +117,8 @@ test("one subject, two groups, private action scope and independent recipient gr
         if (!allowed) throw Error("revoked before write");
         assert.equal(body.selectedItems[0], "Card 17 → 2026-11-28");
         date = "2026-11-28";
+        if (hold) await hold;
+        if (lost) throw Error("completion lost");
         return { ...body.choice, links: ["https://board.invalid/cards/17"] };
       },
     );
@@ -267,6 +272,52 @@ test("one subject, two groups, private action scope and independent recipient gr
     await accept(sent.length);
     assert.equal(sent.at(-1).chat, 3);
     assert.equal(sent.at(-1).text, "https://board.invalid/cards/17");
+    await request(A, here);
+    lost = true;
+    await assert.rejects(accept(sent.length), /completion lost/);
+    lost = false;
+    let original = calls.at(-1).body;
+    let token = original.idempotencyKey;
+    const reconcile = () =>
+      reconcileEmployeeTicket(
+        store,
+        () => p,
+        token,
+        send,
+        async (path, body) => {
+          assert.equal(path, "/action");
+          assert.deepEqual(body, { ...original, kind: "reconcile" });
+          return {
+            ...original.choice,
+            links: ["https://board.invalid/cards/17"],
+          };
+        },
+      );
+    const count = sent.length;
+    const [first] = await Promise.all([reconcile(), reconcile()]);
+    assert.equal(first.state, "sent");
+    assert.equal(sent.length, count + 1);
+    assert.equal(sent.at(-1).chat, A);
+    assert.deepEqual(await reconcile(), first);
+    assert.equal(sent.length, count + 1);
+    await request(A, here);
+    let release!: () => void;
+    hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const late = accept(sent.length);
+    await new Promise((resolve) => setImmediate(resolve));
+    original = calls.at(-1).body;
+    token = original.idempotencyKey;
+    const beforeRace = sent.length;
+    try {
+      assert.equal((await reconcile()).state, "sent");
+    } finally {
+      release();
+      await late;
+      hold = undefined;
+    }
+    assert.equal(sent.length, beforeRace + 1);
     // Saved 0.9.25 limits have no personal field. An upgrade cannot enable new subjects.
     const previousLimits = {
       role: p.role,

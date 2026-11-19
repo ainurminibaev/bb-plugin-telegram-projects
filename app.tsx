@@ -1217,6 +1217,7 @@ function Check({ t, check }: { t: T; check: Diagnosis }) {
             {check.sameBot ? "✅" : "❌"}{" "}
             {t("Совпадает с подключённым ботом", "Matches the connected bot")}
           </p>
+          <p>Privacy Mode — {check.privacyMode ? t("включён", "enabled") : t("выключен", "disabled")}. {t("Бот-администратор получает все обычные сообщения участников своей группы.", "In a group where the bot is an administrator it receives all ordinary messages from members.")}</p>
           <p>
             {check.topics ? "✅" : "❌"} Threaded Mode —{" "}
             {check.topics

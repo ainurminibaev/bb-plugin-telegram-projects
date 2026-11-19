@@ -1,4 +1,5 @@
-import {employeeHome,employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
+import { privacyKey, privacySummary, rememberMembership, sendVisibilityUpdates } from "./group-visibility";
+import {reconcileEmployeeTicket,employeeHome,employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
 import {proposalInput,presentProposal,handleOwnerSelection,collectDecisionResults,presentProjectProposals} from "./owner-selection";
 import {bbReminderInput,isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
@@ -101,6 +102,7 @@ const statusSchema = z.object({
 });
 const handoffStatusSchema = z.object({id: z.string(), phase: z.string(), sourceThreadId: z.string(), targetThreadId: z.string().nullable(), error: z.string().nullable(), retirement: z.string().nullable(), retirementReason: z.string().nullable()});
 export const rpcContract = defineRpcContract({
+  reconcileEmployeeTicket:{input:z.object({idempotencyKey:z.string().regex(/^[a-f0-9]{32}$/)}).strict(),output:z.object({state:z.string(),messageId:z.number().optional()})},
   checkEmployeeWrite:{input:employeeWriteCheck,output:z.object({allowed:z.boolean()})},
   readIsolatedPdf:{input:isolatedPdfInput,output:isolatedPdfPart},
   readIsolatedGroup:{input:isolatedLookup,output:isolatedAnswer},
@@ -622,6 +624,7 @@ export default async function plugin(bb: BbPluginApi) {
     const me = await checkBot(tg, botId());
     if (!botId()) store.put("bot:id", me.id);
     username = me.username;
+    store.put(privacyKey(me.id), !me.readsAllGroups);
     if (!ownerId()) {
       lastError = "owner_not_paired";
       return;
@@ -1153,6 +1156,16 @@ export default async function plugin(bb: BbPluginApi) {
     return project;
   }
   bb.rpc.register(rpcContract, {
+    reconcileEmployeeTicket: async ({idempotencyKey})=>{
+      const read=()=>{
+        const path=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
+        if(!path || stateTransferBusy) throw Error("employee_unavailable");
+        const p=readEmployeeProfile(path);
+        if(p.owner!==ownerId() || p.botId!==botId()) throw Error("employee_identity_mismatch");
+        return p;
+      };
+      return reconcileEmployeeTicket(store,read,idempotencyKey,chat=>telegram(botToken,lifetime.signal,15000,()=>chat,apiRoot));
+    },
     checkEmployeeWrite: args=>{
       const path=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
       if(!path)return {allowed:false};
@@ -1859,6 +1872,12 @@ export default async function plugin(bb: BbPluginApi) {
           signal.addEventListener("abort", done, { once: true });
         });
       const tg = telegram(botToken, signal, 40_000, ownerId, apiRoot);
+      const sendGroupVisibility = () => {
+        const path=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
+        const profile=path ? readEmployeeProfile(path) : undefined;
+        const managers=profile?.botId===botId() && profile?.owner===ownerId() ? profile?.admins : [];
+        return sendVisibilityUpdates(store,botId()!,chat=>telegram(botToken,signal,15000,()=>chat,apiRoot),managers);
+      };
       while (!signal.aborted) {
         const cfg = await settings.get();
         // Hold updates until the chat bridge exists, so none is consumed and lost.
@@ -1874,11 +1893,17 @@ export default async function plugin(bb: BbPluginApi) {
             updates = await tg<any[]>("getUpdates", {
               offset: store.get<number>("ingress:offset") ?? 0,
               timeout: 25,
-              allowed_updates: ["message", "edited_message", "callback_query", ...(process.env.BB_TELEGRAM_GUEST_TOPICS ? ["guest_message"] : []), ...(process.env.BB_TELEGRAM_EMPLOYEE_PROFILE!==undefined ? ["my_chat_member"] : [])],
+              allowed_updates: ["message", "edited_message", "callback_query", ...(process.env.BB_TELEGRAM_GUEST_TOPICS ? ["guest_message"] : []), "my_chat_member"],
             });
           } finally { ingressPolling = false; }
           ingressError = null;
           for (const u of updates) {
+            if (botId() && u.my_chat_member) {
+              rememberMembership(store,botId()!,u);
+              const me = await checkBot(tg,botId());
+              store.put(privacyKey(me.id), !me.readsAllGroups);
+              if (ownerId()) await sendGroupVisibility();
+            }
             if (skipExcludedForumUpdate(store, u)) continue;
             const profilePath=process.env.BB_TELEGRAM_EMPLOYEE_PROFILE;
             const configured=profilePath!==undefined ? readEmployeeProfile(profilePath) : undefined;
@@ -1920,7 +1945,7 @@ export default async function plugin(bb: BbPluginApi) {
                 text: translate(
                   cfg.language as "ru" | "en",
                   "✅ Бот привязан к BB. Темы проектов появятся в этом чате в течение минуты.",
-                ),
+                ) + "\n" + privacySummary(store, botId()!),
               });
               if(profilePath!==undefined) {
                 const p=readEmployeeProfile(profilePath);
@@ -1942,6 +1967,8 @@ export default async function plugin(bb: BbPluginApi) {
               }).catch(() => {});
             store.put("ingress:offset", u.update_id + 1);
           }
+          if (botId() && ownerId() && store.list("visibility:"+botId()+":group:").length)
+            await sendGroupVisibility();
         } catch (e) {
           if (signal.aborted) break;
           // telegram_409: another process still polls this bot.

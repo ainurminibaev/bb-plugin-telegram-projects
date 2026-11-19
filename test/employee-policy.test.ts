@@ -377,6 +377,8 @@ test("registered Telegram poller opens the owner keyboard and lists the invited 
         result: batch.filter((x) => x.update_id >= body.offset),
       });
     }
+    if (method === "getMe") return Response.json({ok:true,result:{id:5,username:"sample_bot"}});
+    if (method === "getChatAdministrators") return Response.json({ok:true,result:[{status:"creator",user:{id:1}}]});
     if (method === "sendMessage") sent.push(body);
     return Response.json({
       ok: true,

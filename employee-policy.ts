@@ -1,3 +1,4 @@
+import { privacySummary, noticeRecipient } from "./group-visibility";
 import { sourcesVisible } from "./source-access";
 import {
   proposalInput,
@@ -144,6 +145,8 @@ type Ticket = {
   draftHash: string;
   selected?: number[];
   state: "pending" | "started" | "done";
+  delivery?: "sending" | "sent" | "unknown";
+  messageId?: number;
   actor?: number;
 };
 type Destination = "here" | "dm";
@@ -461,6 +464,7 @@ export function employeeHome(store: Store, profile: Profile) {
       ? "Действуют локальные назначения · версия " + local.revision
       : "Действуют назначения из комплекта сотрудника.",
     "Роль: " + applied.role,
+    privacySummary(store, profile.botId),
     "Источники: " + (applied.sources.join(", ") || "—"),
     "Действия: " +
       (applied.operations.map((op) => op.id + " / " + op.resource).join(", ") ||
@@ -737,6 +741,7 @@ export async function employeeUpdate(
       if (!change.chat.is_forum) s.put(topicsKey(p, change.chat.id), [0]);
       if (!["member", "administrator"].includes(change.old_chat_member?.status))
         for (const admin of p.admins) {
+          if (noticeRecipient(s, p.botId, change.chat.id) === admin) continue;
           try {
             await send(admin)("sendMessage", {
               text: "Сотрудник добавлен в группу.",
@@ -1036,53 +1041,14 @@ export async function employeeUpdate(
       selected,
     };
     s.put(k, { ...t, state: "started", actor: choice.actor, selected }); // Ambiguous external writes must never replay automatically.
-    const completion = await call(op.socket, {
-      kind: "execute",
-      idempotencyKey: token,
-      operation: op.id,
-      resource: op.resource,
-      connection: op.connection,
-      ...(t.items
-        ? {
-            choice,
-            items: t.items,
-            selectedItems: selected.map((n) => t.items![n - 1]),
-          }
-        : { input: t.input }),
-      actor: approver ?? t.sender,
-      ...(t.destination
-        ? { principal: t.sender, destination: t.destination, scope: "personal" }
-        : {}),
-      chat: t.chat,
-      topic: t.topic,
-    });
+    const completion = await call(
+      op.socket,
+      actionPayload("execute", t, token, op, choice),
+    );
     let resultText = "Действие выполнено.";
     if (t.items) {
-      const verified = z
-        .object({
-          actor: user,
-          taskId: z.string().uuid(),
-          revision: z.number(),
-          draftHash: z.string(),
-        })
-        .parse(completion);
-      if (
-        !op.resultHost ||
-        verified.actor !== choice.actor ||
-        verified.taskId !== choice.taskId ||
-        verified.revision !== choice.revision ||
-        verified.draftHash !== choice.draftHash
-      )
-        throw Error("unexpected_completion");
-      resultText = verifiedCompletionLinks(completion, selected, op.resultHost);
+      resultText = completionText(completion, choice, op.resultHost);
     }
-    s.put(k, {
-      ...t,
-      state: "done",
-      actor: choice.actor,
-      selected,
-      resultText,
-    });
     if (
       hash(read()) === t.profileHash &&
       generation(s, current, t.chat) === t.version &&
@@ -1097,15 +1063,12 @@ export async function employeeUpdate(
           t.personalSources,
         ))
     )
-      await sendText(
-        t.destination === "dm" ? t.sender : t.chat,
+      await deliverCompletion(
+        s,
+        k,
+        { ...t, state: "started", actor: choice.actor, selected },
         resultText,
-        t.destination === "dm"
-          ? {}
-          : {
-              message_thread_id: t.topic || undefined,
-              reply_parameters: { message_id: t.message },
-            },
+        send,
       );
   };
   if (
@@ -1328,6 +1291,159 @@ export async function employeeUpdate(
     );
 }
 
+type Choice = {
+  actor: number;
+  taskId: string;
+  revision: number;
+  draftHash: string;
+  selected: number[];
+};
+function actionPayload(
+  kind: "execute" | "reconcile",
+  t: Ticket,
+  token: string,
+  op: Profile["operations"][number],
+  choice: Choice,
+) {
+  const selected = choice.selected;
+  return {
+    kind,
+    idempotencyKey: token,
+    operation: op.id,
+    resource: op.resource,
+    connection: op.connection,
+    ...(t.items
+      ? {
+          choice,
+          items: t.items,
+          selectedItems: selected.map((n) => t.items![n - 1]),
+        }
+      : { input: t.input }),
+    actor: choice.actor,
+    ...(t.destination
+      ? { principal: t.sender, destination: t.destination, scope: "personal" }
+      : {}),
+    chat: t.chat,
+    topic: t.topic,
+  };
+}
+function completionText(completion: unknown, choice: Choice, host?: string) {
+  const selected = choice.selected;
+  const verified = z
+    .object({
+      actor: user,
+      taskId: z.string().uuid(),
+      revision: z.number(),
+      draftHash: z.string(),
+    })
+    .parse(completion);
+  if (
+    !host ||
+    verified.actor !== choice.actor ||
+    verified.taskId !== choice.taskId ||
+    verified.revision !== choice.revision ||
+    verified.draftHash !== choice.draftHash
+  )
+    throw Error("unexpected_completion");
+  return verifiedCompletionLinks(completion, selected, host);
+}
+
+export async function reconcileEmployeeTicket(
+  s: Store,
+  read: ProfileReader,
+  token: string,
+  send: Send,
+  call: Call = realCall,
+) {
+  const p = read(),
+    key = ticketKey(p, token),
+    t = s.get<Ticket>(key);
+  if (!t) return { state: "missing" };
+  if (t.state === "done")
+    return { state: t.delivery ?? "done", messageId: t.messageId };
+  if (t.state !== "started" || !t.items || !t.actor || !t.selected?.length)
+    return { state: "ineligible" };
+  const choice = {
+    actor: t.actor,
+    taskId: t.taskId,
+    revision: t.revision,
+    draftHash: t.draftHash,
+    selected: t.selected,
+  };
+  const op = p.operations.find((o) => o.id === t.operation);
+  if (!op) return { state: "revoked" };
+  const allowed = () =>
+    t.selected!.every((item) =>
+      employeeWriteAllowed(s, read(), {
+        ...choice,
+        item,
+        idempotencyKey: token,
+        operation: op.id,
+        resource: op.resource,
+        connection: op.connection,
+      }),
+    );
+  if (!allowed()) return { state: "revoked" };
+  const result = await call(
+    op.socket,
+    actionPayload("reconcile", t, token, op, choice),
+  );
+  const text = completionText(result, choice, op.resultHost);
+  const latest = s.get<Ticket>(key);
+  if (latest?.state === "done")
+    return { state: latest.delivery ?? "done", messageId: latest.messageId };
+  if (!allowed()) return { state: "revoked" };
+  return deliverCompletion(s, key, t, text, send);
+}
+async function deliverCompletion(
+  s: Store,
+  key: string,
+  t: Ticket,
+  text: string,
+  send: Send,
+) {
+  const current = s.get<Ticket>(key);
+  if (current?.state !== "started")
+    return {
+      state: current?.delivery ?? current?.state ?? "missing",
+      messageId: current?.messageId,
+    };
+  s.put(key, { ...t, state: "done", delivery: "sending", resultText: text });
+  try {
+    const r = await send(t.destination === "dm" ? t.sender : t.chat)(
+      "sendMessage",
+      {
+        text,
+        ...(t.destination === "dm"
+          ? {}
+          : {
+              message_thread_id: t.topic || undefined,
+              reply_parameters: { message_id: t.message },
+            }),
+      },
+    );
+    if (!Number.isSafeInteger(r?.message_id) || r.message_id <= 0)
+      throw Error("missing_telegram_receipt");
+    s.put(key, {
+      ...t,
+      state: "done",
+      delivery: "sent",
+      messageId: r.message_id,
+      resultText: text,
+    });
+    return { state: "sent", messageId: Number(r.message_id) };
+  } catch (e) {
+    if (e instanceof TelegramFailure && !e.ambiguous) s.put(key, t);
+    else
+      s.put(key, {
+        ...t,
+        state: "done",
+        delivery: "unknown",
+        resultText: text,
+      });
+    throw e;
+  }
+}
 function isDirect(
   ticket: Ticket,
   operation: { approval: boolean } | undefined,
