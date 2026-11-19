@@ -2055,3 +2055,66 @@ for (const running of [true,false]) test("late question joins the running forwar
     assert.equal(f.calls.filter(c=>c[0]==="send").at(-1)[1].mode,"queue-if-active");
   } finally {f.cleanup();}
 });
+
+test("explicit delivery sends relative and empty-label images, videos and files[] like a routed answer", async () => {
+  const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'explicit-media-'));
+  try {
+    writeFileSync(join(dir,'mac-overlay-v3-typing.jpg'),'image');
+    writeFileSync(join(dir,'demo.mp4'),'video');
+    writeFileSync(join(dir,'report.pdf'),'pdf');
+    f.sdk.environments.get=async()=>({path:dir});
+    await f.bridge.handle(f.input('bind')); await f.bridge.flush(); f.sent.length=0;
+    const text='Итог проверки.\n\n![](mac-overlay-v3-typing.jpg)\n\n[Запись экрана](demo.mp4)\n\n[README](missing.md) и [сайт](https://example.com/a.png)';
+    const args={threadId:'thr_one',topicId:100,text,files:[join(dir,'report.pdf')],deliveryId:'explicit_media_001'};
+    f.bridge.sendExplicit(args); await f.bridge.flush();
+    assert.deepEqual(f.sent.filter(x=>x.method==='sendPhoto').map(x=>x.photo_filename),['mac-overlay-v3-typing.jpg']);
+    const videos=f.sent.filter(x=>x.method==='sendVideo');
+    assert.deepEqual(videos.map(x=>[x.video_filename,x.caption,x.supports_streaming]),[['demo.mp4','Запись экрана',true]]);
+    assert.deepEqual(f.sent.filter(x=>x.method==='sendDocument').map(x=>x.document_filename),['report.pdf']);
+    const message=f.sent.filter(x=>x.method==='sendMessage').map(x=>x.text).join('\n');
+    assert.match(message,/Итог проверки/);
+    assert.ok(!message.includes('mac-overlay-v3-typing.jpg') && !message.includes('demo.mp4') && !message.includes('!['));
+    assert.match(message,/README/);
+    assert.equal(f.bridge.explicitDeliveryStatus(args.deliveryId).state,'delivered');
+    // Idempotent by deliveryId: a retry sends nothing again; different files conflict.
+    const before=f.sent.length;
+    f.bridge.sendExplicit(args); await f.bridge.flush();
+    assert.equal(f.sent.length,before);
+    assert.throws(()=>f.bridge.sendExplicit({...args,files:[join(dir,'demo.mp4')]}),/conflict/);
+  } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+});
+
+test("explicit files[] alone form an album; unsafe or unknown paths are refused or reported", async () => {
+  const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'explicit-files-')); const outside=mkdtempSync(join(tmpdir(),'outside-'));
+  try {
+    for (const name of ['a.png','b.png']) writeFileSync(join(dir,name),'image');
+    writeFileSync(join(outside,'secret.png'),'image');
+    f.sdk.environments.get=async()=>({path:dir});
+    await f.bridge.handle(f.input('bind')); await f.bridge.flush(); f.sent.length=0;
+    f.bridge.sendExplicit({threadId:'thr_one',topicId:100,files:[join(dir,'a.png'),join(dir,'b.png')],deliveryId:'explicit_files_001'});
+    await f.bridge.flush();
+    assert.equal(f.sent.find(x=>x.method==='sendMediaGroup').media.length,2);
+    assert.equal(f.sent.filter(x=>x.method==='sendMessage').length,0);
+    assert.throws(()=>f.bridge.sendExplicit({threadId:'thr_one',topicId:100,deliveryId:'explicit_files_002'}),/invalid/);
+    assert.throws(()=>f.bridge.sendExplicit({threadId:'thr_one',topicId:100,files:['relative.png'],deliveryId:'explicit_files_003'}),/invalid/);
+    assert.throws(()=>f.bridge.sendExplicit({threadId:'thr_one',topicId:100,files:[join(dir,'run.sh')],deliveryId:'explicit_files_004'}),/invalid/);
+    f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:'Вот',files:[join(outside,'secret.png')],deliveryId:'explicit_files_005'});
+    f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:'И это ![](../'+outside.split('/').pop()+'/secret.png)',deliveryId:'explicit_files_006'});
+    await f.bridge.flush();
+    assert.equal(f.sent.filter(x=>x.method==='sendPhoto').length,0);
+    assert.ok(f.sent.some(x=>x.method==='sendMessage' && x.text.includes('secret.png — не удалось отправить файл')));
+  } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});rmSync(outside,{recursive:true,force:true});}
+});
+
+test("a relative name matching files in two workspaces is left as text", async () => {
+  const f=fixture(); const a=mkdtempSync(join(tmpdir(),'ws-a-')); const b=mkdtempSync(join(tmpdir(),'ws-b-'));
+  try {
+    writeFileSync(join(a,'shot.png'),'image'); writeFileSync(join(b,'shot.png'),'image');
+    f.sdk.environments.get=async({environmentId}:any)=>({path:environmentId==='env_child'?b:a});
+    await f.bridge.handle(f.input('bind')); await f.bridge.flush(); f.sent.length=0;
+    f.sdk.threads.list=async()=>[{...f.thread,id:'child',parentThreadId:'thr_one',environmentId:'env_child'}];
+    f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:'Скрин: ![](shot.png)',deliveryId:'explicit_ambiguous_1'});
+    await f.bridge.flush();
+    assert.equal(f.sent.filter(x=>x.method==='sendPhoto').length,0);
+  } finally {f.cleanup();rmSync(a,{recursive:true,force:true});rmSync(b,{recursive:true,force:true});}
+});

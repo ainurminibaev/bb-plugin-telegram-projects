@@ -195,8 +195,9 @@ export const rpcContract = defineRpcContract({
   },
   sendToTelegram: {
     input: z.object({threadId: z.string().min(1), topicId: z.number().int().nonnegative(),
-      text: z.string().min(1).max(16000), deliveryId: z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/),
-      explicit: z.literal(true)}),
+      text: z.string().max(16000).optional(), files: z.array(z.string().min(2).max(4096)).max(20).optional(),
+      deliveryId: z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/), explicit: z.literal(true)})
+      .refine(x => Boolean(x.text?.trim()) || Boolean(x.files?.length), "text_or_files_required"),
     output: z.object({queued: z.boolean(), deliveryId: z.string()}),
   },
   prepareLocalApi: {

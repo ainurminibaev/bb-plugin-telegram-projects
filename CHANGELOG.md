@@ -1,6 +1,6 @@
 # 0.9.32 (not published)
 
-Send images without alt text from an explicit delivery, report each file in `telegramDeliveryStatus`, and show a bound private chat as ready.
+Explicit delivery from BB sends images (also without alt text or by a short file name), videos and files like a routed answer, reports each file in `telegramDeliveryStatus`, and status shows a bound private chat as ready. Includes the unpublished 0.9.20 attachment fix.
 
 # 0.9.31
 

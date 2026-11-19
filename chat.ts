@@ -4,7 +4,7 @@ import { TelegramHandoff, type HandoffJob } from "./handoff";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
 import { markdownExcerpt } from "./events";
-import { localArtifacts, renderTelegramParts, cleanAssistantText, publicActivity } from "./telegram-ux";
+import { localArtifacts, renderTelegramParts, cleanAssistantText, publicActivity, ARTIFACT_EXTENSIONS } from "./telegram-ux";
 import type { BbPluginApi, MessageDispatchHookContext, MessageDispatchHookDecision } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { createHash, randomBytes } from "node:crypto";
@@ -17,7 +17,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { join, basename, extname, sep } from "node:path";
+import { join, basename, extname, sep, resolve } from "node:path";
 import {
   type Store,
   type Topic,
@@ -465,18 +465,26 @@ export class ChatBridge {
     }
     return caughtUp;
   }
-  sendExplicit(args: {threadId: string; topicId: number; text: string; deliveryId: string}) {
+  sendExplicit(args: {threadId: string; topicId: number; text?: string; files?: string[]; deliveryId: string}) {
     const binding = this.binding(args.topicId);
     if (!this.d.owner() || !binding || binding.threadId !== args.threadId)
       throw Error("explicit_delivery_binding_mismatch");
-    if (!args.text.trim() || args.text.length > 16000 || !/^[a-zA-Z0-9_-]{8,100}$/.test(args.deliveryId))
+    const text = args.text ?? "";
+    const files = args.files ?? [];
+    // Files are absolute paths inside the thread's (or its children's)
+    // workspaces; delivery applies the same checks as an ordinary answer.
+    if ((!text.trim() && !files.length) || text.length > 16000 || files.length > 20 ||
+        files.some(f => !f.startsWith("/") || f.length > 4096 || /[\n<>]/.test(f) || !ARTIFACT_EXTENSIONS.test(f)) ||
+        !/^[a-zA-Z0-9_-]{8,100}$/.test(args.deliveryId))
       throw Error("invalid_explicit_delivery");
     const key = "reply:explicit:" + args.deliveryId;
-    const old = this.s.get<{threadId: string; topicId: number; text: string}>(key);
-    if (old && (old.threadId !== args.threadId || old.topicId !== args.topicId || old.text !== args.text))
+    const old = this.s.get<{threadId: string; topicId: number; text: string; files?: string[]}>(key);
+    if (old && (old.threadId !== args.threadId || old.topicId !== args.topicId || old.text !== text ||
+        JSON.stringify(old.files ?? []) !== JSON.stringify(files)))
       throw Error("explicit_delivery_id_conflict");
-    this.s.put(key, {threadId: args.threadId, topicId: args.topicId, text: args.text});
-    this.enqueue(args.topicId, args.text, undefined, "explicit:" + args.deliveryId, false);
+    this.s.put(key, {threadId: args.threadId, topicId: args.topicId, text, ...(files.length ? {files} : {})});
+    const attached = files.map(f => `![](<${f}>)`).join("\n");
+    this.enqueue(args.topicId, [text, attached].filter(Boolean).join("\n\n"), undefined, "explicit:" + args.deliveryId, false);
     const outKey = "chat:out:explicit:" + args.deliveryId;
     const out = this.s.get<Outbox>(outKey);
     if (out) this.s.put(outKey, {...out, sourceThreadId: args.threadId});
@@ -2609,10 +2617,9 @@ export class ChatBridge {
     }
   }
   private async deliverArtifacts(text: string, key: string, o: Outbox): Promise<{text: string; lastMediaId: number}> {
-    const links = localArtifacts(text);
+    const found = localArtifacts(text, {relative: true});
     let lastMediaId = 0;
-    if (!links.length) return {text, lastMediaId};
-    const imagePaths = [...new Set(links.filter(link => /\.(png|jpe?g|webp|gif)$/i.test(link.path)).map(link => link.path))];
+    if (!found.length) return {text, lastMediaId};
     const binding = this.deliveryBinding(o.topicId, o.revision);
     const sourceThreadId = o.sourceThreadId ?? binding?.threadId;
     const roots: string[] = [];
@@ -2628,6 +2635,21 @@ export class ChatBridge {
         } catch { /* unavailable host/path: report failed delivery, never guess */ }
       }
     }
+    // A relative name (often copied from a worker's answer) is delivered only
+    // when it identifies exactly one file inside the allowed workspaces. Other
+    // relative links stay ordinary text, as before.
+    const links = found.flatMap(link => {
+      if (!link.relative) return [link];
+      const matches = [...new Set(roots.flatMap(root => {
+        try {
+          const path = realpathSync(resolve(root, link.path));
+          return path.startsWith(root + sep) && statSync(path).isFile() ? [path] : [];
+        } catch { return []; }
+      }))];
+      return matches.length === 1 ? [{...link, path: matches[0]}] : [];
+    });
+    if (!links.length) return {text, lastMediaId};
+    const imagePaths = [...new Set(links.filter(link => /\.(png|jpe?g|webp|gif)$/i.test(link.path)).map(link => link.path))];
     const receiptFor = (path: string) => "chat:file:" + key + ":" + path;
     const captionFor = (link: typeof links[number]) => {
       const label = cleanAssistantText(link.label).replace(/[*_`\[\]]/g, "").trim();
@@ -2696,9 +2718,11 @@ export class ChatBridge {
         }
       }
       const isImage = imagePaths.includes(link.path);
+      const isVideo = /\.(mp4|mov)$/i.test(link.path) && !link.asDocument;
       const plainLabel = cleanAssistantText(link.label).replace(/[*_`\[\]]/g, "").trim();
-      const meaningfulLabel = /[а-яё]/i.test(plainLabel) && plainLabel !== basename(link.path) && !/^(картинка|изображение|фото)$/i.test(plainLabel);
-      const caption = isImage ? (imagePaths.length > 1 ? Array.from(meaningfulLabel ? plainLabel : `Вариант ${imagePaths.indexOf(link.path) + 1}`).slice(0, 900).join("") : undefined) : basename(link.path);
+      const meaningfulLabel = /[а-яё]/i.test(plainLabel) && plainLabel !== basename(link.path) && !/^(картинка|изображение|фото|видео)$/i.test(plainLabel);
+      const caption = isImage ? (imagePaths.length > 1 ? Array.from(meaningfulLabel ? plainLabel : `Вариант ${imagePaths.indexOf(link.path) + 1}`).slice(0, 900).join("") : undefined) :
+        isVideo ? (meaningfulLabel ? Array.from(plainLabel).slice(0, 900).join("") : undefined) : basename(link.path);
       const receipt = "chat:file:" + key + ":" + link.path;
       let state = this.s.get<string | number>(receipt);
       if (!state) {
@@ -2706,17 +2730,19 @@ export class ChatBridge {
           const path = realpathSync(link.path);
           if (!roots.some(root => path.startsWith(root + sep))) throw new Error("outside_workspace");
           if (path.split(sep).some(x => x.startsWith("."))) throw new Error("private_path");
-          if (!/^(\.pdf|\.png|\.jpg|\.jpeg|\.webp|\.gif|\.txt|\.md|\.csv|\.xlsx|\.docx|\.pptx|\.html|\.json|\.zip)$/i.test(extname(path))) throw new Error("unsupported_artifact");
+          if (!ARTIFACT_EXTENSIONS.test(path)) throw new Error("unsupported_artifact");
           const stat = statSync(path);
           if (!stat.isFile() || stat.size > 49 * 1024 * 1024) throw new Error("file_limit");
           const photo = /\.(png|jpe?g|webp|gif)$/i.test(path) && !link.asDocument;
           if (photo && stat.size > 10 * 1024 * 1024) throw new Error("photo_limit");
+          const field = photo ? "photo" : isVideo ? "video" : "document";
           const data = readFileSync(path);
           this.s.put(receipt, "uncertain");
-          const result = await this.d.tg(photo ? "sendPhoto" : "sendDocument", {
+          const result = await this.d.tg(photo ? "sendPhoto" : isVideo ? "sendVideo" : "sendDocument", {
             message_thread_id: o.topicId || undefined,
-            [photo ? "photo" : "document"]: new Blob([new Uint8Array(data)], {type: ({".pdf":"application/pdf", ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".webp":"image/webp", ".gif":"image/gif"} as Record<string,string>)[extname(path).toLowerCase()] ?? "application/octet-stream"}),
-            [photo ? "photo_filename" : "document_filename"]: basename(path), ...(caption ? {caption} : {}),
+            [field]: new Blob([new Uint8Array(data)], {type: ({".pdf":"application/pdf", ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".webp":"image/webp", ".gif":"image/gif", ".mp4":"video/mp4", ".mov":"video/quicktime"} as Record<string,string>)[extname(path).toLowerCase()] ?? "application/octet-stream"}),
+            [field + "_filename"]: basename(path), ...(caption ? {caption} : {}),
+            ...(isVideo ? {supports_streaming: true} : {}),
           });
           state = result.message_id;
           this.s.put(receipt, state);
@@ -2729,7 +2755,7 @@ export class ChatBridge {
         }
       }
       if (typeof state === "number") lastMediaId = state;
-      const label = typeof state === "number" ? (isImage ? "" : basename(link.path) + " — файл отправлен выше") :
+      const label = typeof state === "number" ? (isImage || isVideo ? "" : basename(link.path) + " — файл отправлен выше") :
         basename(link.path) + (state === "uncertain" ? " — не удалось подтвердить доставку файла" : " — не удалось отправить файл");
       text = text.split(link.markdown).join(label);
     }
