@@ -30,6 +30,16 @@ export const defaultGroupSettings = (): GroupSettings => ({
 const accessKey = (bot: number) => `rights:${bot}:access`;
 const groupKey = (bot: number, chat: number) => `rights:${bot}:group:${chat}`;
 export const accessModeKey = "rights:access-mode";
+/** "assistant": a personal assistant running with the owner's files; "employee": a digital employee. */
+export const installKindKey = "rights:install-kind";
+export type InstallKind = "assistant" | "employee";
+export const installKind = (store: Store): InstallKind =>
+  store.get<InstallKind>(installKindKey) === "employee" ? "employee" : "assistant";
+/** Why only people with access may call the bot here, or undefined when everyone may. */
+export function openGroupLock(store: Store, provider?: string): "codex" | "assistant" | undefined {
+  if (provider === "codex") return "codex";
+  return installKind(store) === "assistant" ? "assistant" : undefined;
+}
 
 export function accessList(store: Store, bot: number): Person[] {
   return store.get<Person[]>(accessKey(bot)) ?? [];
@@ -68,7 +78,8 @@ export function saveGroupSettings(store: Store, bot: number, chat: number, chang
 export function senderRole(store: Store, bot: number, owner: number | undefined, chat: number,
   sender: number, provider?: string): SenderRole {
   if (hasAccess(store, bot, owner, sender)) return "access";
-  if (provider === "codex") return "none";
+  // Strangers reach only employees on a verified boundary (see openGroupLock).
+  if (openGroupLock(store, provider)) return "none";
   const s = groupSettings(store, bot, chat) ?? defaultGroupSettings();
   return s.who === "all" && s.members !== "silent" ? "member" : "none";
 }

@@ -510,7 +510,7 @@ export class ChatBridge {
       ?? this.binding(topicId);
   }
   private save(b: Binding) {
-    if (this.s.get("group:project:"+b.projectId)) throw Error("group_project_unavailable");
+    if (this.s.get("group:project:"+b.projectId) && this.s.get("rights:install-kind")!=="employee") throw Error("group_project_unavailable");
     this.s.put("private:project:"+b.projectId,true);
     this.s.put("chat:binding:" + b.topicId, b);
   }

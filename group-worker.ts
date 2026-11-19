@@ -31,9 +31,12 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
   const key=`group:policy:${chatId}:${topicId}`;
   store.atomic(()=>{
     const privateBindings=store.list<{projectId:string;threadId?:string}>("chat:binding:");
-    if (privateBindings.some(({value})=>value.projectId===projectId || value.threadId===threadId) ||
-        store.list<string>("chat:thread-project:").some(row=>row.value===projectId) ||
-        store.get("chat:thread-project:"+threadId) || store.get("private:project:"+projectId))
+    // A personal assistant keeps the owner's private project out of groups. An employee is one
+    // zone of trust: its private chat and groups share one folder, one memory and one set of rules.
+    const employee=store.get<string>("rights:install-kind")==="employee";
+    if (privateBindings.some(({value})=>value.threadId===threadId) || store.get("chat:thread-project:"+threadId) ||
+        (!employee && (privateBindings.some(({value})=>value.projectId===projectId) ||
+          store.list<string>("chat:thread-project:").some(row=>row.value===projectId) || store.get("private:project:"+projectId))))
       throw Error("private_thread_or_project");
     const claim=store.get<string>("group:thread:"+threadId);
     if (claim && claim!==key) throw Error("thread_belongs_to_other_topic");

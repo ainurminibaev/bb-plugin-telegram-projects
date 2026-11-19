@@ -3,7 +3,7 @@ import type { GroupTopicPolicy } from "./ingress";
 import { privacyKey } from "./group-visibility";
 import type { Store, Telegram } from "./model";
 import {
-  accessList, defaultGroupSettings, groupSettings, hasAccess, saveGroupSettings, setAccess,
+  accessList, defaultGroupSettings, groupSettings, hasAccess, openGroupLock, saveGroupSettings, setAccess,
   type GroupSettings, type MembersMode,
 } from "./rights";
 
@@ -43,6 +43,9 @@ const MEMBERS_HINT: Record<MembersMode, string> = {
   propose: "Отвечаю, смотрю задачи и документы и предлагаю, что сделать. Делаю только с согласия того, кто может мне поручать.",
 };
 const NEXT_MEMBERS: Record<MembersMode, MembersMode> = { silent: "read", read: "propose", propose: "silent" };
+export const ASSISTANT_LOCK =
+  "Я личный помощник и работаю с личными файлами владельца. Пока для групп нет отдельного исполнителя под другим пользователем, обращаться ко мне здесь могут только те, кто может мне поручать.";
+const lockText = (lock?: "codex" | "assistant") => lock === "codex" ? CODEX_LOCK : lock === "assistant" ? ASSISTANT_LOCK : undefined;
 export const CODEX_LOCK =
   "Я работаю на Codex. Пока не проверено, что посторонний у меня ничего не изменит, обращаться ко мне здесь могут только те, кто может мне поручать.";
 
@@ -90,8 +93,8 @@ export function groupsScreen(store: Store, bot: number, botUsername: string, vis
   };
 }
 
-export function groupScreen(title: string, chat: number, s: GroupSettings, codex: boolean) {
-  const who = codex ? "access" : s.who;
+export function groupScreen(title: string, chat: number, s: GroupSettings, lock?: "codex" | "assistant") {
+  const who = lock ? "access" : s.who;
   const lines = [
     `Группа «${title}»`,
     "Ко мне обращаются: " + WHO_LINE[who],
@@ -101,10 +104,10 @@ export function groupScreen(title: string, chat: number, s: GroupSettings, codex
     "Можно рассказывать: " + (s.zones.length ? s.zones.join(", ") : "всё, что относится к работе группы"),
     "Заметка: " + (s.note || "—"),
     "Кто может мне поручать, всегда может попросить сделать что-то и ответить сюда.",
-    ...(codex ? ["", CODEX_LOCK] : []),
+    ...(lock ? ["", lockText(lock)!] : []),
   ];
   const rows: Button[][] = [
-    [{ text: codex ? WHO_BUTTON.access + " 🔒" : WHO_BUTTON[s.who], callback_data: `rs:w:${chat}` }],
+    [{ text: lock ? WHO_BUTTON.access + " 🔒" : WHO_BUTTON[s.who], callback_data: `rs:w:${chat}` }],
     [{ text: REPLY_BUTTON[s.reply], callback_data: `rs:r:${chat}` }],
     ...(who === "all" ? [[{ text: MEMBERS_BUTTON[s.members], callback_data: `rs:m:${chat}` }]] : []),
     [{ text: "Что можно рассказывать ›", callback_data: `rs:z:${chat}` }],
@@ -218,7 +221,7 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
       const s = saveGroupSettings(ctx.store, ctx.bot, waiting.chat, { note: text });
       ctx.store.del(awaitKey);
       await send(groupScreen(membership(ctx.store, ctx.bot, waiting.chat)?.title ?? "группа", waiting.chat, s,
-        (await providerOf(ctx, waiting.chat)) === "codex"));
+        openGroupLock(ctx.store, await providerOf(ctx, waiting.chat))));
       return true;
     }
     if (!allowed || !MENU.has(text)) return false;
@@ -276,11 +279,11 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
     return true;
   }
   const title = membership(ctx.store, ctx.bot, chat)?.title ?? "группа";
-  const codex = (await providerOf(ctx, chat)) === "codex";
+  const lock = openGroupLock(ctx.store, await providerOf(ctx, chat));
   let s = groupSettings(ctx.store, ctx.bot, chat) ?? defaultGroupSettings();
   if (action === "w") {
-    if (codex) {
-      await answer(CODEX_LOCK, true);
+    if (lock) {
+      await answer(lockText(lock), true);
       return true;
     }
     s = saveGroupSettings(ctx.store, ctx.bot, chat, { who: s.who === "access" ? "all" : "access" });
@@ -310,7 +313,7 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
     await answer();
     return true;
   } else if (action === "g") ctx.store.del(awaitKey);
-  await show(groupScreen(title, chat, s, codex));
+  await show(groupScreen(title, chat, s, lock));
   await answer();
   return true;
 }

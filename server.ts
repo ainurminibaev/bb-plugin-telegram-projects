@@ -21,7 +21,7 @@ import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
 import { acceptGroupUpdate, routeUpdate, skipExcludedForumUpdate } from "./ingress";
-import { accessList, accessModeKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, setAccess } from "./rights";
+import { accessList, accessModeKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, setAccess } from "./rights";
 import { handleConsentCallback, watchConsents } from "./consent";
 import { handleSetupUpdate, notifyGroupsAdded, welcomeScreen } from "./setup-screens";
 import { menuCommands } from "./commands";
@@ -273,6 +273,12 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Темы, которые можно отмечать для групп (по одной в строке)",
       default: "",
+    },
+    installKind: {
+      type: "select",
+      label: "Кто это: личный помощник или цифровой сотрудник",
+      options: ["assistant", "employee"],
+      default: "assistant",
     },
     accessPermissionMode: {
       type: "select",
@@ -1994,6 +2000,7 @@ export default async function plugin(bb: BbPluginApi) {
       while (!signal.aborted) {
         const cfg = await settings.get();
         store.put(accessModeKey, cfg.accessPermissionMode);
+        store.put(installKindKey, cfg.installKind);
         consentTtlMs = Math.max(1, Number(cfg.consentMinutes) || 30) * 60_000;
         if (botId() && ownerId()) migrateLegacyRights(store, botId()!, profilePeople());
         // Hold updates until the chat bridge exists, so none is consumed and lost.
