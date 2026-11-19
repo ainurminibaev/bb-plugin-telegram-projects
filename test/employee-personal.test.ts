@@ -68,6 +68,7 @@ test("one subject, two groups, private action scope and independent recipient gr
       return { message_id: sent.length } as T;
     };
   let seq = 50,
+    direct = false,
     revokeAtWrite = false,
     date = "2026-11-26";
   const run = (msg: any) =>
@@ -86,6 +87,13 @@ test("one subject, two groups, private action scope and independent recipient gr
             body.operations.map((x: any) => x.id),
             ["move", "close"],
           );
+          if (direct)
+            return {
+              kind: "direct",
+              operation: "move",
+              revision: 1,
+              item: "Card 17 → 2026-11-28",
+            };
           return {
             kind: "selection",
             operation: "move",
@@ -200,6 +208,37 @@ test("one subject, two groups, private action scope and independent recipient gr
     assert.equal(sent.at(-1).chat, A);
     assert.equal(sent.at(-1).message_thread_id, 7);
     assert.equal(sent.at(-1).reply_parameters.message_id, orig);
+    direct = true;
+    const writes = () => calls.filter((x) => x.path === "/action").length;
+    const beforeDirect = writes();
+    await request(A, here);
+    assert.equal(writes(), beforeDirect); // The operation still requires approval.
+    p.operations[0].approval = false;
+    p.approvers = [];
+    for (const [target, text, recipient] of [
+      [A, here, A],
+      [B, dm, 3],
+    ] as const) {
+      const before = sent.length;
+      await request(target, text);
+      assert.deepEqual(
+        sent.slice(before).map((m) => [m.chat, m.text]),
+        [[recipient, "https://board.invalid/cards/17"]],
+      );
+    }
+    assert.equal(writes(), beforeDirect + 2);
+    await request(A, here, 2);
+    await request(B, here);
+    assert.equal(writes(), beforeDirect + 2);
+    revokeAtWrite = true;
+    date = "2026-11-26";
+    await assert.rejects(request(A, here), /revoked before write/);
+    assert.equal(date, "2026-11-26");
+    p.personalGrants = [grant];
+    p.approvers = [3];
+    p.operations[0].approval = true;
+    revokeAtWrite = false;
+    direct = false;
     await request(B, dm);
     date = "2026-11-26";
     revokeAtWrite = true;
@@ -228,10 +267,39 @@ test("one subject, two groups, private action scope and independent recipient gr
     await accept(sent.length);
     assert.equal(sent.at(-1).chat, 3);
     assert.equal(sent.at(-1).text, "https://board.invalid/cards/17");
-    const writes = calls.filter((x) => x.path === "/action").length;
+    // Saved 0.9.25 limits have no personal field. An upgrade cannot enable new subjects.
+    const previousLimits = {
+      role: p.role,
+      admins: ["1"],
+      members: ["2", "3"],
+      sources: p.sources,
+      connections: p.connections,
+      operations: p.operations.map((x) => x.id),
+      approvers: ["3"],
+      events: [],
+      confirm: [],
+    };
+    rows.set("employee:5:limits", { revision: 4, selected: previousLimits });
+    const beforeUpgrade = calls.length;
+    await request(A, dm);
+    assert.equal(calls.length, beforeUpgrade);
+    rows.set("employee:5:limits", {
+      revision: 5,
+      selected: { ...previousLimits, personal: ["3"] },
+    });
+    await request(A, dm);
+    const pending = sent.length;
+    rows.set("employee:5:limits", {
+      revision: 6,
+      selected: { ...previousLimits, personal: [] },
+    });
+    const beforeRevokedChoice = calls.length;
+    await accept(pending);
+    assert.equal(calls.length, beforeRevokedChoice);
+    const beforeOrdinary = writes();
     await request(A, here, 2);
     assert.equal(sent.at(-1).text, "ordinary");
-    assert.equal(calls.filter((x) => x.path === "/action").length, writes);
+    assert.equal(writes(), beforeOrdinary);
   } finally {
     if (previous === undefined) delete process.env.BB_TELEGRAM_SOURCE_GRANTS;
     else process.env.BB_TELEGRAM_SOURCE_GRANTS = previous;

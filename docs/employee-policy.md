@@ -56,11 +56,22 @@ Version 0.9.25 adds an optional server-provisioned personal grant. Assign it onc
 {"personalGrants":[{"subject":103,"operations":["task.create.training"],"conversationSocket":"/run/employee-training/private-conversation.sock","allowHere":true}]}
 ```
 
-Each operation must already be in the employee catalog with a fixed resource, sources and resultHost. The subject must be an active employee member. For this version's write flow the subject must also be an eligible approver. The subject opens the bot's DM with /start once. A trusted Telegram sender ID, the active topic and a native mention address the request. A single explicit destination phrase such as «ответь мне в личку» or «ответь сюда» selects delivery. Forwarded messages, Telegram quote blocks and quoted instructions cannot initiate the personal lane.
+Each operation must already be in the employee catalog with a fixed resource, sources and resultHost. The subject must be an active employee member. For a write requiring confirmation the subject must also be an eligible approver. The subject opens the bot's DM with /start once. A trusted Telegram sender ID, the active topic and a native mention address the request. A single explicit destination phrase such as «ответь мне в личку» or «ответь сюда» selects delivery. Forwarded messages, Telegram quote blocks and quoted instructions cannot initiate the personal lane.
 
-The private conversation adapter receives scope=personal, principal, destination=dm|here, actor, originating chat/topic and its permitted operations/sources. Isolate this conversation from group history and other subjects. For a here request also isolate by audience and allowed source set, including for the same subject. Never retrieve other private material or reuse a DM transcript in the group answer. The adapter validates the specific project record, exact date and request wording. It can answer directly or return a versioned selection. Writes in this lane use selection, the subject's private confirmation and checkEmployeeWrite immediately before each write. The action call includes the principal and destination. The checked HTTPS result goes only to the subject's verified DM or the exact original group message. This version does not delegate a personal confirmation to a third person.
+The private conversation adapter receives scope=personal, principal, destination=dm|here, actor, originating chat/topic and its permitted operations/sources. Isolate this conversation from group history and other subjects. For a here request also isolate by audience and allowed source set, including for the same subject. Never retrieve other private material or reuse a DM transcript in the group answer. The adapter validates the specific project record, exact date and request wording. It can answer directly or return a versioned selection. Writes in this lane use a versioned item or selection and checkEmployeeWrite immediately before each write. The action call includes the principal and destination. The checked HTTPS result goes only to the subject's verified DM or the exact original group message. This version does not delegate a personal confirmation to a third person.
 
 For here delivery the subject must have allowHere and the independent administrator-owned BB_TELEGRAM_SOURCE_GRANTS file must allow the operation's sources for the exact bot:chat:topic. The bridge filters operations before reading, rechecks the set of conversational sources after preparing the response, checks before action dispatch, in the adapter's pre-write check, and again before delivery. A missing file or missing audience grant blocks disclosure. Group-wide tool rights are not changed. Test both recipients and the revocation race with `node_modules/.bin/tsx --test test/employee-personal.test.ts`.
+
+
+A private conversation adapter can return one fully specified instruction as
+`{"kind":"direct","operation":"move","revision":1,"item":"Card 17 → 2026-11-28"}`.
+The sender's personal grant must include that operation. If effective employee
+settings require approval, the bridge asks the eligible sender in their private
+chat. Otherwise it executes the single item immediately with the same adapter
+write check, verified result link and destination check. Return `selection` for
+a draft that needs user choice, even when it currently contains just one item.
+Group conversation adapters cannot request direct personal execution.
+
 
 ### Binary personal access
 
