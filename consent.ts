@@ -26,7 +26,7 @@ export type Consent = {
   expiresAt: number;
   decidedBy?: string;
 };
-type Job = { state: string; ownerId: number; route: { chatId: number; topicId: number; messageId: number; senderId: number; threadId: string } };
+type Job = { state: string; ownerId: number; route: { chatId: number; topicId: number; messageId: number; senderId: number; senderName?: string; threadId: string } };
 type Interaction = { id: string; status?: string; payload?: any };
 export type ConsentContext = {
   store: Store;
@@ -120,13 +120,12 @@ export async function watchConsents(ctx: ConsentContext) {
         .sort((a, b) => b.route.messageId - a.route.messageId)[0];
       if (!job) continue; // Not a group turn: BB itself shows the request to the owner.
       if (senderRole(ctx.store, ctx.bot, ctx.owner, job.route.chatId, job.route.senderId) === "access") continue;
-      const tg = ctx.tg(job.route.chatId);
-      const member = await tg<{ user?: { first_name?: string; last_name?: string } }>("getChatMember",
-        { chat_id: job.route.chatId, user_id: job.route.senderId }).catch(() => undefined);
+      const member = job.route.senderName ? undefined : await ctx.tg(job.route.chatId)<{ user?: { first_name?: string; last_name?: string } }>(
+        "getChatMember", { chat_id: job.route.chatId, user_id: job.route.senderId }).catch(() => undefined);
       const c: Consent = {
         interactionId: i.id, threadId, chatId: job.route.chatId, topicId: job.route.topicId, messageId: job.route.messageId,
         title: ctx.store.get<{ title?: string }>(`visibility:${ctx.bot}:group:${job.route.chatId}`)?.title ?? String(policy.chatId),
-        requester: [member?.user?.first_name, member?.user?.last_name].filter(Boolean).join(" ") || "Участник",
+        requester: job.route.senderName || [member?.user?.first_name, member?.user?.last_name].filter(Boolean).join(" ") || "Участник",
         what: describeInteraction(i.payload), kind: String(i.payload?.kind ?? ""),
         approvers: await approversFor(ctx, job.route.chatId), cards: [], state: "pending", expiresAt: now() + ctx.ttlMs,
       };
