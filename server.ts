@@ -23,6 +23,7 @@ import { StateTransfer } from "./state-transfer";
 import { acceptGroupUpdate, routeUpdate, skipExcludedForumUpdate } from "./ingress";
 import { accessList, accessModeKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, setAccess } from "./rights";
 import { handleConsentCallback, watchConsents } from "./consent";
+import { handleSetupUpdate, notifyGroupsAdded, welcomeScreen } from "./setup-screens";
 import { menuCommands } from "./commands";
 import {
   classifyThread,
@@ -263,6 +264,16 @@ export default async function plugin(bb: BbPluginApi) {
     isolatedGroupProject:{type:"string",label:"Проект отдельного группового исполнителя",default:""},
     isolatedFileHost:{type:"string",label:"Машина с рабочими файлами группового исполнителя",default:""},
     agencyEnabled: {type:"boolean",label:"Уведомления из Агентства",default:false},
+    employeeRole: {
+      type: "string",
+      label: "Одна строка о роли сотрудника для приветствия (пусто — личный помощник)",
+      default: "",
+    },
+    knowledgeZones: {
+      type: "string",
+      label: "Темы, которые можно отмечать для групп (по одной в строке)",
+      default: "",
+    },
     accessPermissionMode: {
       type: "select",
       label: "Режим хода для тех, кто может поручать (в группах)",
@@ -480,6 +491,15 @@ export default async function plugin(bb: BbPluginApi) {
     } catch { return []; }
   };
   let consentTtlMs = 30 * 60_000;
+  const setupContext = async (signal: AbortSignal) => {
+    const cfg = await settings.get();
+    return {
+      store, sdk: bb.sdk, bot: botId()!, owner: ownerId()!, botUsername: username || store.get<string>("bot:username") || "",
+      tg: (chat: number) => telegram(botToken, signal, 15_000, () => chat, apiRoot),
+      zones: String(cfg.knowledgeZones ?? "").split(/\n|,/).map((z: string) => z.trim()).filter(Boolean).slice(0, 30),
+      role: String(cfg.employeeRole ?? "").trim().slice(0, 300),
+    };
+  };
   const consentContext = (signal: AbortSignal) => ({
     store, sdk: bb.sdk, bot: botId()!, owner: ownerId()!, ttlMs: consentTtlMs, signal,
     tg: (chat: number) => telegram(botToken, signal, 15_000, () => chat, apiRoot),
@@ -691,6 +711,7 @@ export default async function plugin(bb: BbPluginApi) {
     const me = await checkBot(tg, botId());
     if (!botId()) store.put("bot:id", me.id);
     username = me.username;
+    store.put("bot:username", me.username);
     store.put(privacyKey(me.id), !me.readsAllGroups);
     if (!ownerId()) {
       lastError = "owner_not_paired";
@@ -715,6 +736,7 @@ export default async function plugin(bb: BbPluginApi) {
         store.put("commandsLanguage", signature);
     }
     username = me.username;
+    store.put("bot:username", me.username);
     topicsEnabled = me.topics;
     // A complete project snapshot is the only authority for removals. Failed reads never reconcile.
     const projects = (
@@ -1961,7 +1983,8 @@ export default async function plugin(bb: BbPluginApi) {
           signal.addEventListener("abort", done, { once: true });
         });
       const tg = telegram(botToken, signal, 40_000, ownerId, apiRoot);
-      const sendGroupVisibility = () => {
+      const sendGroupVisibility = async () => {
+        if (!legacyOperations) return notifyGroupsAdded(await setupContext(signal));
         const path=legacyOperations ? process.env.BB_TELEGRAM_EMPLOYEE_PROFILE : undefined;
         const profile=path ? readEmployeeProfile(path) : undefined;
         const managers=profile ? (profile.botId===botId() && profile.owner===ownerId() ? profile.admins : [])
@@ -2001,6 +2024,10 @@ export default async function plugin(bb: BbPluginApi) {
             const profilePath=legacyOperations ? process.env.BB_TELEGRAM_EMPLOYEE_PROFILE : undefined;
             const configured=profilePath!==undefined ? readEmployeeProfile(profilePath) : undefined;
             if (botId() && ownerId() && await handleConsentCallback(consentContext(signal), u)) {
+              store.put("ingress:offset", u.update_id + 1);
+              continue;
+            }
+            if (!legacyOperations && botId() && ownerId() && await handleSetupUpdate(await setupContext(signal), u)) {
               store.put("ingress:offset", u.update_id + 1);
               continue;
             }
@@ -2048,6 +2075,9 @@ export default async function plugin(bb: BbPluginApi) {
                 const p=readEmployeeProfile(profilePath);
                 if(p.botId===botId() && p.owner===route.userId)
                   await tg("sendMessage",employeeHome(store,p));
+              } else if (!legacyOperations && botId()) {
+                const setup=await setupContext(signal);
+                if (setup.role) await tg("sendMessage",{chat_id:route.userId,...welcomeScreen(setup)});
               }
               wake?.();
             } else if (route.kind === "chat" && cfg.chatEnabled && bridge) {
