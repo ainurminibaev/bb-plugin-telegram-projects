@@ -49,8 +49,8 @@ const lockText = (lock?: "codex" | "assistant") => lock === "codex" ? CODEX_LOCK
 export const CODEX_LOCK =
   "Я работаю на Codex. Пока не проверено, что посторонний у меня ничего не изменит, обращаться ко мне здесь могут только те, кто может мне поручать.";
 
-export function shortState(s: GroupSettings) {
-  return s.who === "all" && s.members !== "silent" ? "отвечаю всем" : "отвечаю только своим";
+export function shortState(s: GroupSettings, locked = false) {
+  return !locked && s.who === "all" && s.members !== "silent" ? "отвечаю всем" : "отвечаю только своим";
 }
 
 export function welcomeScreen(ctx: Pick<SetupContext, "role" | "botUsername">) {
@@ -87,7 +87,7 @@ export function groupsScreen(store: Store, bot: number, botUsername: string, vis
   return {
     text: "Группы, где я есть:",
     reply_markup: { inline_keyboard: groups.map((g) => [{
-      text: `${g.title} — ${shortState(groupSettings(store, bot, g.chat) ?? defaultGroupSettings())}`,
+      text: `${g.title} — ${shortState(groupSettings(store, bot, g.chat) ?? defaultGroupSettings(), openGroupLock(store) === "assistant")}`,
       callback_data: "rs:g:" + g.chat,
     }]) },
   };
@@ -149,7 +149,7 @@ export async function notifyGroupsAdded(ctx: SetupContext) {
     const s = groupSettings(ctx.store, ctx.bot, g.chat) ?? defaultGroupSettings();
     const lines = [s.version === 0
       ? `Меня добавили в «${g.title}». Пока я отвечаю здесь только тем, кто может мне поручать, и только когда меня отметят.`
-      : `Я в «${g.title}». Сейчас ${shortState(s)}.`];
+      : `Я в «${g.title}». Сейчас ${shortState(s, openGroupLock(ctx.store) === "assistant")}.`];
     if (!visible)
       lines.push(`Сейчас я вижу в «${g.title}» только сообщения, где меня отметили. Чтобы я понимал обсуждение, сделайте меня администратором группы.`);
     try {

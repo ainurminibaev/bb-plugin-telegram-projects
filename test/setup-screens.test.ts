@@ -133,9 +133,12 @@ test("the welcome tells the owner what to do next",()=>{
 test("a personal assistant keeps «only who may give tasks» and says why",async()=>{
   const h=harness();
   h.store.put("rights:install-kind","assistant");
+  h.store.put(`rights:${BOT}:group:${CHAT}`,{version:1,who:"all",reply:"auto",members:"read",zones:[],note:""});
+  await h.say(OWNER,"Мои группы");
+  assert.match(visibleText(h.last("sendMessage")),/Склад — отвечаю только своим/);
   await h.tap(OWNER,`rs:g:${CHAT}`);
   assert.match(h.last("editMessageText").text,/личный помощник/);
   await h.tap(OWNER,`rs:w:${CHAT}`);
-  assert.equal(groupSettings(h.store as any,BOT,CHAT),undefined);
+  assert.equal(groupSettings(h.store as any,BOT,CHAT)!.version,1,"nothing is saved");
   assert.equal(h.last("answerCallbackQuery").show_alert,true);
 });
