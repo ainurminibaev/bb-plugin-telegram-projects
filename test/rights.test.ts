@@ -20,7 +20,7 @@ function boundStore(){
   store.put("rights:install-kind","employee");
   return store;
 }
-const message=(id:number,from:number,text:string)=>({update_id:id,message:{message_id:100+id,chat:{type:"supergroup",id:CHAT},from:{id:from,first_name:from===STRANGER?"Лена":"Айнур"},message_thread_id:TOPIC,text}});
+const message=(id:number,from:number,text:string)=>({update_id:id,message:{message_id:100+id,chat:{type:"supergroup",id:CHAT},from:{id:from,first_name:from===STRANGER?"Лена":"Олег"},message_thread_id:TOPIC,text}});
 
 test("people with access, strangers and Codex employees get distinct roles",()=>{
   const store=memoryStore();
@@ -59,7 +59,7 @@ test("a stranger's turn runs in the strict mode with the group rules as text",as
   const store=boundStore();
   saveGroupSettings(store as any,BOT,CHAT,{who:"all",reply:"auto",members:"read",zones:["Сроки задач"],note:"здесь кладовщики"});
   store.put(accessModeKey,"full");
-  assert.ok(acceptGroupUpdate(store as any,message(1,STRANGER,"какой срок у SVO-62?"),OWNER,BOT));
+  assert.ok(acceptGroupUpdate(store as any,message(1,STRANGER,"какой срок у TASK-7?"),OWNER,BOT));
   assert.ok(acceptGroupUpdate(store as any,message(2,OWNER,"поменяй срок и ответь сюда"),OWNER,BOT));
   const sends:any[]=[];
   const sdk={threads:{get:async()=>({id:"t",projectId:"group-project",visibility:"visible",providerId:"claude-code"}),
@@ -103,7 +103,7 @@ test("former employee group rules move once into access and group settings",()=>
 });
 
 test("rules text tells the agent who writes and what the note is",()=>{
-  const text=rulesNote({title:"Склад",role:"access",senderName:"Айнур"});
+  const text=rulesNote({title:"Склад",role:"access",senderName:"Олег"});
   assert.match(text,/только те, кто может тебе поручать/);
   assert.match(text,/один раз переспроси/);
 });
@@ -112,11 +112,11 @@ test("consent requests are human, go to admins with access, and the first answer
   const store=boundStore();
   setAccess(store as any,BOT,[{id:LENA,name:"Лена"}]);
   saveGroupSettings(store as any,BOT,CHAT,{who:"all",reply:"auto",members:"propose"});
-  assert.ok(acceptGroupUpdate(store as any,message(1,STRANGER,"поменяй срок SVO-62"),OWNER,BOT));
+  assert.ok(acceptGroupUpdate(store as any,message(1,STRANGER,"поменяй срок TASK-7"),OWNER,BOT));
   const job=store.list<any>(`group:in:${BOT}:`)[0];
   store.put(job.key,{...job.value,state:"submitted"});
   const pending=[{id:"pint_1",status:"pending",payload:{kind:"approval",subject:{kind:"permission_grant",toolName:"mcp__yougile__update_task"},
-    reason:"действие update_task в yougile: id=SVO-62, deadline=2026-12-01"}}];
+    reason:"действие update_task в yougile: id=TASK-7, deadline=2026-12-01"}}];
   const resolved:any[]=[];
   const sent:any[]=[];
   const admins=new Set([OWNER]);
@@ -133,15 +133,15 @@ test("consent requests are human, go to admins with access, and the first answer
   const cards=sent.filter(([,m])=>m==="sendMessage");
   assert.equal(cards.length,1,"only the owner administers this group");
   assert.equal(cards[0][0],OWNER);
-  assert.match(cards[0][2].text,/Лена \(может только спрашивать\) в группе «Склад» просит: действие update_task в yougile: id=SVO-62, deadline=2026-12-01\. Разрешить\?/);
+  assert.match(cards[0][2].text,/Лена \(может только спрашивать\) в группе «Склад» просит: действие update_task в yougile: id=TASK-7, deadline=2026-12-01\. Разрешить\?/);
   await watchConsents(ctx);
   assert.equal(sent.filter(([,m])=>m==="sendMessage").length,1,"no duplicate cards");
   assert.equal(await handleConsentCallback(ctx,{callback_query:{id:"c1",from:{id:LENA,first_name:"Лена"},data:"rc:y:pint_1"}}),true);
   assert.equal(resolved.length,0,"a person who does not administer the group cannot decide");
-  await handleConsentCallback(ctx,{callback_query:{id:"c2",from:{id:OWNER,first_name:"Айнур"},data:"rc:y:pint_1"}});
+  await handleConsentCallback(ctx,{callback_query:{id:"c2",from:{id:OWNER,first_name:"Олег"},data:"rc:y:pint_1"}});
   assert.deepEqual(resolved[0].resolution,{decision:"allow_once",grantedPermissions:null});
-  assert.match(sent.filter(([,m])=>m==="editMessageText").at(-1)[2].text,/Разрешил Айнур/);
-  await handleConsentCallback(ctx,{callback_query:{id:"c3",from:{id:OWNER,first_name:"Айнур"},data:"rc:n:pint_1"}});
+  assert.match(sent.filter(([,m])=>m==="editMessageText").at(-1)[2].text,/Разрешил Олег/);
+  await handleConsentCallback(ctx,{callback_query:{id:"c3",from:{id:OWNER,first_name:"Олег"},data:"rc:n:pint_1"}});
   assert.equal(resolved.length,1,"the first answer wins");
 });
 
@@ -152,7 +152,7 @@ test("an unanswered consent closes with one line in the group",async()=>{
   const job=store.list<any>(`group:in:${BOT}:`)[0];
   store.put(job.key,{...job.value,state:"submitted"});
   const pending=[{id:"pint_2",status:"pending",payload:{kind:"provider-codex/mcp-elicitation",data:{serverName:"probe",toolName:"update_card",
-    params:[{name:"id",label:"id",value:"SVO-62"}]}}}];
+    params:[{name:"id",label:"id",value:"TASK-7"}]}}}];
   const responded:any[]=[];
   const sent:any[]=[];
   const tg=(chat:number)=>(async(method:string,p:any)=>{sent.push([chat,method,p]);

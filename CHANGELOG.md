@@ -1,3 +1,7 @@
+# 0.9.34
+
+Rights in three layers. What the bot may do is set once at install (assistant or employee); who may give it tasks is an access list kept by the owner; each group is set up separately with buttons and a note that grants no access. Strangers in a group can address an employee only if the group allows it; their turns run in the restricted mode and actions they ask for wait for consent of a person with access, phrased in plain words and expiring after a set time. Codex installs and the personal assistant never open a group to strangers and say so to the admin. Setup screens replace the old operations menu (the old menu stays only with BB_TELEGRAM_LEGACY_OPERATIONS=1). An employee keeps its private chat and groups in one project and one folder. The welcome screen shows the bot's group privacy mode and asks to turn it off in BotFather; when it is off, the group notice says plainly that the bot sees all messages and handles only what the group settings allow.
+
 # 0.9.33
 
 A group answer of exactly NO_REPLY stays silent in any group turn. A scheduled check does exactly its own task, re-reads its tools first and ignores the conditions of other requests in the topic.

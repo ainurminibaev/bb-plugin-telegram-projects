@@ -2084,7 +2084,7 @@ export default async function plugin(bb: BbPluginApi) {
                   await tg("sendMessage",employeeHome(store,p));
               } else if (!legacyOperations && botId()) {
                 const setup=await setupContext(signal);
-                if (setup.role) await tg("sendMessage",{chat_id:route.userId,...welcomeScreen(setup)});
+                if (setup.role) await tg("sendMessage",{chat_id:route.userId,...welcomeScreen({...setup,privacy:store.get<boolean>(privacyKey(botId()!))})});
               }
               wake?.();
             } else if (route.kind === "chat" && cfg.chatEnabled && bridge) {
