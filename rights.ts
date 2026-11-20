@@ -41,6 +41,12 @@ export function openGroupLock(store: Store, provider?: string): "codex" | "assis
   return installKind(store) === "assistant" ? "assistant" : undefined;
 }
 
+export const memberProvider = "acp-botsman-group";
+export function groupThreadFor(store: Store, policy: GroupTopicPolicy, owner: number, sender: number) {
+  return policy.memberThreadId && !hasAccess(store, policy.botId, owner, sender)
+    ? policy.memberThreadId : policy.threadId;
+}
+
 export function accessList(store: Store, bot: number): Person[] {
   return store.get<Person[]>(accessKey(bot)) ?? [];
 }

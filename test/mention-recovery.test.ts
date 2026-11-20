@@ -102,3 +102,24 @@ esac
   assert.equal(store.get<{sentId:number}>("group:receipt:52:-1")?.sentId,93);
   assert.equal(run("queue"),"already_handled");
 });
+
+test("member recovery uses only the bound member thread with a current grant",async()=>{
+  const {store,policy,run}=fixture();
+  const {saveGroupSettings,groupThreadFor,setAccess}=await import("../rights");
+  const binding={...policy,memberThreadId:"member-thread"};
+  store.put(bindingKey,binding);
+  store.put("rights:install-kind","employee");
+  store.put("group:thread:member-thread",bindingKey);
+  run("select");
+  assert.throws(()=>run("queue"),/permitted/);
+  saveGroupSettings(store,bot,source.chatId,{who:"all",members:"read",reply:"mention"});
+  assert.equal(groupThreadFor(store,binding,owner,owner),"t");
+  setAccess(store,bot,[{id:555,name:"authorised"}]);
+  assert.equal(groupThreadFor(store,binding,owner,555),"t");
+  assert.equal(run("queue"),"queued");
+  assert.equal(run("queue"),"already_handled");
+  const jobs=store.list<{route:{threadId:string,senderId:number}}>("group:in:");
+  assert.equal(jobs.length,1);
+  assert.equal(jobs[0].value.route.threadId,"member-thread");
+  assert.equal(jobs[0].value.route.senderId,sender);
+});

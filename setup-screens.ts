@@ -173,7 +173,7 @@ async function providerOf(ctx: SetupContext, chat: number) {
   const binding = ctx.store.list<GroupTopicPolicy>(`group:policy:${chat}:`).map((r) => r.value).find((p) => p.botId === ctx.bot);
   if (!binding?.threadId || !ctx.sdk) return undefined;
   try {
-    return ((await ctx.sdk.threads.get({ threadId: binding.threadId })) as { providerId?: string }).providerId;
+    return ((await ctx.sdk.threads.get({ threadId: binding.memberThreadId ?? binding.threadId })) as { providerId?: string }).providerId;
   } catch { return undefined; }
 }
 

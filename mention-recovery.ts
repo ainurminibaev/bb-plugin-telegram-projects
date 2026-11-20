@@ -1,5 +1,6 @@
 import type {Store} from "./model";
 import {canInvokeGroup, type GroupTopicPolicy, type Ingress} from "./ingress";
+import {effectiveGroupPolicy,groupThreadFor,senderRole,memberProvider} from "./rights";
 import {syntheticUpdateId} from "./group-result";
 import {historyCutoff, historyPrefix, type TopicRecord} from "./topic-search";
 import {sourcesVisible} from "./source-access";
@@ -52,11 +53,16 @@ export function recoverMention(store:Store, action:"select"|"queue"|"discard", o
     const row=selected.row;
     if (current && (current.sender!==row.sender || current.text!==row.text || current.date!==row.date || current.directMention===false))
       throw Error("source_changed");
-    if (!p.isolated || !executor || executor.threadId!==p.threadId || executor.projectId!==p.projectId ||
-        !canInvokeGroup(p,owner,row.sender) || !sourcesVisible(p.deliverySources,bot,chatId,topicId))
+    const memberThread=groupThreadFor(store,p,owner,row.sender);
+    const localMember=!!p.memberThreadId && memberThread===p.memberThreadId &&
+      !p.isolated && store.get("group:thread:"+memberThread)===bindingKey &&
+      senderRole(store,bot,owner,chatId,row.sender,memberProvider)==="member";
+    const isolated=p.isolated && executor && executor.threadId===p.threadId && executor.projectId===p.projectId;
+    if (!(localMember || isolated) ||
+        !canInvokeGroup(effectiveGroupPolicy(store,p,owner),owner,row.sender) || !sourcesVisible(p.deliverySources,bot,chatId,topicId))
       throw Error("permitted_isolated_executor_required");
     const updateId=syntheticUpdateId(store);
-    const route:Route={kind:"group",...source,threadId:p.threadId,senderId:row.sender,
+    const route:Route={kind:"group",...source,threadId:memberThread,senderId:row.sender,
       senderName:row.name,text:row.text,updateId};
     store.put(`group:in:${bot}:${updateId}`,{route,revision:p.revision,ownerId:owner,state:"pending"});
     store.put("group:mention-queued:"+id,true);

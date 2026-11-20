@@ -13,7 +13,7 @@ import {refersToExamples, promisesExamples, canInvokeGroup, type GroupTopicPolic
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
-import {accessModeKey,groupSettings,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
+import {groupThreadFor,memberProvider,accessModeKey,groupSettings,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
 type Job = {
@@ -38,11 +38,20 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
         (!employee && (privateBindings.some(({value})=>value.projectId===projectId) ||
           store.list<string>("chat:thread-project:").some(row=>row.value===projectId) || store.get("private:project:"+projectId))))
       throw Error("private_thread_or_project");
+    if (policy.memberThreadId) {
+      const member = policy.memberThreadId;
+      if (!employee || policy.isolated || member === threadId ||
+          privateBindings.some(({value})=>value.threadId===member) || store.get("chat:thread-project:"+member))
+        throw Error("separate_group_member_thread_required");
+      const memberClaim = store.get<string>("group:thread:"+member);
+      if (memberClaim && memberClaim !== key) throw Error("thread_belongs_to_other_topic");
+      store.put("group:thread:"+member,key);
+    }
     const claim=store.get<string>("group:thread:"+threadId);
     if (claim && claim!==key) throw Error("thread_belongs_to_other_topic");
     store.put("group:project:"+projectId,true);
     const prev=store.get<GroupTopicPolicy>(key);
-    if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly &&
+    if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.memberThreadId===policy.memberThreadId && prev.ownerOnly===policy.ownerOnly &&
         JSON.stringify(prev.deliverySources??[])===JSON.stringify(policy.deliverySources??[]) &&
         prev.requireMention===policy.requireMention && prev.botId===policy.botId &&
         !!prev.retainFullHistory===!!policy.retainFullHistory && !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
@@ -89,7 +98,7 @@ export function groupTyping(store:Store, owner:()=>number|undefined, bot:()=>num
       const key=`group:policy:${r.chatId}:${r.topicId}`;
       const policy=store.get<GroupTopicPolicy>(key);
       if (policy?.botId===botId && job.ownerId===ownerId && (policy.ownerId===undefined || policy.ownerId===ownerId) &&
-          policy.revision===job.revision && policy.threadId===r.threadId && (policy.isolated===true ? canInvokeGroup(policy,ownerId,r.senderId) : senderRole(store,botId,ownerId,r.chatId,r.senderId)!=="none"))
+          policy.revision===job.revision && groupThreadFor(store,policy,ownerId,r.senderId)===r.threadId && (policy.isolated===true ? canInvokeGroup(policy,ownerId,r.senderId) : senderRole(store,botId,ownerId,r.chatId,r.senderId)!=="none"))
         topics.set(key,r);
     }
     if (!topics.size) return;
@@ -151,18 +160,21 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     const allowed=()=>{
       const p=store.get<GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`);
       sourceDenied=!sourcesVisible(p?.deliverySources,botId,r.chatId,r.topicId);
-      return !sourceDenied && p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && p.threadId===r.threadId &&
+      return !sourceDenied && p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && groupThreadFor(store,p,job.ownerId,r.senderId)===r.threadId &&
         owner===job.ownerId && (p.isolated===true ? canInvokeGroup(p,owner,r.senderId) : senderRole(store,botId,owner,r.chatId,r.senderId)!=="none");
     };
     if (!allowed()) {finish("revoked");continue;}
     const topicKey = `group:policy:${r.chatId}:${r.topicId}`;
     const policy=store.get<GroupTopicPolicy>(topicKey)!;
+    const memberRoute = r.threadId === policy.memberThreadId;
     const executor=policy.isolated ? groupExecutor(r.chatId,r.topicId) : undefined;
     if (policy.isolated && (!executor || executor.projectId!==policy.projectId || executor.threadId!==r.threadId)) {
       finish("revoked");continue;
     }
     const belongsToGroup = (thread: Awaited<ReturnType<typeof sdk.threads.get>>) => {
       const binding = store.get<GroupTopicPolicy>(topicKey);
+      const provider = (thread as {providerId?:string}).providerId;
+      if (memberRoute && provider !== memberProvider) return false;
       return allowed() && thread.id === r.threadId && !thread.archivedAt && !thread.deletedAt &&
         thread.visibility === "visible" && !!thread.projectId &&
         store.get("group:thread:" + r.threadId) === topicKey &&
@@ -219,7 +231,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       }
       if (r.waitUntil!==undefined) {delete r.waitUntil;store.put(key,job);}
     }
-    if (visibleProgress && r.updateId>0 && job.state==="pending" && job.progressId===undefined) {
+    if (!memberRoute && visibleProgress && r.updateId>0 && job.state==="pending" && job.progressId===undefined) {
       // A lost Telegram acknowledgement must not create a second status on restart.
       job.progressId=null;
       store.put(key,job);
@@ -231,6 +243,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       } catch { /* A status failure must not stop the actual reply. */ }
       if (!allowed()) {finish("revoked");continue;}
     }
+    if (memberRoute) delete r.examples;
     if (job.state==="pending" && r.examples?.length) {
       try {
         if (!receiveExample) throw Error("missing_receiver");
@@ -292,7 +305,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       if (!belongsToGroup(thread)) {finish("revoked");continue;}
       const provider=(thread as {providerId?:string}).providerId;
       const role=senderRole(store,botId,owner,r.chatId,r.senderId,provider);
-      if (role==="none") {finish("revoked");continue;}
+      if (role==="none" || (role==="member" && !memberRoute && provider!=="claude-code")) {finish("revoked");continue;}
       const settings=groupSettings(store,botId,r.chatId);
       const title=store.get<{title?:string}>(`visibility:${botId}:group:${r.chatId}`)?.title ?? "эта группа";
       const senderName=r.senderName ?? "участник";
@@ -306,7 +319,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       store.put(key,job);
       // The mode persists for later messages of the thread, so every group message sets it.
       await sdk.threads.send({threadId:r.threadId,mode:"queue-if-active",permissionMode,
-        input:[{type:"text",text:r.text,mentions:[]},marker,{type:"text" as const,visibility:"agent-only" as const,text:rules,mentions:[]},
+        input:[{type:"text",text:memberRoute ? "BOTSMAN_GROUP_TEXT_V1\n"+r.text : r.text,mentions:[]},marker,{type:"text" as const,visibility:"agent-only" as const,text:rules,mentions:[]},
           ...(taskNote ? [{type:"text" as const,visibility:"agent-only" as const,text:taskNote,mentions:[]}] : [])]});
     }
     if (job.state==="submitted") {
@@ -340,7 +353,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       if (!allowed()) {finish("revoked");continue;}
       if (!executor && !belongsToGroup(await sdk.threads.get({threadId:r.threadId,signal}))) {finish("revoked");continue;}
       let text=job.answer!;
-      const links=localArtifacts(text).filter(link=>/\.pdf$/i.test(link.path));
+      const links=memberRoute ? [] : localArtifacts(text).filter(link=>/\.pdf$/i.test(link.path));
       const paths=[...new Set(links.map(link=>link.path))];
       for (let i=job.pdfIndex??0;i<paths.length;i++) {
         let pdf;

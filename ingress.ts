@@ -1,6 +1,6 @@
 import {historyCutoff,historyPrefix,topicPassages} from "./topic-search";
 import type { Store } from "./model";
-import { effectiveGroupPolicy } from "./rights";
+import { effectiveGroupPolicy, groupThreadFor } from "./rights";
 import type { ChatInput } from "./chat";
 
 export type GroupTopicPolicy = {
@@ -10,6 +10,7 @@ export type GroupTopicPolicy = {
   chatId: number;
   topicId: number;
   threadId: string;
+  memberThreadId?: string;
   ownerOnly: boolean;
   requireMention: boolean;
   allowedSenderIds?: number[];
@@ -236,6 +237,7 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       return;
     }
     const route = routeUpdate(update, owner, undefined, policy);
+    if (route.kind === "group") route.threadId = groupThreadFor(store, policy, owner, route.senderId);
     if (guest && (!policy.requireMention || route.kind!=="group" ||
         !message.entities?.some((e:any)=>e.type==="mention" &&
           message.text.slice(e.offset,e.offset+e.length).toLowerCase()==="@"+policy.botUsername.toLowerCase()))) return;

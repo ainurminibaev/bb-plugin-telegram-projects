@@ -139,7 +139,7 @@ export const rpcContract = defineRpcContract({
   channelPost:{input:channelPostSchema,output:z.object({messageId:z.number().int().positive()})},
   bindGroupTopic: {
     input: z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative(),
-      threadId:z.string().min(1),ownerOnly:z.boolean(),requireMention:z.boolean(),
+      threadId:z.string().min(1),memberThreadId:z.string().min(1).optional(),ownerOnly:z.boolean(),requireMention:z.boolean(),
       deliverySources:z.array(z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)).max(100).optional(),
       allowedSenderIds:z.array(z.number().int().positive().safe()).max(100).optional(),includeTopicContext:z.boolean().optional(),searchableHistory:z.boolean().optional(),retainFullHistory:z.boolean().optional()}).strict(),
     output:z.object({bound:z.literal(true),warning:z.string().optional()}),
@@ -1357,7 +1357,7 @@ export default async function plugin(bb: BbPluginApi) {
       try { return await channelPost(store,tg,owner,bot,current.managedChannels,args); }
       finally { activeChannelWrites--; }
     },
-    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,allowedSenderIds,deliverySources,includeTopicContext,searchableHistory,retainFullHistory})=>{
+    bindGroupTopic: async ({chatId,topicId,threadId,memberThreadId,ownerOnly,requireMention,allowedSenderIds,deliverySources,includeTopicContext,searchableHistory,retainFullHistory})=>{
       const owner=ownerId(), bot=botId();
       if (!owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
       const tg=telegram(botToken,lifetime.signal,15_000,()=>chatId,apiRoot);
@@ -1383,7 +1383,12 @@ export default async function plugin(bb: BbPluginApi) {
       if (!thread.projectId || ("visibility" in thread && (thread.archivedAt || thread.deletedAt || thread.visibility==="hidden")))
         throw Error("thread_unavailable");
       if (owner!==ownerId() || bot!==botId() || stateTransferBusy) throw Error("bot_changed");
-      bindGroupTopic(store,{deliverySources:deliverySources ? [...new Set(deliverySources)].sort() : store.get<{deliverySources?:string[]}>(`group:policy:${chatId}:${topicId}`)?.deliverySources,isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
+      if (memberThreadId) {
+        const member = await bb.sdk.threads.get({threadId:memberThreadId});
+        if (member.projectId!==thread.projectId || member.archivedAt || member.deletedAt || member.visibility!=="visible" ||
+            (member as {providerId?:string}).providerId!=="acp-botsman-group") throw Error("verified_member_thread_required");
+      }
+      bindGroupTopic(store,{memberThreadId,deliverySources:deliverySources ? [...new Set(deliverySources)].sort() : store.get<{deliverySources?:string[]}>(`group:policy:${chatId}:${topicId}`)?.deliverySources,isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},thread.projectId);
       return warning ? {bound:true as const,warning} : {bound:true as const};
     },
