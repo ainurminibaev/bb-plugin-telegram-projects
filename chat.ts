@@ -516,7 +516,9 @@ export class ChatBridge {
   }
   private binding(topicId: number): Binding | undefined {
     const old = this.s.get<Binding>("chat:binding:" + topicId);
-    if (old) return this.s.get("group:project:"+old.projectId) ? undefined : old;
+    // An employee's private chat and groups share one project; a personal assistant keeps them apart.
+    const employee = this.s.get("rights:install-kind") === "employee";
+    if (old) return this.s.get("group:project:"+old.projectId) && !employee ? undefined : old;
     const topic = this.s
       .list<Topic>("topic:")
       .find(
@@ -525,7 +527,7 @@ export class ChatBridge {
           x.value.key.startsWith("proj_") &&
           !x.value.missingSince,
       )?.value;
-    if (!topic || this.s.get("group:project:"+topic.key)) return;
+    if (!topic || (this.s.get("group:project:"+topic.key) && !employee)) return;
     const b: Binding = {
       topicId,
       projectId: topic.key,
