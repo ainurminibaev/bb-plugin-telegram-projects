@@ -120,7 +120,8 @@ test("the administrator is told once when the bot joins a group, with the visibi
   assert.equal(notes.length,1);
   assert.equal(notes[0].chat_id,OWNER,"the inviter cannot give tasks, so the owner is told");
   assert.match(notes[0].text,/Меня добавили в «Склад»/);
-  assert.match(notes[0].text,/сделайте меня администратором группы/);
+  assert.match(notes[0].text,/отметки через @ до меня не доходят/);
+  assert.match(notes[0].text,/ответьте на любое моё сообщение/);
   assert.deepEqual(notes[0].reply_markup.inline_keyboard[0].map((b:any)=>b.text),["Настроить «Склад»","Оставить так"]);
 });
 

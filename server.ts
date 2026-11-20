@@ -1371,7 +1371,7 @@ export default async function plugin(bb: BbPluginApi) {
       if ((includeTopicContext || requireMention) && !me.readsAllGroups) {
         const self=await tg("getChatMember",{chat_id:chatId,user_id:bot});
         if (!["creator","administrator"].includes(self.status)) {
-          warning="Telegram ограничивает видимость сообщений в этой группе. Для обычного @упоминания назначьте бота администратором только здесь. До этого используйте /ask@"+me.username+" или ответ на сообщение бота.";
+          warning="Пока бот в этой группе обычный участник, Telegram показывает ему только ответы на его сообщения и команды для него; отметки через @ до него не доходят. Чтобы бота можно было просто отметить, сделайте его администратором группы (права можно не давать). До этого обращайтесь ответом на его сообщение.";
           if (includeTopicContext) throw Error(warning);
         }
       }

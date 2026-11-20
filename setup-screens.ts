@@ -148,10 +148,10 @@ export async function notifyGroupsAdded(ctx: SetupContext) {
     const recipient = g.inviter && hasAccess(ctx.store, ctx.bot, ctx.owner, g.inviter) ? g.inviter : ctx.owner;
     const s = groupSettings(ctx.store, ctx.bot, g.chat) ?? defaultGroupSettings();
     const lines = [s.version === 0
-      ? `Меня добавили в «${g.title}». Пока я отвечаю здесь только тем, кто может мне поручать, и только когда меня отметят.`
+      ? `Меня добавили в «${g.title}». Пока я отвечаю здесь только тем, кто может мне поручать, и только когда обращаются ко мне.`
       : `Я в «${g.title}». Сейчас ${shortState(s, openGroupLock(ctx.store) === "assistant")}.`];
     if (!visible)
-      lines.push(`Сейчас я вижу в «${g.title}» только сообщения, где меня отметили. Чтобы я понимал обсуждение, сделайте меня администратором группы.`);
+      lines.push(`Пока я обычный участник, Telegram показывает мне в «${g.title}» только ответы на мои сообщения и команды для меня. Обычные сообщения и отметки через @ до меня не доходят: чтобы обратиться, ответьте на любое моё сообщение. Если сделать меня администратором группы (права можно не давать), я увижу обсуждение и меня можно будет просто отметить.`);
     try {
       await ctx.tg(recipient)("sendMessage", { chat_id: recipient, text: lines.join("\n"), reply_markup: { inline_keyboard: [[
         { text: `Настроить «${g.title}»`, callback_data: "rs:g:" + g.chat },
