@@ -1,3 +1,4 @@
+import {recoverMention} from "./mention-recovery";
 import { privacyKey, privacySummary, rememberMembership, sendVisibilityUpdates } from "./group-visibility";
 import {reconcileEmployeeTicket,employeeHome,employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
 import {proposalInput,presentProposal,handleOwnerSelection,collectDecisionResults,presentProjectProposals} from "./owner-selection";
@@ -421,7 +422,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (!String(error).includes("no such module: fts5")) throw error;
   }
   const forgetExamples=db.prepare("DELETE FROM state WHERE key GLOB 'group:recent-files:*' AND json_extract(value,'$.expiresAt')<=?");
-  const purgeHistory=()=>{history?.prune();forgetExamples.run(Date.now());};
+  const forgetMentions=db.prepare("DELETE FROM state WHERE key GLOB 'group:mention-recovery:*' AND json_extract(value,'$.expires')<=?");
+  const purgeHistory=()=>{history?.prune();forgetExamples.run(Date.now());forgetMentions.run(Date.now());};
   purgeHistory();
   const historyTimer=setInterval(purgeHistory,3600_000);
   const store: Store = {
@@ -1589,6 +1591,11 @@ export default async function plugin(bb: BbPluginApi) {
     summary: "BB project topics, chats and Tasks notifications in Telegram",
     commands: [
       {
+        name:"recover-mention",
+        summary:"Recover an operator-reviewed unanswered group mention in its isolated executor",
+        usage:"bb telegram-projects recover-mention select|queue|discard <chat-id> <topic-id> <message-id>",
+      },
+      {
         name:"search-history",
         summary:"Search messages received in the current bound group or topic",
         usage:"bb telegram-projects search-history <words>",
@@ -1634,6 +1641,16 @@ export default async function plugin(bb: BbPluginApi) {
     async run(argv,ctx) {
       if (argv[0] !== "search-history" && groupCliRestricted(store, ctx.projectId, ctx.threadId))
         return {exitCode: 1, stderr: "bridge_admin_command_unavailable_in_group"};
+      if (argv[0]==="recover-mention") {
+        if (ctx.threadId || argv.length!==5) return {exitCode:1,stderr:"administrative_terminal_required"};
+        const [,action,chat,topic,message]=argv;
+        if (action!=="select" && action!=="queue" && action!=="discard") return {exitCode:1,stderr:"invalid_action"};
+        const source={chatId:Number(chat),topicId:Number(topic),messageId:Number(message)};
+        const owner=ownerId(),bot=botId();
+        if (!owner || !bot) return {exitCode:1,stderr:"bot_unavailable"};
+        const executor=action==="queue" ? groupExecutor(source.chatId,source.topicId) : undefined;
+        return {exitCode:0,stdout:recoverMention(store,action,owner,bot,source,executor)};
+      }
       if(argv[0]==="search-history"){
         const threadId=ctx.threadId;
         const scope=threadId && store.get<string>("group:thread:"+threadId);

@@ -225,6 +225,9 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
         typeof bound.requireMention !== "boolean" || !bound.botUsername) return;
     // Who may call the bot here follows the access list and the group settings.
     const policy = effectiveGroupPolicy(store, bound, owner);
+    // A text selected before a binding migration must not survive a later edit,
+    // even when the original date predates the current binding.
+    if (edit) store.del(`group:mention-recovery:${botId}:${chatId}:${topicId}:${message.message_id}`);
     // Telegram dates have second precision. The binding second is ambiguous.
     if (policy.acceptAfterSecond !== undefined && (!Number.isSafeInteger(message.date) ||
         message.date <= policy.acceptAfterSecond)) return;
@@ -317,7 +320,15 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
         name:String(sender.first_name ?? sender.username ?? sender.id).slice(0,80),
         date:message.date, replyTo:message.reply_to_message?.message_id, text:body.slice(0,600)};
       if (policy.searchableHistory && (policy.retainFullHistory || line.date>=historyCutoff()))
-        store.put(archiveKey,{...line,text:body.slice(0,4096),permanent:policy.retainFullHistory===true});
+        {
+          const handle="@"+policy.botUsername.toLowerCase();
+          const directMention=!edit && !guest && !message.forward_origin && !message.forward_date &&
+            !message.via_bot && !message.business_connection_id && typeof message.text==="string" &&
+            (message.entities??[]).some((e:any)=>e.type==="mention" &&
+              message.text.slice(e.offset,e.offset+e.length).toLowerCase()===handle &&
+              (message.text.slice(0,e.offset)+message.text.slice(e.offset+e.length)).trim().length>0);
+          store.put(archiveKey,{...line,text:body.slice(0,4096),directMention,permanent:policy.retainFullHistory===true});
+        }
       if (!edit || recentEdit)
         store.put(key,[...previous,line].sort((a,b)=>a.id-b.id).slice(-24));
       if (route.kind === "group") {

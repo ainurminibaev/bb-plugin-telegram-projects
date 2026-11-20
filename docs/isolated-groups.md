@@ -58,3 +58,30 @@ For automatic delivery configure BB_TELEGRAM_DECISION_RESULTS as a JSON map from
 To present a proposal without a private lookup, set BB_TELEGRAM_AUTO_PROPOSALS on the receiver to a JSON map from "CHAT:TOPIC" to {"projectId":"PROJECT","directory":"/proposals"}. The trusted project adapter atomically publishes TASKID.json with taskId, revision and items to this dedicated read-only mount. The bridge registers newly accepted tasks in that binding, rechecks its revision and presents one numbered list to the paired owner. An interrupted ambiguous Telegram send requires the ordinary owner lookup for recovery.
 
 For plain Telegram mentions with Guest Mode, configure BB_TELEGRAM_GUEST_TOPICS as a comma-separated list of chatId:topicId pairs. The bot must already be a member of each forum and the binding must require a mention. The receiver accepts guest text with an explicit mention, uses the original group access policy and deduplicates ordinary and guest updates for the same source message.
+
+
+### Recover an unanswered direct mention
+
+An administrator with the original conversation open can select a single unanswered
+text mention in the bridge's retained history before migrating the binding. Review
+the message and later replies first. An answer under a different owner's request
+has a separate receipt. Use the bot's Telegram message ID, which may differ from
+the ID in a user's history for a basic group.
+
+    bb telegram-projects recover-mention select CHAT TOPIC MESSAGE
+
+The selection uses the stored sender and text. For older history without entity
+metadata, select only after verifying the original direct address in Telegram.
+Legacy support requires the text to begin with the bot's handle followed by
+whitespace and a request. A selection expires in 24 hours and can be discarded
+with the same command using `discard`. No message is sent during selection.
+
+After the isolated executor is installed, bound to this topic and verified:
+
+    bb telegram-projects recover-mention queue CHAT TOPIC MESSAGE
+
+Queueing rechecks the owner, bot, current binding, executor, sender permission,
+source grants and existing jobs or receipts. It leaves the live Telegram update
+offset untouched. The ordinary group worker records the task and delivers its
+reply under the original message. A queued selection is single-use, including
+when delivery is uncertain. Thread-originated calls are refused.

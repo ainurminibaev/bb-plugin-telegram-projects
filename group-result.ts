@@ -229,7 +229,7 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
 
 export const NO_REPLY="NO_REPLY";
 // Scheduled agent turns use negative update IDs so they never collide with Telegram updates.
-function syntheticUpdateId(store:Store) {
+export function syntheticUpdateId(store:Store) {
   const next=(store.get<number>("group:synthetic-update") ?? 0)-1;
   store.put("group:synthetic-update",next);
   return next;
