@@ -1,3 +1,8 @@
+# 0.9.37
+
+- Remove standalone bridge markers from outgoing Telegram text, including group replies with attachments, while preserving private reply deduplication.
+- Let the paired owner request a new topic from a bound topic in the same private forum. The bridge creates a dedicated BB thread, accepts requests only from the owner, and posts the supplied first message or a fixed confirmation.
+
 # 0.9.36
 
 Single asynchronous Codex questions from direct or delegated Telegram requests can be answered in the original private chat with a choice or a text reply. The bridge checks the originating request and skips forms that already closed or expired. Forms with multiple questions still open in BB.
