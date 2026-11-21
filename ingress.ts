@@ -5,6 +5,8 @@ import type { Store } from "./model";
 import {isSharedOwnerPolicy} from "./group-binding";
 import { effectiveGroupPolicy } from "./rights";
 import type { ChatInput } from "./chat";
+import {maxImageBytes} from "./group-attachments";
+import {MAX_INCOMING_BYTES} from "./telegram-files";
 
 export type GroupTopicPolicy = {
   isolated?: boolean;
@@ -45,10 +47,33 @@ export function refersToExamples(text:string) {
   return /(?:^|[^\p{L}])(?:использу[йе]|возьми|прочита[йе]|посмотри|учти|на основе|из|по|как|эти|этом|этой|мо[ий]|присланн|скинул|отправил).{0,40}(?:пример|образц|фото|файл|картин|скрин|референс)|(?:пример|образц|фото|файл|картин|скрин|референс).{0,25}(?:выше|прислал|скинул|отправил)/iu.test(text);
 }
 
+type TelegramPhoto = {file_id: string; width: number; height: number; file_size?: number};
+
+function bestPhoto(photos: TelegramPhoto[] | undefined, maxBytes: number): TelegramPhoto | undefined {
+  if (!Array.isArray(photos)) return;
+  let best: TelegramPhoto | undefined;
+  let largestArea = -1;
+  for (const photo of photos) {
+    if (typeof photo?.file_id !== "string" || !photo.file_id) continue;
+    const bytes = photo.file_size ?? 0;
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > maxBytes) continue;
+    const {width, height} = photo;
+    const area = Number.isSafeInteger(width) && width > 0 &&
+      Number.isSafeInteger(height) && height > 0 && Number.isSafeInteger(width * height)
+      ? width * height : 0;
+    if (area >= largestArea) {
+      best = photo;
+      largestArea = area;
+    }
+  }
+  // Preserve the downstream size error when every advertised variant exceeds the limit.
+  return best ?? photos.at(-1);
+}
+
 export type GroupExample = {fileId:string; name:string; size:number; messageId:number; album?:string; image?:true; pdf?:true; document?:true};
 
 export function groupExample(message:any):GroupExample|undefined {
-  const photo=Array.isArray(message?.photo) ? message.photo.at(-1) : undefined;
+  const photo=bestPhoto(message?.photo, maxImageBytes);
   const file=message?.document ?? photo;
   if (!file?.file_id || !Number.isSafeInteger(message.message_id)) return;
   return {fileId:file.file_id, name:typeof file.file_name==="string" ? file.file_name : file===photo ? `photo-${message.message_id}.jpg` : "attachment.bin",
@@ -209,7 +234,7 @@ export function routeUpdate(
     : "";
   const v = m.voice && (m.voice.file_size ?? 0) <= 15_000_000 &&
     (m.voice.duration ?? 0) <= 600 ? m.voice : undefined;
-  const photo = Array.isArray(m.photo) ? m.photo.at(-1) : undefined;
+  const photo = bestPhoto(m.photo, MAX_INCOMING_BYTES);
   const attached = m.document ?? m.video ?? m.audio ?? (v ? undefined : m.voice) ?? photo;
   const kind = m.document ? "document" : m.video ? "video" : m.audio ? "audio" :
     m.voice ? "voice" : "photo";

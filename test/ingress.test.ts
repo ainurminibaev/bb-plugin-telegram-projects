@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { acceptGroupUpdate, skipExcludedForumUpdate, routeUpdate as route } from "../ingress";
+import { acceptGroupUpdate, groupExample, skipExcludedForumUpdate, routeUpdate as route } from "../ingress";
+import {maxImageBytes} from "../group-attachments";
+import {MAX_INCOMING_BYTES} from "../telegram-files";
 const routeUpdate = (u: unknown) => route(u, OWNER_ID);
 const OWNER_ID = 259034221;
 const chat = { id: OWNER_ID, type: "private" };
@@ -125,10 +127,31 @@ test("only short voice notes are transcribed; audio and long voice are files", (
   }
 });
 test("photo chooses largest variant, foreign owners cannot submit files", () => {
-  const message = {message_id: 13, chat, from, photo: [{file_id: "small", file_size: 5}, {file_id: "big", file_size: 50}]};
+  const message = {message_id: 13, chat, from, photo: [
+    {file_id: "medium", width: 120, height: 80, file_size: 700},
+    {file_id: "large", width: 170, height: 110, file_size: 600},
+    {file_id: "thumbnail", width: 90, height: 58, file_size: 900},
+  ]};
   const r = routeUpdate({update_id: 13, message});
-  assert.equal(r.kind === "chat" && r.input.attachment?.fileId, "big");
+  assert.equal(r.kind === "chat" && r.input.attachment?.fileId, "large");
+  assert.equal(groupExample(message)?.fileId, "large");
   assert.equal(routeUpdate({update_id: 13, message: {...message, from: {id: 99}}}).kind, "ignore");
+});
+
+test("photo selection respects each existing route limit", () => {
+  const thumbnail = {file_id: "thumbnail", width: 90, height: 60};
+  const groupCap = {file_id: "group-cap", width: 200, height: 140, file_size: maxImageBytes};
+  const privateCap = {file_id: "private-cap", width: 300, height: 210, file_size: MAX_INCOMING_BYTES};
+  const oversized = {file_id: "oversized", width: 400, height: 280, file_size: MAX_INCOMING_BYTES + 1};
+  const message = {message_id: 14, chat, from, photo: [groupCap, privateCap, thumbnail, oversized]};
+  const paired = routeUpdate({update_id: 14, message});
+  assert.equal(paired.kind === "chat" && paired.input.attachment?.fileId, "private-cap");
+  assert.equal(groupExample(message)?.fileId, "group-cap");
+
+  const allOversized = {...message, photo: [oversized]};
+  const rejected = routeUpdate({update_id: 15, message: allOversized});
+  assert.equal(rejected.kind === "chat" && rejected.input.attachment?.size, MAX_INCOMING_BYTES + 1);
+  assert.equal(groupExample(allOversized)?.size, MAX_INCOMING_BYTES + 1);
 });
 
 test("group policy binds a specific chat and topic and keeps the real sender", () => {

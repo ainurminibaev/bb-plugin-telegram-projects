@@ -1,3 +1,7 @@
+# 0.9.46
+
+- Choose the highest-resolution incoming photo within the existing route limit, regardless of variant order.
+
 # 0.9.45
 
 - Reply with a single photo or document directly to the originating message in the paired owner's chat, in both a new and a running BB turn. Keep the requested caption on the file and omit the extra delivery notice.
