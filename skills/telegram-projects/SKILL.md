@@ -247,3 +247,21 @@ When the owner explicitly asks for a conditional group reminder in the main priv
 When the owner, in a group topic request, asks the employee to check something later and report there ("on Friday check whether Lena sent the file and tell Oleg"), call the native agent tool telegram_group_followup with the current Group taskId, dueAt (Unix milliseconds, owner's timezone) and the owner's instruction in plain words. Do not write scripts or fixed rules for the condition. At dueAt the bridge starts your own turn in this group thread with that instruction and the topic messages since the request. Re-read current data with your tools (for example the project's YouGile MCP), decide, and answer: the answer is posted under the original message. If nothing should be posted, answer exactly NO_REPLY. Only the owner's own request in the bound topic can schedule it; revoked access cancels it.
 
 When bindGroupTopic returns a visibility warning, show it to the owner. With Telegram group privacy enabled, a normal member bot may receive addressed commands and replies but miss plain mentions. The owner can grant bot admin status just in the intended group, without optional moderation permissions. This gives the bot visibility of ordinary messages there; the topic's sender and invocation rules still apply.
+
+## Create an owner-only forum topic from a group request
+
+Use `telegram_create_owner_topic` in an existing bound forum thread when the
+paired owner explicitly asks to create a topic in that same private supergroup
+and supplies its title in their own text. Pass `confirm: true` and the title.
+Pass `text` only if the owner supplied the exact first message. Otherwise
+the bridge posts its fixed confirmation without moving other context. The
+Telegram chat and BB project come from the current accepted group task. It checks Telegram topic
+permissions, creates a separate BB thread and binds it with owner-only input
+and no mention requirement. The existing group permissions stay in place.
+
+Return the Telegram link from a confirmed receipt. When the tool reports an
+unconfirmed creation, thread allocation or first post, report that phase to
+the owner. Do not attempt another create/post by name or through other tools.
+The bridge keeps the operation receipt across reloads. The title and any explicit
+first message must come from a direct text request. Isolated group executors
+cannot use the tool until the server can verify their current group task.

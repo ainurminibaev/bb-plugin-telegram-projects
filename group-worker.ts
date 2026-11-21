@@ -26,6 +26,9 @@ type Job = {
 };
 
 // Keep thread ownership after disconnect: history may already contain group messages.
+export const groupTaskNote = (taskId:string) =>
+  "Group taskId: " + taskId + ". Include this ID in internal approval requests to the owner coordinator.";
+
 export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId: string) {
   const {chatId,topicId,threadId}=policy;
   const key=`group:policy:${chatId}:${topicId}`;
@@ -42,7 +45,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     if (claim && claim!==key) throw Error("thread_belongs_to_other_topic");
     store.put("group:project:"+projectId,true);
     const prev=store.get<GroupTopicPolicy>(key);
-    if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly &&
+    if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly && prev.ownerTopic===policy.ownerTopic &&
         JSON.stringify(prev.deliverySources??[])===JSON.stringify(policy.deliverySources??[]) &&
         prev.requireMention===policy.requireMention && prev.botId===policy.botId &&
         !!prev.retainFullHistory===!!policy.retainFullHistory && !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
@@ -152,7 +155,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const p=store.get<GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`);
       sourceDenied=!sourcesVisible(p?.deliverySources,botId,r.chatId,r.topicId);
       return !sourceDenied && p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && p.threadId===r.threadId &&
-        owner===job.ownerId && (p.isolated===true ? canInvokeGroup(p,owner,r.senderId) : senderRole(store,botId,owner,r.chatId,r.senderId)!=="none");
+        owner===job.ownerId && (p.isolated===true || p.ownerTopic ? canInvokeGroup(p,owner,r.senderId) : senderRole(store,botId,owner,r.chatId,r.senderId)!=="none");
     };
     if (!allowed()) {finish("revoked");continue;}
     const topicKey = `group:policy:${r.chatId}:${r.topicId}`;
@@ -263,7 +266,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         store.put(key,job);
       });
     }
-    const taskNote=job.taskId ? "Group taskId: "+job.taskId+". Include this ID in internal approval requests to the owner coordinator." : "";
+    const taskNote=job.taskId ? groupTaskNote(job.taskId) : "";
     if (executor && (job.state==="pending" || job.state==="submitted")) {
       if ((job.executorRetryAt??0)>Date.now()) continue;
       try {

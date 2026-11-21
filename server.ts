@@ -1,3 +1,4 @@
+import { ownerTopicInput, ownerTopicTool } from "./owner-topic";
 import { privacyKey, privacySummary, rememberMembership, sendVisibilityUpdates } from "./group-visibility";
 import {reconcileEmployeeTicket,employeeHome,employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
 import {proposalInput,presentProposal,handleOwnerSelection,collectDecisionResults,presentProjectProposals} from "./owner-selection";
@@ -511,7 +512,7 @@ export default async function plugin(bb: BbPluginApi) {
     tg: (chat: number) => telegram(botToken, signal, 15_000, () => chat, apiRoot),
   });
   let stateTransferBusy = false;
-  let activeChannelWrites = 0;
+  let activeTelegramWrites = 0;
   function pairCode() {
     let code = store.get<string>("pair:code");
     if (!code) {
@@ -564,6 +565,27 @@ export default async function plugin(bb: BbPluginApi) {
       const receipt=queueGroupReminder(store,owner,bot,{taskId:args.taskId,dueAt:args.dueAt,waitingFor:"agent",text:args.text});
       chatWake?.();
       return JSON.stringify(receipt);
+    },
+  });
+  const createOwnerTopic = ownerTopicTool({
+    store,sdk:bb.sdk,
+    async identity() {
+      const owner=ownerId(), bot=botId();
+      const cfg=await settings.get();
+      if (!bridge || !owner || !bot || owner!==ownerId() || bot!==botId() ||
+          stateTransferBusy || !cfg.enabled || !cfg.chatEnabled) throw Error("bot_unavailable");
+      return {owner,bot};
+    },
+    transport: (chatId,signal) => telegram(botToken,AbortSignal.any([signal,lifetime.signal]),15000,()=>chatId,apiRoot),
+  });
+  bb.agents.registerTool({
+    name:"telegram_create_owner_topic",
+    description:"Create a topic in the same private Telegram forum and post its first message. Use only if the paired owner explicitly requested a new topic in this current group task and gave its title. Copy the title from their request. Supply text only if the owner specified the exact first message; otherwise the bridge posts a fixed confirmation. A confirmed receipt may be repeated; do not retry an unconfirmed mutation or send the first message through another tool.",
+    parameters:ownerTopicInput,
+    async execute(args,ctx) {
+      activeTelegramWrites++;
+      try { return JSON.stringify(await createOwnerTopic(args,ctx)); }
+      finally { activeTelegramWrites--; }
     },
   });
   async function events(): Promise<Events> {
@@ -1351,9 +1373,9 @@ export default async function plugin(bb: BbPluginApi) {
       await bridge.validateOwnerAction(args.threadId,args.routeToken,owner);
       const current=await settings.get();
       if(owner!==ownerId() || bot!==botId() || stateTransferBusy || !current.enabled || !current.chatEnabled) throw Error("bot_changed");
-      activeChannelWrites++;
+      activeTelegramWrites++;
       try { return await channelPost(store,tg,owner,bot,current.managedChannels,args); }
-      finally { activeChannelWrites--; }
+      finally { activeTelegramWrites--; }
     },
     bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,allowedSenderIds,deliverySources,includeTopicContext,searchableHistory,retainFullHistory})=>{
       const owner=ownerId(), bot=botId();
@@ -1406,7 +1428,7 @@ export default async function plugin(bb: BbPluginApi) {
     exportPrivateState: async ({targetVersion}) => {
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
       const c = await settings.get();
-      if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge || activeChannelWrites)
+      if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge || activeTelegramWrites)
         throw Error("stop_receivers_before_state_export");
       return new StateTransfer(store).export(c, targetVersion);
     },
@@ -1415,7 +1437,7 @@ export default async function plugin(bb: BbPluginApi) {
       stateTransferBusy = true;
       try {
         const c = await settings.get();
-        if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge || activeChannelWrites)
+        if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge || activeTelegramWrites)
           throw Error("stop_receivers_before_state_restore");
         return await new StateTransfer(store).restore(id, sha256,
           value => settings.experimental_set(value as Parameters<typeof settings.experimental_set>[0]));
@@ -1426,7 +1448,7 @@ export default async function plugin(bb: BbPluginApi) {
       stateTransferBusy = true;
       try {
         const c = await settings.get();
-        if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge || activeChannelWrites)
+        if (c.enabled || c.chatEnabled || ingressPolling || flight || bridge || activeTelegramWrites)
           throw Error("stop_receivers_before_state_replace");
         return await new StateTransfer(store).replace(id, sha256, expectedCurrentSha256, c,
           value => settings.experimental_set(value as Parameters<typeof settings.experimental_set>[0]));

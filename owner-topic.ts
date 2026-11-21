@@ -1,0 +1,234 @@
+import { createHash, randomUUID } from "node:crypto";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { z } from "zod";
+import { bindGroupTopic, groupTaskNote } from "./group-worker";
+import type { GroupOrigin } from "./group-result";
+import type { GroupTopicPolicy, Ingress } from "./ingress";
+import { TelegramFailure, type Store, type Telegram } from "./model";
+import { stripTelegramMarkers } from "./reply-routing";
+import { sourcesVisible } from "./source-access";
+
+export const ownerTopicInput = z.object({
+  confirm: z.literal(true),
+  title: z.string().trim().min(1).max(128).refine(text => !/[\x00-\x1f]/.test(text)),
+  text: z.string().trim().min(1).max(4096).optional(),
+}).strict();
+
+const defaultFirstMessage = "Тема создана. Продолжим здесь.";
+
+type Args = z.infer<typeof ownerTopicInput>;
+type Scope = {threadId:string; projectId:string; signal:AbortSignal};
+type Origin = GroupOrigin;
+type SubmittedJob = { state:string; ownerId:number; revision?:string; taskId?:string;
+  route: Extract<Ingress,{kind:"group"}> };
+type Receipt =
+  | {phase:"creating"}
+  | {phase:"topic" | "spawning"; topicId:number}
+  | {phase:"thread" | "posting"; topicId:number; threadId:string; revision:string}
+  | {phase:"done"; topicId:number; threadId:string; revision:string; messageId:number};
+type Operation = {digest:string; projectId:string; receipt:Receipt};
+type Dependencies = {
+  store:Store; sdk:BbPluginApi["sdk"];
+  identity:()=>Promise<{owner:number; bot:number}>;
+  transport:(chatId:number, signal:AbortSignal)=>Telegram;
+};
+
+export function ownerTopicTool(d: Dependencies) {
+  const inFlight = new Set<string>();
+  return async (args: Args, scope: Scope) => {
+    const {store, sdk} = d;
+    const {owner,bot} = await d.identity();
+    const {threadId, projectId, signal} = scope;
+    const candidates = store.list<SubmittedJob>(`group:in:${bot}:`).map(row=>row.value)
+      .filter(job => job.state==="submitted" && job.ownerId===owner &&
+        job.route.senderId===owner && job.route.threadId===threadId && job.route.updateId>0 && job.taskId);
+    if (candidates.length !== 1) throw Error("current_owner_group_request_required");
+    const [job] = candidates;
+    const {route} = job;
+    const origin = store.get<Origin>("group:origin:"+job.taskId);
+    if (!origin || origin.owner!==owner || origin.sender!==owner || origin.bot!==bot || origin.threadId!==threadId ||
+        origin.projectId!==projectId || origin.chatId!==route.chatId || origin.topicId!==route.topicId ||
+        origin.messageId!==route.messageId || origin.revision!==job.revision || origin.executionToken)
+      throw Error("current_owner_group_request_required");
+    const {chatId} = origin;
+    const privateChat = /^-100([1-9]\d*)$/.exec(String(chatId))?.[1];
+    const ownerMessage = route.ownerTopicText;
+    if (!privateChat || !ownerMessage?.includes(args.title) || stripTelegramMarkers(args.title)!==args.title)
+      throw Error("explicit_owner_title_required");
+    if (args.text!==undefined && (!ownerMessage.includes(args.text) || stripTelegramMarkers(args.text)!==args.text))
+      throw Error("explicit_owner_message_required");
+    const text = args.text ?? defaultFirstMessage;
+    const sourceKey = `group:policy:${chatId}:${origin.topicId}`;
+    const currentSource = async () => {
+      signal.throwIfAborted();
+      const live = await d.identity();
+      if (live.owner !== owner || live.bot !== bot) throw Error("bot_changed");
+      const persisted = store.get<SubmittedJob>(`group:in:${bot}:${route.updateId}`);
+      const source = store.get<GroupTopicPolicy>(sourceKey);
+      if (persisted?.state!=="submitted" || persisted.taskId!==job.taskId ||
+          source?.revision!==origin.revision || source?.ownerId!==owner || source.botId!==bot ||
+          source.threadId!==threadId || source.projectId!==projectId || source.isolated ||
+          store.get("group:thread:"+threadId)!==sourceKey || store.get("group:project:"+projectId)!==true ||
+          !sourcesVisible(source.deliverySources,bot,chatId,origin.topicId))
+        throw Error("current_owner_group_request_required");
+      signal.throwIfAborted();
+    };
+    const proveTurn = async () => {
+      // The native tool context has a thread ID. The native input log proves
+      // that the submitted job is the accepted input still running there.
+      const events = await sdk.threads.events.list({threadId,signal,order:"desc",limit:"30",
+        types:["client/turn/requested","turn/input/accepted","turn/completed"]});
+      const accepted = events.find(e=>e.type==="turn/input/accepted");
+      if (accepted?.scope.kind!=="turn") throw Error("current_owner_group_request_required");
+      const request = events.find(e => e.type==="client/turn/requested" && e.data.requestId===accepted.data.clientRequestId);
+      if (request?.type!=="client/turn/requested" || request.data.originPluginId!=="telegram-projects" ||
+          !request.data.input?.some(item=>item.type==="text" && item.visibility==="agent-only" &&
+            item.text===groupTaskNote(job.taskId!)))
+        throw Error("current_owner_group_request_required");
+      const turnId = accepted.scope.turnId;
+      if (events.some(e=>e.type==="turn/completed" && e.scope.kind==="turn" && e.scope.turnId===turnId && e.seq>accepted.seq))
+        throw Error("current_owner_group_request_required");
+    };
+    const key = "group:owner-topic:"+JSON.stringify([bot,chatId,args.title.normalize("NFC").toLowerCase()]);
+    const digest = createHash("sha256").update(JSON.stringify([args.title,text])).digest("hex");
+    if (inFlight.has(key)) throw Error("owner_topic_in_progress");
+    inFlight.add(key);
+    try {
+      await currentSource();
+      await proveTurn();
+      const thread = await sdk.threads.get({threadId,signal});
+      if (thread.id!==threadId || thread.projectId!==projectId || !thread.environmentId ||
+          thread.archivedAt || thread.deletedAt || thread.visibility!=="visible")
+        throw Error("group_source_thread_unavailable");
+      const tg = d.transport(chatId,signal);
+      const checkForum = async () => {
+        const chat = await tg("getChat",{chat_id:chatId});
+        if (chat.id!==chatId || chat.type!=="supergroup" || chat.is_forum!==true || chat.username ||
+            chat.active_usernames?.length)
+          throw Error("closed_forum_supergroup_required");
+        const self = await tg("getMe",{});
+        if (self.id!==bot || !self.is_bot || !self.username) throw Error("bot_changed");
+        const ownerMember = await tg("getChatMember",{chat_id:chatId,user_id:owner});
+        if (ownerMember.user?.id!==owner || !(ownerMember.status==="creator" ||
+            (ownerMember.status==="administrator" && ownerMember.can_manage_topics===true)))
+          throw Error("forum_owner_rights_required");
+        const botMember = await tg("getChatMember",{chat_id:chatId,user_id:bot});
+        if (botMember.user?.id!==bot || botMember.status!=="administrator" || botMember.can_manage_topics!==true)
+          throw Error("bot_requires_can_manage_topics");
+        return self.username as string;
+      };
+      const username = await checkForum();
+
+      const taskKey = "group:owner-topic-task:"+job.taskId;
+      const claimTask = () => {
+        const existing = store.get<string>(taskKey);
+        if (existing && existing!==key) throw Error("owner_topic_request_conflict");
+        if (!existing) store.put(taskKey,key);
+      };
+      const saved = store.get<Operation>(key);
+      if (saved && (saved.digest!==digest || saved.projectId!==projectId))
+        throw Error("owner_topic_request_conflict");
+      let receipt: Receipt | undefined = saved?.receipt;
+      const save = (next: Receipt) => {
+        store.put(key,{digest,projectId,receipt:next} satisfies Operation);
+        receipt = next;
+      };
+      if (receipt) claimTask();
+      if (!receipt) {
+        await currentSource();
+        await proveTurn();
+        signal.throwIfAborted();
+        store.atomic(() => {
+          claimTask();
+          save({phase:"creating"});
+        });
+        let result;
+        try {
+          result = await tg("createForumTopic",{chat_id:chatId,name:args.title});
+        } catch (error) {
+          if (error instanceof TelegramFailure && !error.ambiguous) store.del(key);
+          throw error;
+        }
+        if (!Number.isSafeInteger(result?.message_thread_id) || result.message_thread_id<2 ||
+            result.message_thread_id===origin.topicId)
+          throw Error("owner_topic_creation_unconfirmed");
+        save({phase:"topic",topicId:result.message_thread_id});
+      }
+      // Re-read the durable receipt after each save. Unknown mutations are
+      // deliberately held for manual reconciliation instead of replayed.
+      let stage = store.get<Operation>(key)!.receipt;
+      if (stage.phase==="creating") throw Error("owner_topic_creation_unconfirmed");
+      if (stage.phase==="topic") {
+        await currentSource();
+        await proveTurn();
+        signal.throwIfAborted();
+        if (store.get(`group:policy:${chatId}:${stage.topicId}`))
+          throw Error("owner_topic_binding_conflict");
+        save({...stage,phase:"spawning"});
+        const newThread = await sdk.threads.spawn({
+          projectId, title:args.title, visibility:"visible", permissionMode:"accept-edits",
+          // BB 0.50.1 requires input to spawn a standalone thread. This
+          // initialization has no Telegram route and contains no user content.
+          input:[{type:"text",visibility:"agent-only",mentions:[],
+            text:"This is a new Telegram topic thread. Wait for a group request. Reply with NO_REPLY, without using tools."}],
+          environment:{type:"reuse",environmentId:thread.environmentId},
+          ...(thread.providerId && {providerId:thread.providerId}),
+        });
+        if (!newThread.id || newThread.id===threadId || newThread.projectId!==projectId)
+          throw Error("owner_topic_thread_unconfirmed");
+        save({phase:"thread",topicId:stage.topicId,threadId:newThread.id,revision:randomUUID()});
+        stage = store.get<Operation>(key)!.receipt;
+      }
+      if (stage.phase==="spawning") throw Error("owner_topic_thread_unconfirmed");
+      if (stage.phase==="posting") throw Error("owner_topic_post_unconfirmed");
+      if (stage.phase==="thread") {
+        await currentSource();
+        await proveTurn();
+        const newThread = await sdk.threads.get({threadId:stage.threadId,signal});
+        if (newThread.id!==stage.threadId || newThread.projectId!==projectId ||
+            newThread.environmentId!==thread.environmentId || newThread.archivedAt || newThread.deletedAt ||
+            newThread.visibility!=="visible")
+          throw Error("owner_topic_thread_unavailable");
+        const targetKey = `group:policy:${chatId}:${stage.topicId}`;
+        const target = store.get<GroupTopicPolicy>(targetKey);
+        if (target && (target.threadId!==stage.threadId || target.revision!==stage.revision))
+          throw Error("owner_topic_binding_conflict");
+        signal.throwIfAborted();
+        if (!target) bindGroupTopic(store,{
+          chatId, topicId:stage.topicId, threadId:stage.threadId, projectId,
+          revision:stage.revision, botId:bot, botUsername:username,
+          ownerId:owner, ownerOnly:true, ownerTopic:true, requireMention:false,
+        },projectId);
+        await checkForum();
+        await currentSource();
+        await proveTurn();
+        signal.throwIfAborted();
+        const bound = store.get<GroupTopicPolicy>(targetKey);
+        if (bound?.revision!==stage.revision || bound.threadId!==stage.threadId ||
+            bound.ownerId!==owner || bound.botId!==bot || bound.ownerTopic!==true ||
+            !bound.ownerOnly || bound.requireMention || bound.allowedSenderIds?.length || bound.projectId!==projectId ||
+            bound.chatId!==chatId || bound.topicId!==stage.topicId || store.get("group:thread:"+stage.threadId)!==targetKey)
+          throw Error("owner_topic_binding_conflict");
+        save({...stage,phase:"posting"});
+        let message;
+        try {
+          message = await tg("sendMessage",{chat_id:chatId,message_thread_id:stage.topicId,text,
+            link_preview_options:{is_disabled:true}});
+        } catch (error) {
+          if (error instanceof TelegramFailure && !error.ambiguous) save(stage);
+          throw error;
+        }
+        if (message?.chat?.id!==chatId || message.message_thread_id!==stage.topicId ||
+            !Number.isSafeInteger(message.message_id) || message.message_id<1)
+          throw Error("owner_topic_post_unconfirmed");
+        stage = {...stage,phase:"done",messageId:message.message_id};
+        save(stage);
+      }
+      if (stage.phase!=="done") throw Error("owner_topic_operation_unconfirmed");
+      return {topicId:stage.topicId,threadId:stage.threadId,messageId:stage.messageId,
+        url:`https://t.me/c/${privateChat}/${stage.topicId}/${stage.messageId}`};
+    } finally {
+      inFlight.delete(key);
+    }
+  };
+}

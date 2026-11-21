@@ -11,6 +11,7 @@ export type GroupTopicPolicy = {
   topicId: number;
   threadId: string;
   ownerOnly: boolean;
+  ownerTopic?: true;
   requireMention: boolean;
   allowedSenderIds?: number[];
   includeTopicContext?: boolean;
@@ -48,7 +49,7 @@ function groupExample(message:any):GroupExample|undefined {
 }
 
 export type Ingress =
-  | {kind: "group"; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]}
+  | {kind: "group"; ownerTopicText?: string; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
   | { kind: "tasks"; topicId: number }
   | { kind: "pair"; userId: number }
@@ -97,7 +98,9 @@ export function routeUpdate(
       .filter((file):file is GroupExample=>!!file);
     const prompt = target ? "Ответ на сообщение в этой теме: " + JSON.stringify(target) + "\n" + text : text;
     const senderName = [from.first_name, from.last_name].filter(Boolean).join(" ").slice(0, 64) || undefined;
-    return {kind: "group", chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
+    const ownerTopicText = from.id===owner && m.chat.type==="supergroup" && typeof m.text==="string" &&
+      !m.forward_origin && !m.forward_date && !m.is_automatic_forward && !m.via_bot ? m.text : undefined;
+    return {kind: "group", ...(ownerTopicText && {ownerTopicText}), chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
       threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice}), ...(examples.length && {examples})};
   }
   if (!m || m.chat?.type !== "private" || from?.id !== m.chat?.id)
