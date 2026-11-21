@@ -2558,6 +2558,96 @@ for (const primary of ["bb", "telegram"]) test("busy owner can receive a reply d
   } finally { f.cleanup(); }
 });
 
+for (const busy of [false,true]) for (const kind of ["html","photo-caption","photo-bare"] as const) {
+  test(`one addressed private artifact (${busy?"busy":"ordinary"}, ${kind}) keeps reply and caption`,async()=>{
+    const f=fixture();
+    const dir=mkdtempSync(join(tmpdir(),"paired-addressed-file-"));
+    try {
+      const isPhoto=kind!=="html", name=isPhoto?"sample.png":"sample.html", path=join(dir,name);
+      const data=isPhoto
+        ? Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==","base64")
+        : Buffer.from("<!doctype html>\n<p>Synthetic sample</p>\n");
+      writeFileSync(path,data);
+      f.sdk.environments.get=async()=>({path:dir});
+      f.store.put("chat:binding:0",{topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"paired",ready:true,cursor:0});
+      const scope={kind:"turn",turnId:"current"};
+      const routes=new ReplyRoutes(f.store);
+      const oldRoute={kind:"telegram" as const,chatId:OWNER_ID,topicId:0,updateId:70,messageId:80};
+      if (busy) {
+        f.thread.status="active";
+        const original=routes.ingress("thr_one",oldRoute);
+        routes.requested("thr_one",{requestId:"earlier",originPluginId:"telegram-projects",input:[original]});
+        routes.accept("thr_one",scope.turnId,"earlier");
+      }
+
+      const input=f.input("Return the sample.",0);
+      await f.bridge.handle(input);
+      const dispatch=f.calls.filter(c=>c[0]==="send").at(-1)?.[1];
+      assert.ok(dispatch);
+      assert.equal(dispatch.mode,busy?"steer-if-active":"queue-if-active");
+      const caption=kind==="photo-caption"?"Нейтральная подпись":undefined;
+      const markup=kind==="html"?`[${name}](${path} "telegram:document")`:
+        caption?(busy?`[${caption}](${path})`:`${caption}\n\n![](${path})`):`![](${path})`;
+      const wrapped=busy?dispatch.input.at(-1).text.match(/telegram-answer:([a-f0-9-]+)/)?.[1]:undefined;
+      if (busy) assert.ok(wrapped);
+      const response=wrapped?`[telegram-answer:${wrapped}]\n${markup}\n[/telegram-answer]`:markup;
+      const events=[
+        {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"probe",originPluginId:"telegram-projects",input:dispatch.input}},
+        {seq:2,type:"turn/input/accepted",scope,data:{clientRequestId:"probe"}},
+        {seq:3,type:"item/completed",scope,data:{item:{type:"agentMessage",text:response}}},
+        ...(busy?[
+          {seq:4,type:"item/completed",scope,data:{item:{type:"agentMessage",text:response}}}
+        ]:[{seq:4,type:"turn/completed",scope,data:{status:"completed"}}]),
+      ];
+      f.setEvents(events);
+      await f.bridge.observe();
+      await f.bridge.flush();
+      await f.restart().flush();
+      const sent=f.sent.filter(event=>["sendMessage","sendPhoto","sendDocument"].includes(event.method));
+      assert.equal(sent.length,1);
+      const outgoing=sent[0], field=isPhoto?"photo":"document";
+      assert.equal(outgoing.method,isPhoto?"sendPhoto":"sendDocument");
+      assert.equal(outgoing.chat_id,OWNER_ID);
+      assert.equal(outgoing.message_thread_id,undefined);
+      assert.deepEqual(outgoing.reply_parameters,{message_id:input.messageId,allow_sending_without_reply:false});
+      assert.equal(outgoing.caption,caption);
+      assert.equal(outgoing[field+"_filename"],name);
+      assert.deepEqual(Buffer.from(await outgoing[field].arrayBuffer()),data);
+      if (!isPhoto) assert.equal(outgoing.disable_content_type_detection,true);
+      if (busy) assert.deepEqual(routes.destination("thr_one",scope.turnId),oldRoute);
+      const receipts=[...f.data].filter(([key,value])=>key.startsWith("chat:file:") && typeof value==="number");
+      assert.equal(receipts.length,1);
+    } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
+  });
+}
+
+test("an existing busy reply from 0.9.44 prevents replay under a new event sequence",async()=>{
+  const f=fixture();
+  try {
+    f.store.put("chat:binding:0",{topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"paired",ready:true,cursor:0});
+    const routes=new ReplyRoutes(f.store);
+    const scope={kind:"turn",turnId:"ongoing"};
+    f.thread.status="active";
+    routes.requested("thr_one",{requestId:"bb-task"});
+    routes.accept("thr_one",scope.turnId,"bb-task");
+    const input=f.input("Check file.",0);
+    await f.bridge.handle(input);
+    const dispatch=f.calls.filter(c=>c[0]==="send").at(-1)?.[1];
+    const label=dispatch.input.at(-1).text.match(/telegram-answer:([a-f0-9-]+)/)[1];
+    f.store.put("chat:out:event:paired:busy:30",{ownerId:OWNER_ID,topicId:0,text:"",sentId:388,at:1,retryAt:0,
+      taskRoute:{kind:"telegram",chatId:OWNER_ID,topicId:0,updateId:input.updateId,messageId:input.messageId}});
+    f.setEvents([
+      {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"probe",originPluginId:"telegram-projects",input:dispatch.input}},
+      {seq:2,type:"turn/input/accepted",scope,data:{clientRequestId:"probe"}},
+      {seq:31,type:"item/completed",scope,data:{item:{type:"agentMessage",
+        text:`[telegram-answer:${label}]\nDuplicate response\n[/telegram-answer]`}}},
+    ]);
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.some(x=>x.text?.includes("Duplicate response")),false);
+    assert.equal(f.store.list("chat:out:event:paired:").length,1);
+  } finally {f.cleanup();}
+});
+
 test("a configured private thread captures only original owner input for group publication",async()=>{
   const f=fixture(undefined,undefined,0,(thread,owner)=>thread==="thr_one" && owner===OWNER_ID);
   try {

@@ -1,4 +1,6 @@
 import {sharedGroupThreads} from "./group-binding";
+import {outboundMessagePayload} from "./outbound-message";
+import {routedCaption} from "./routed-message";
 import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interactionOpen } from "./codex-async-question";
 import { splitChildResultClaims, stripTelegramMarkers, ReplyRoutes, type ReplyRoute } from "./reply-routing";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
@@ -2600,9 +2602,17 @@ export class ChatBridge {
               const reply = /^\[telegram-answer:([a-f0-9-]{36})\][ \t]*\r?\n([\s\S]+?)\r?\n\[\/telegram-answer\]$/.exec(text);
               const route = reply && this.routes.busyAnswer(b.threadId, event.scope.turnId, reply[1]);
               if (route && route.chatId === this.d.owner() && route.topicId === b.topicId && reply[2].trim() &&
-                  !/\[\/?telegram-answer[\]:]/.test(reply[2]))
-                this.enqueue(b.topicId, reply[2].trim(), undefined, "event:" + b.revision + ":busy:" + event.seq,
-                  false, undefined, route);
+                  !/\[\/?telegram-answer[\]:]/.test(reply[2])) {
+                const prefix="event:"+b.revision+":";
+                const alreadyQueued=this.s.list<Outbox>("chat:out:"+prefix+"busy:").some(({value})=>{
+                  const previous=value.taskRoute;
+                  return previous?.kind==="telegram" && previous.chatId===route.chatId &&
+                    previous.topicId===route.topicId && previous.updateId===route.updateId;
+                });
+                if (!alreadyQueued)
+                  this.enqueue(b.topicId,reply[2].trim(),undefined,prefix+"busy-request:"+reply[1],
+                    false,undefined,route);
+              }
               b.cursor = event.seq;
               continue;
             }
@@ -2788,6 +2798,12 @@ export class ChatBridge {
           ["telegram_400", "message_missing"].includes(error.code)) this.s.del(key);
     }
   }
+  private replyTarget(o: Outbox) {
+    const route=o.taskRoute;
+    if (route?.kind==="telegram" && route.chatId===this.d.owner() && route.topicId===o.topicId &&
+        route.messageId && Number.isSafeInteger(route.messageId) && route.messageId>0)
+      return {chatId:route.chatId,topicId:route.topicId,replyTo:route.messageId};
+  }
   private async deliverArtifacts(text: string, key: string, o: Outbox): Promise<{text: string; lastMediaId: number}> {
     const found = localArtifacts(text, {relative: true});
     let lastMediaId = 0;
@@ -2821,6 +2837,8 @@ export class ChatBridge {
       return matches.length === 1 ? [{...link, path: matches[0]}] : [];
     });
     if (!links.length) return {text, lastMediaId};
+    const addressedSingle=new Set(links.map(link=>link.path)).size===1 ? this.replyTarget(o) : undefined;
+    const bodyCaption=addressedSingle?routedCaption(text,links):undefined;
     const imagePaths = [...new Set(links.filter(link => /\.(png|jpe?g|webp|gif)$/i.test(link.path)).map(link => link.path))];
     const receiptFor = (path: string) => "chat:file:" + key + ":" + path;
     const captionFor = (link: typeof links[number]) => {
@@ -2893,8 +2911,13 @@ export class ChatBridge {
       const isVideo = /\.(mp4|mov)$/i.test(link.path) && !link.asDocument;
       const plainLabel = cleanAssistantText(link.label).replace(/[*_`\[\]]/g, "").trim();
       const meaningfulLabel = /[а-яё]/i.test(plainLabel) && plainLabel !== basename(link.path) && !/^(картинка|изображение|фото|видео)$/i.test(plainLabel);
-      const caption = isImage ? (imagePaths.length > 1 ? Array.from(meaningfulLabel ? plainLabel : `Вариант ${imagePaths.indexOf(link.path) + 1}`).slice(0, 900).join("") : undefined) :
-        isVideo ? (meaningfulLabel ? Array.from(plainLabel).slice(0, 900).join("") : undefined) : basename(link.path);
+      const addressedFile=isVideo?undefined:addressedSingle;
+      const labelIsCaption=plainLabel && plainLabel!==basename(link.path) &&
+        !/^(картинка|изображение|фото|файл|документ|image|photo|file|document)$/i.test(plainLabel);
+      const caption = addressedFile
+        ? bodyCaption ?? (labelIsCaption ? splitText(plainLabel,900)[0] : undefined)
+        : isImage ? (imagePaths.length > 1 ? Array.from(meaningfulLabel ? plainLabel : `Вариант ${imagePaths.indexOf(link.path) + 1}`).slice(0, 900).join("") : undefined) :
+          isVideo ? (meaningfulLabel ? Array.from(plainLabel).slice(0, 900).join("") : undefined) : basename(link.path);
       const receipt = "chat:file:" + key + ":" + link.path;
       let state = this.s.get<string | number>(receipt);
       if (!state) {
@@ -2909,14 +2932,21 @@ export class ChatBridge {
           if (photo && stat.size > 10 * 1024 * 1024) throw new Error("photo_limit");
           const field = photo ? "photo" : isVideo ? "video" : "document";
           const data = readFileSync(path);
+          const blob=new Blob([new Uint8Array(data)], {type: ({".pdf":"application/pdf", ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".webp":"image/webp", ".gif":"image/gif", ".mp4":"video/mp4", ".mov":"video/quicktime"} as Record<string,string>)[extname(path).toLowerCase()] ?? "application/octet-stream"});
+          const outgoing=addressedFile
+            ? outboundMessagePayload({...addressedFile,text:caption,
+                file:{kind:photo?"photo":"document",name:basename(path),data:blob}})
+            : {method:photo?"sendPhoto":isVideo?"sendVideo":"sendDocument",body:{
+                message_thread_id:o.topicId||undefined,[field]:blob,[field+"_filename"]:basename(path),
+                ...(caption && {caption}),...(isVideo && {supports_streaming:true}),
+              }};
           this.s.put(receipt, "uncertain");
-          const result = await this.d.tg(photo ? "sendPhoto" : isVideo ? "sendVideo" : "sendDocument", {
-            message_thread_id: o.topicId || undefined,
-            [field]: new Blob([new Uint8Array(data)], {type: ({".pdf":"application/pdf", ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".webp":"image/webp", ".gif":"image/gif", ".mp4":"video/mp4", ".mov":"video/quicktime"} as Record<string,string>)[extname(path).toLowerCase()] ?? "application/octet-stream"}),
-            [field + "_filename"]: basename(path), ...(caption ? {caption} : {}),
-            ...(isVideo ? {supports_streaming: true} : {}),
-          });
-          state = result.message_id;
+          const result=await this.d.tg(outgoing.method,outgoing.body);
+          if (addressedFile && (!Number.isSafeInteger(result?.message_id) || result.message_id<=0 ||
+              (result.chat && result.chat.id!==addressedFile.chatId) ||
+              (result.reply_to_message && result.reply_to_message.message_id!==addressedFile.replyTo)))
+            throw Error("outbound_receipt_missing");
+          state=result.message_id;
           this.s.put(receipt, state);
         } catch (e) {
           if (e instanceof TelegramFailure && !e.ambiguous && e.code === "telegram_429") {
@@ -2926,8 +2956,11 @@ export class ChatBridge {
           this.s.put(receipt, state);
         }
       }
-      if (typeof state === "number") lastMediaId = state;
-      const label = typeof state === "number" ? (isImage || isVideo ? "" : basename(link.path) + " — файл отправлен выше") :
+      if (typeof state === "number") {
+        lastMediaId=state;
+        if (addressedFile && bodyCaption) return {text:"",lastMediaId};
+      }
+      const label = typeof state === "number" ? (addressedFile || isImage || isVideo ? "" : basename(link.path) + " — файл отправлен выше") :
         basename(link.path) + (state === "uncertain" ? " — не удалось подтвердить доставку файла" : " — не удалось отправить файл");
       text = text.split(link.markdown).join(label);
     }
@@ -2980,9 +3013,7 @@ export class ChatBridge {
             last = old;
             continue;
           }
-          const route=o.taskRoute;
-          const source=route?.kind==="telegram" && route.chatId===this.d.owner() && route.topicId===o.topicId
-            ? route.messageId : undefined;
+          const source=this.replyTarget(o)?.replyTo;
           const payload = {
             ...(source && !o.editId ? {reply_parameters:{message_id:source,allow_sending_without_reply:true}} : {}),
             message_thread_id: o.topicId || undefined,

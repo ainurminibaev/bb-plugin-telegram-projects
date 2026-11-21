@@ -1,3 +1,8 @@
+# 0.9.45
+
+- Reply with a single photo or document directly to the originating message in the paired owner's chat, in both a new and a running BB turn. Keep the requested caption on the file and omit the extra delivery notice.
+- Reuse the existing response receipt when a busy-turn reply is repeated.
+
 # 0.9.44
 
 - Admit a single native BB follow-up into the current turn when its sender and the existing reply route are verified. Keep separately addressed work in the durable queue.
