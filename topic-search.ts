@@ -36,9 +36,15 @@ export function openTopicSearch(db:Database) {
   const search=db.prepare(`SELECT s.value, snippet(topic_fts,0,'','',' … ',40) AS passage FROM topic_fts JOIN topic_documents d ON d.id=topic_fts.rowid JOIN state s ON s.key=d.sourceKey
     WHERE topic_fts MATCH ? AND s.key GLOB ? AND (json_extract(s.value,'$.permanent')=1 OR json_extract(s.value,'$.date')>=?)
     AND json_extract(s.value,'$.id')<? ORDER BY rank,json_extract(s.value,'$.id') DESC LIMIT 5`);
+  const exactReplies=db.prepare(`SELECT value FROM state WHERE key GLOB ? AND
+    (json_extract(value,'$.permanent')=1 OR json_extract(value,'$.date')>=?) AND
+    json_extract(value,'$.name')=? AND instr(json_extract(value,'$.text'),?)>0 LIMIT 2`);
   const prune=db.prepare("DELETE FROM state WHERE key GLOB 'group:history:*' AND COALESCE(json_extract(value,'$.permanent'),0)=0 AND json_extract(value,'$.date')<?");
   return {
     prune:()=>prune.run(historyCutoff()),
+    exactReplies(prefix:string,author:string,excerpt:string):TopicRecord[] {
+      return (exactReplies.all(prefix+"*",historyCutoff(),author,excerpt) as {value:string}[]).map(row=>JSON.parse(row.value));
+    },
     find(prefix:string,query:string,before:number):TopicRecord[] {
       const words=query.replace(/@[\w]+/g,"").toLowerCase().match(/[\p{L}\p{N}]+/gu)??[];
       const terms=[...new Set(words.filter(w=>w.length>=3 && !["что","как","где","какой","какая","какие","это","про","для","найди","теме"].includes(w)))].slice(0,16);

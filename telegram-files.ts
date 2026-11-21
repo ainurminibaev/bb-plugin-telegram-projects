@@ -5,7 +5,18 @@ import { createHash, randomUUID } from "node:crypto";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+export const maxRoutedDocumentBytes = 2 * 1024 * 1024;
 export const MAX_INCOMING_BYTES = 2 * 1024 * 1024 * 1024;
+
+export function safeTelegramFilename(filename:string) {
+  // The client filename is metadata, never a filesystem path.
+  const safeName = Array.from(basename(filename.replaceAll("\\", "/"))
+    .replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, "_")).slice(0, 160).join("");
+  let name = !safeName || [".", ".."].includes(safeName) ? "attachment.bin" : safeName;
+  if (name.startsWith(".")) name = "file_" + name;
+  while (Buffer.byteLength(name) > 180) name = Array.from(name).slice(0, -1).join("");
+  return name;
+}
 
 /** Credentials belong in the token setting, never in an API URL. */
 export function telegramApiRoot(value = "https://api.telegram.org"): string {
@@ -59,12 +70,7 @@ export async function saveLocalTelegramFile(input: {
     throw Error("attachment_too_large");
   if (input.signal.aborted) throw Error("attachment_cancelled");
   const key = `${input.updateId}-${createHash("sha256").update(input.fileId).digest("hex").slice(0, 20)}`;
-  // The client filename is metadata, never a filesystem path.
-  const safeName = basename(input.name.replaceAll("\\", "/"))
-    .replace(/[\x00-\x1f\x7f]/g, "_").slice(0, 160);
-  let name = !safeName || [".", ".."].includes(safeName) ? "attachment.bin" : safeName;
-  if (name.startsWith(".")) name = "file_" + name;
-  while (Buffer.byteLength(name) > 180) name = Array.from(name).slice(0, -1).join("");
+  const name = safeTelegramFilename(input.name);
   let temporary: string | undefined;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {

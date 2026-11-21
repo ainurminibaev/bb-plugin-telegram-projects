@@ -21,12 +21,14 @@ function fixture() {
   };
   let seq=100,messageId=10;
   let failDelivery=false,waiting=false;
+  let replyNext:string|undefined;
+  let beforeExport:()=>Promise<unknown>=async()=>{};
   const messages:{target:number;method:string;payload:any;id:number}[]=[];
   const transport=(target:number):Telegram=>async <T>(method:string,payload:object)=>{
     assert.equal((payload as any).chat_id??target,target);
     messages.push({target,method,payload,id:++messageId});
-    if (failDelivery && method==="sendMessage" && (payload as any).reply_parameters) throw Error("uncertain_send");
-    return {message_id:messageId} as T;
+    if (failDelivery && (payload as any).reply_parameters) throw Error("uncertain_send");
+    return {message_id:messageId,document:{file_id:"pdf"},photo:[{file_id:"photo"}]} as T;
   };
   const submits:{subject:number;text:string;attachments:any[]}[]=[];
   const contexts=new Map<number,string>();
@@ -42,9 +44,25 @@ function fixture() {
       submits.push({subject,text,attachments});
       assert.ok(!answers.has(token));
       const previous=contexts.get(subject)??"";
-      answers.set(token,{subject,text:["Общие знания: читать справочник.",previous,text].filter(Boolean).join(" ")});
+      answers.set(token,{subject,text:replyNext??["Общие знания: читать справочник.",previous,text].filter(Boolean).join(" ")});
+      replyNext=undefined;
       if (!previous) contexts.set(subject,text);
       return {state:"accepted"};
+    },
+    pdf:async(_token:string,path:string)=>{
+      await beforeExport();
+      if (path!=="/own/outputs/result.pdf") throw Error("export_unavailable");
+      return {name:"result.pdf",document:new Blob(["%PDF-1.4\nfixture"])};
+    },
+    image:async(_token:string,path:string)=>{
+      await beforeExport();
+      if (path!=="/own/outputs/result.png") throw Error("export_unavailable");
+      return {name:"result.png",photo:new Blob([new Uint8Array(pixel)])};
+    },
+    document:async(_token:string,path:string)=>{
+      await beforeExport();
+      if (path!=="/own/outputs/нейтральный.html") throw Error("export_unavailable");
+      return {name:"нейтральный.html",document:new Blob(["<p>opaque bytes</p>"],{type:"application/octet-stream"})};
     },
     upload:async(file:any)=>({...file,path:file.path.replace("/bridge/","/receiver/")}),
   }) as never};
@@ -69,7 +87,7 @@ function fixture() {
     path:"/bridge/1-aaaaaaaaaaaaaaaaaaaa/"+file.name,name:file.name,bytes:5,sha256:"a".repeat(64),
   });
   return {store,post,notice,action,tick,messages,submits,sequence:()=>seq,wait:()=>{waiting=true;},
-    fail:()=>{failDelivery=true;}};
+    fail:()=>{failDelivery=true;},answerNext:(text:string)=>{replyNext=text;}, onExport:(fn:()=>Promise<unknown>)=>{beforeExport=fn;}};
 }
 
 test("unapproved /start and ordinary DM produce one owner notice, no task, and owner decisions are scoped",async()=>{
@@ -117,7 +135,7 @@ test("two approved users keep their own history and replies under username chang
   assert.equal(f.submits.length,4);
   assert.deepEqual(f.submits.find(s=>s.subject===alice && s.attachments.length)?.attachments,[imageAttachment(pixel)]);
   assert.deepEqual(f.submits.find(s=>s.subject===bob && s.attachments.length)?.attachments,[{
-    type:"file",file:{cacheId:"1-aaaaaaaaaaaaaaaaaaaa",name:"test.txt",bytes:5,sha256:"a".repeat(64)},
+    type:"opaque",file:{cacheId:"1-aaaaaaaaaaaaaaaaaaaa",name:"test.txt",bytes:5,sha256:"a".repeat(64)},
   }]);
   const answers=f.messages.filter(m=>m.method==="sendMessage" && m.payload.reply_parameters);
   assert.equal(answers.length,4);
@@ -210,4 +228,91 @@ test("an isolated worker cannot recycle private histories into another subject o
   const prior=fixture();
   prior.store.put("group:submission:old-receipt",true);
   assert.throws(()=>validateIsolatedPurpose(prior.store,"private-project","private-thread"),/isolation_required/);
+});
+
+
+test("private replies export PDF and photo to the originating subject exactly once",async()=>{
+  const f=fixture();
+  await f.post(alice,"/start");
+  await f.action(alice,"allow");
+  await f.post(alice,"[pdf](/own/outputs/result.pdf) [photo](/own/outputs/result.png) [foreign](/other/outputs/private.pdf)");
+  const source=f.sequence();
+  await f.tick(); await f.tick();
+  const deliveries=f.messages.filter(m=>m.payload.reply_parameters);
+  assert.deepEqual(deliveries.map(x=>x.method),["sendDocument","sendPhoto","sendMessage"]);
+  for (const d of deliveries) {
+    assert.equal(d.target,alice);
+    assert.deepEqual(d.payload.reply_parameters,{message_id:source,allow_sending_without_reply:false});
+  }
+  assert.equal(await deliveries[0].payload.document.text(),"%PDF-1.4\nfixture");
+  assert.deepEqual(Buffer.from(await deliveries[1].payload.photo.arrayBuffer()),pixel);
+  assert.match(deliveries[2].payload.text,/Вложение недоступно/);
+  assert.doesNotMatch(deliveries[2].payload.text,/outputs|private\.pdf/);
+});
+
+test("revocation during private export suppresses delivery and an uncertain file send is never replayed",async()=>{
+  for (const revoke of [true,false]) {
+    const f=fixture();
+    await f.post(alice,"/start");
+    await f.action(alice,"allow");
+    await f.post(alice,"[pdf](/own/outputs/result.pdf) [photo](/own/outputs/result.png)");
+    if (revoke) f.onExport(()=>f.action(alice,"revoke"));
+    else f.fail();
+    await f.tick(); await f.tick();
+    assert.deepEqual(f.messages.filter(m=>m.payload.reply_parameters).map(x=>x.method),revoke?[]:["sendDocument"]);
+  }
+});
+
+
+test("private route accepts text, file-only, and optional captions on photo and HTML document replies",async()=>{
+  const f=fixture();
+  await f.post(alice,"/start");
+  await f.action(alice,"allow");
+  let n=0;
+  for (const ext of ["html","png"]) for (const caption of [undefined,"Нейтральная подпись"]) {
+    const attachment=ext==="html" ? {document:{file_id:"html-"+n,file_name:"нейтральный.html",mime_type:"text/html"}}
+      : {photo:[{file_id:"photo-"+n}]};
+    const link=ext==="html" ? "[Документ](/own/outputs/нейтральный.html)" : "[Фото](/own/outputs/result.png)";
+    const before=f.messages.length;
+    // The fixture's worker returns the explicit reply independently of whether the incoming attachment has a caption.
+    f.answerNext(caption ? caption+"\n"+link : link);
+    await f.post(alice,undefined,{...attachment,...(caption && {caption})});
+    const source=f.sequence();
+    await f.tick();await f.tick();
+    const delivery=f.messages.slice(before);
+    assert.equal(delivery.length,1);
+    assert.equal(delivery[0].method,ext==="html"?"sendDocument":"sendPhoto");
+    assert.equal(delivery[0].target,alice);
+    assert.equal(delivery[0].payload.caption,caption);
+    assert.deepEqual(delivery[0].payload.reply_parameters,{message_id:source,allow_sending_without_reply:false});
+    assert.deepEqual(Buffer.from(await (delivery[0].payload.document??delivery[0].payload.photo).arrayBuffer()),
+      ext==="html" ? Buffer.from("<p>opaque bytes</p>") : pixel);
+    assert.equal(f.submits[n].attachments[0].type,ext==="html"?"opaque":"image");
+    assert.equal(f.submits[n].text,caption??"Посмотри приложенный файл.");
+    n++;
+  }
+  await f.post(alice,"Один текст без файла");
+  await f.tick();
+  assert.deepEqual(f.submits[n].attachments,[]);
+  assert.equal(f.messages.at(-1)?.method,"sendMessage");
+});
+
+
+test("a configured private pilot silently ignores other Telegram users",async()=>{
+  const key="BB_TELEGRAM_PRIVATE_PILOT_SUBJECT";
+  const previous=process.env[key];
+  process.env[key]=String(alice);
+  try {
+    const f=fixture();
+    await f.post(bob,"/start");
+    await f.post(bob,"foreign document",{document:{file_id:"foreign",file_name:"private.html"}});
+    assert.deepEqual(f.messages,[]);
+    await f.post(alice,"/start");
+    assert.ok(f.notice(alice));
+    await f.tick();
+    assert.deepEqual(f.submits,[]);
+  } finally {
+    if (previous===undefined) delete process.env[key];
+    else process.env[key]=previous;
+  }
 });

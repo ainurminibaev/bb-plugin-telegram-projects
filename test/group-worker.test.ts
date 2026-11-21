@@ -37,7 +37,7 @@ test("worker delivers only its completed turn into the bound forum topic",async(
  assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"}},7,5));
  assert.equal(rows.has("group:in:5:8"),false);
  await tick();
- assert.deepEqual(sent,[[-1001,{chat_id:-1001,message_thread_id:3,reply_parameters:{message_id:10},text:"answer"}]]);
+ assert.deepEqual(sent,[[-1001,{chat_id:-1001,message_thread_id:3,reply_parameters:{message_id:10,allow_sending_without_reply:false},text:"answer",link_preview_options:{is_disabled:true}}]]);
 });
 
 test("a private project and another topic cannot claim the same group thread",()=>{
@@ -362,8 +362,88 @@ test("group delivery replies with verified PDF and image bytes plus clean text e
     assert.equal(sent[2].payload.text,"Отчёт готов.");
     for (const row of sent) {
       assert.equal(row.payload.message_thread_id,3);
-      assert.deepEqual(row.payload.reply_parameters,{message_id:9});
+      assert.deepEqual(row.payload.reply_parameters,{message_id:9,allow_sending_without_reply:false});
     }
     assert.equal(store.get<{state:string}>("group:receipt:5:43")?.state,"done");
   } finally { await rm(directory,{recursive:true,force:true}); }
+});
+
+test("addressed group messages preserve text, photo and opaque HTML with optional captions and reply IDs",async()=>{
+  const rows=new Map<string,unknown>();
+  const store={
+    get:<T>(key:string)=>rows.get(key) as T|undefined,
+    put:(key:string,value:unknown)=>{rows.set(key,value);},
+    del:(key:string)=>{rows.delete(key);},atomic:(fn:()=>void)=>fn(),
+    list:<T>(prefix:string)=>[...rows].filter(([key])=>key.startsWith(prefix)).map(([key,value])=>({key,value:value as T})),
+  };
+  const chat={id:-1001,type:"supergroup"};
+  bindGroupTopic(store,{chatId:chat.id,topicId:3,threadId:"t",botId:5,botUsername:"bot",
+    requireMention:true,ownerOnly:true,revision:"original"},"group-project");
+  const workspace=await mkdtemp(join(tmpdir(),"group-routed-doc-"));
+  try {
+    const inbox=join(workspace,"inbox");
+    const outputs=join(workspace,"outputs");
+    const origin=join(workspace,"telegram");
+    await mkdir(origin);await mkdir(outputs);
+    const data=Buffer.from("<p>SYNTHETIC_NOT_MODEL_CONTEXT</p>");
+    const html=join(origin,"sample.html"),png=join(outputs,"picture.png");
+    await writeFile(html,data);await writeFile(png,pixel);
+    const {localArtifacts}=await import("../telegram-ux");
+    const events:any[]=[];
+    let source=14,answer="",currentInput:any[]=[];
+    const sdk={threads:{
+      get:async()=>({id:"t",projectId:"group-project",visibility:"visible",environmentId:"env"}),
+      events:{list:async(q:any)=>q.order==="desc"?events.slice(-1):events.filter(e=>e.seq>Number(q.afterSeq??0))},
+      send:async(q:any)=>{
+        currentInput=q.input;
+        const handle=currentInput.flatMap(input=>localArtifacts(input.text??"")).find(link=>link.path.startsWith("/telegram-input/"));
+        const text=handle ? answer.replace("HANDLE",handle.markdown) : answer;
+        const push=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"t"+source}});
+        push("client/turn/requested",{requestId:"q"+source,originPluginId:"telegram-projects",input:q.input});
+        push("turn/input/accepted",{clientRequestId:"q"+source});
+        push("item/completed",{item:{type:"agentMessage",text}});
+        push("turn/completed",{status:"completed"});
+      }},
+      environments:{get:async()=>({hostId:"host",path:workspace})}};
+    const sent:{method:string;payload:any}[]=[];
+    const tick=()=>processGroupInputs(store,sdk as never,7,5,id=>async <T>(method:string,payload:Record<string,unknown>)=>{
+      assert.equal(id,chat.id);
+      sent.push({method,payload});
+      return {message_id:200+sent.length,document:{file_id:"document"},photo:[{file_id:"photo"}]} as T;
+    },new AbortController().signal,undefined,"host",async (example,route)=>{
+      if (example.image) return image;
+      return saveLocalTelegramFile({sourcePath:html,localRoot:origin,inboxRoot:inbox,updateId:route.updateId,fileId:example.fileId,
+        name:example.name,expectedBytes:data.length,signal:new AbortController().signal});
+    });
+    for (const ext of ["html","png","text"]) for (const caption of ext==="text"?["Сообщение без файла"]:[undefined,"Учебная подпись"]) {
+      source++;
+      const attachment=ext==="html"?{document:{file_id:"h"+source,file_name:"нейтральный.html",mime_type:"text/html",file_size:data.length}}
+        : ext==="png"?{photo:[{file_id:"p"+source,file_size:pixel.length}]}:{text:caption};
+      const message={chat,date:Math.floor(Date.now()/1000)+5,message_thread_id:3,message_id:source,from:{id:7},...attachment,
+        ...(caption && ext!=="text" && {caption}),reply_to_message:{chat,message_thread_id:3,message_id:10,from:{id:5}}};
+      const before=sent.length;
+      answer=[caption,ext==="html"?"HANDLE":ext==="png"?"[Фото]("+png+")":undefined].filter(Boolean).join("\n");
+      assert.ok(acceptGroupUpdate(store,{update_id:source,message},7,5));
+      await tick(); await tick();
+      const deliveries=sent.slice(before);
+      assert.equal(deliveries.length,1);
+      assert.equal(deliveries[0].method,ext==="html"?"sendDocument":ext==="png"?"sendPhoto":"sendMessage");
+      assert.equal(deliveries[0].payload.message_thread_id,3);
+      assert.deepEqual(deliveries[0].payload.reply_parameters,{message_id:source,allow_sending_without_reply:false});
+      assert.equal(deliveries[0].payload[ext==="text"?"text":"caption"],caption);
+      if (ext!=="text") assert.deepEqual(Buffer.from(await (deliveries[0].payload.document??deliveries[0].payload.photo).arrayBuffer()),ext==="html"?data:pixel);
+      if (ext==="html") {
+        assert.equal(deliveries[0].payload.document_filename,"нейтральный.html");
+        assert.doesNotMatch(JSON.stringify(currentInput),/SYNTHETIC_NOT_MODEL_CONTEXT|localFile/);
+      }
+      if (caption) assert.ok(currentInput.some(input=>input.text?.includes(caption)));
+    }
+    const n=sent.length;
+    const unauthorized={chat,date:Math.floor(Date.now()/1000)+5,message_thread_id:3,message_id:++source,from:{id:9},
+      document:{file_id:"wrong",file_name:"private.html",mime_type:"text/html"},
+      reply_to_message:{chat,message_thread_id:3,message_id:10,from:{id:5}}};
+    assert.equal(acceptGroupUpdate(store,{update_id:source,message:unauthorized},7,5),false);
+    await tick();
+    assert.equal(sent.length,n);
+  } finally {await rm(workspace,{recursive:true,force:true});}
 });

@@ -2,7 +2,7 @@ import {imageAttachment,maxImageBytes} from "./group-attachments";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { telegramApiRoot, saveLocalTelegramFile } from "./telegram-files";
+import { telegramApiRoot, saveLocalTelegramFile, maxRoutedDocumentBytes } from "./telegram-files";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,18 +15,17 @@ import {
 const exec = promisify(execFile);
 export type TokenSource = () => Promise<string>;
 export type ApiRootSource = () => Promise<string>;
-type CloudFile = {file_id?:string;file_path?:string;file_size?:number};
-const maxCloudPdfBytes = 2 * 1024 * 1024;
+export type CloudFile = {file_id?:string;file_path?:string;file_size?:number};
 async function downloadCloudFile(token:TokenSource, file:CloudFile,
-  size:number, signal:AbortSignal, limit:number, invalidInput:string, request:typeof fetch) {
+  size:number, signal:AbortSignal, limit:number, invalidInput:string, request:typeof fetch,allowEmpty=false) {
   const path=file.file_path;
   const expected=size || file.file_size;
-  if (!path || !/^[a-zA-Z0-9_/-]+(?:\.[a-zA-Z0-9_-]+)*$/.test(path) ||
-      path.startsWith("/") || path.includes("//") ||
-      (expected!==undefined && (!Number.isSafeInteger(expected) || expected<=0 || expected>limit)) ||
+  const parts=typeof path==="string" ? path.split("/") : undefined;
+  if (!parts || path!.length>1024 || parts.some(segment=>!segment || segment==="." || segment===".." || /[\p{Cc}\p{Cf}\\%:?#]/u.test(segment)) ||
+      (expected!==undefined && (!Number.isSafeInteger(expected) || expected<(allowEmpty?0:1) || expected>limit)) ||
       (size && file.file_size!==undefined && size!==file.file_size))
     throw Error(invalidInput);
-  const response=await request(`https://api.telegram.org/file/bot${await token()}/${path}`,{
+  const response=await request(`https://api.telegram.org/file/bot${await token()}/${parts.map(encodeURIComponent).join("/")}`,{
     redirect:"error",signal:AbortSignal.any([signal,AbortSignal.timeout(30_000)]),
   }).catch(()=>{throw Error("attachment_download_failed");});
   if (!response.ok || !response.body || Number(response.headers.get("content-length"))>limit) {
@@ -41,11 +40,11 @@ async function downloadCloudFile(token:TokenSource, file:CloudFile,
       const {done,value}=await reader.read().catch(()=>{throw Error("attachment_download_failed");});
       if (done) break;
       length+=value.length;
-      if (length>limit || (expected && length>expected)) throw Error("attachment_too_large");
+      if (length>limit || (expected!==undefined && length>expected)) throw Error("attachment_too_large");
       chunks.push(value);
     }
   } finally { await reader.cancel().catch(()=>undefined); }
-  if (expected && length!==expected) throw Error("attachment_size_mismatch");
+  if (expected!==undefined && length!==expected) throw Error("attachment_size_mismatch");
   return Buffer.concat(chunks,length);
 }
 
@@ -54,20 +53,27 @@ export async function downloadGroupImage(token:TokenSource, file:CloudFile,
   return imageAttachment(await downloadCloudFile(token,file,size,signal,maxImageBytes,"attachment_invalid_image",request));
 }
 
-export async function receiveCloudTelegramPdf(token:TokenSource, file:CloudFile, input:{
+type CloudAttachment = {
   fileId:string; name:string; size:number; threadId:string; updateId:number; inboxRoot:string; signal:AbortSignal;
-}, request=fetch) {
-  if (!input.fileId || file.file_id!==input.fileId || !/\.pdf$/i.test(input.name)) throw Error("attachment_invalid_pdf");
-  const data=await downloadCloudFile(token,file,input.size,input.signal,maxCloudPdfBytes,"attachment_invalid_pdf",request);
-  if (!data.subarray(0,5).equals(Buffer.from("%PDF-"))) throw Error("attachment_invalid_pdf");
+};
+export function receiveCloudTelegramPdf(token:TokenSource,file:CloudFile,input:CloudAttachment,request=fetch) {
+  return receiveCloudTelegramDocument(token,file,input,request,true);
+}
+
+export async function receiveCloudTelegramDocument(token:TokenSource,file:CloudFile,input:CloudAttachment,
+  request=fetch,pdf=false) {
+  const invalid=pdf ? "attachment_invalid_pdf" : "attachment_invalid_document";
+  if (!input.fileId || file.file_id!==input.fileId || (pdf && !/\.pdf$/i.test(input.name))) throw Error(invalid);
+  const data=await downloadCloudFile(token,file,input.size,input.signal,maxRoutedDocumentBytes,invalid,request,!pdf);
+  if (pdf && !data.subarray(0,5).equals(Buffer.from("%PDF-"))) throw Error(invalid);
   input.signal.throwIfAborted();
-  const staging=await mkdtemp(join(tmpdir(),"bb-telegram-pdf-"));
+  const staging=await mkdtemp(join(tmpdir(),"bb-telegram-document-"));
   try {
-    const sourcePath=join(staging,"document.pdf");
+    const sourcePath=join(staging,"document");
     await writeFile(sourcePath,data,{mode:0o600,flag:"wx"});
     return await saveLocalTelegramFile({sourcePath,localRoot:staging,inboxRoot:input.inboxRoot,
       threadId:input.threadId,updateId:input.updateId,fileId:input.fileId,name:input.name,
-      expectedBytes:data.length,maxBytes:maxCloudPdfBytes,signal:input.signal});
+      expectedBytes:data.length,maxBytes:maxRoutedDocumentBytes,signal:input.signal});
   } finally {
     await rm(staging,{recursive:true,force:true});
   }

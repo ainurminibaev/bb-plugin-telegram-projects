@@ -4,6 +4,9 @@ import {isolatedFile,maxEncodedImages,readSavedImage,type ImageAttachment,type I
 import {privateExecutor} from "./isolated-client";
 import type {Store,Telegram} from "./model";
 import {splitText} from "./chat";
+import {outboundMessagePayload} from "./outbound-message";
+import {routedArtifactKind,routedCaption} from "./routed-message";
+import {localArtifacts} from "./telegram-ux";
 import {stripTelegramMarkers} from "./reply-routing";
 import type {SavedTelegramFile} from "./telegram-files";
 
@@ -11,7 +14,7 @@ type Access={owner:number;bot:number;subject:number;nonce:string;state:"pending"
   noticeId?:number;approvalUpdate?:number;unavailableNotified?:true};
 export type PrivateJob={owner:number;bot:number;subject:number;messageId:number;updateId:number;
   nonce:string;token:string;binding:string;state:"pending"|"submitted"|"ready"|"sending";
-  text?:string;file?:GroupExample;answer?:string;part?:number};
+  text?:string;file?:GroupExample;answer?:string;part?:number;artifactIndex?:number;failedArtifacts?:string[];captionSent?:true};
 type Executor=typeof privateExecutor;
 type Dependencies={store:Store;owner:number;bot:number;transport:(chatId:number)=>Telegram;current:()=>boolean;
   executor?:Executor};
@@ -21,7 +24,13 @@ const inboxPrefix=(bot:number,owner:number)=>`employee:private:in:${bot}:${owner
 const positive=(id:unknown):id is number=>typeof id==="number" && Number.isSafeInteger(id) && id>0;
 const cleanName=(value:unknown)=>typeof value==="string" ? value.replace(/[\p{Cc}\p{Cf}]/gu," ").trim().slice(0,80) : "";
 
+function withinPilot(subject:number) {
+  const configured=process.env.BB_TELEGRAM_PRIVATE_PILOT_SUBJECT;
+  return configured===undefined || configured===String(subject);
+}
+
 function executorFor(d:Dependencies,subject:number) {
+  if (!withinPilot(subject)) return;
   try { return (d.executor??privateExecutor)(d.bot,d.owner,subject); }
   catch { return undefined; }
 }
@@ -36,7 +45,7 @@ export async function acceptPrivateEmployeeUpdate(d:Dependencies,update:any) {
         callback.message.chat.id!==owner) return true;
     const [,decision,nonce]=action;
     const subject=store.get<number>(nonceKey(bot,owner,nonce));
-    if (!positive(subject)) return true;
+    if (!positive(subject) || !withinPilot(subject)) return true;
     const key=accessKey(bot,owner,subject);
     const row=store.get<Access>(key);
     if (!row || row.nonce!==nonce || row.noticeId!==callback.message.message_id ||
@@ -55,7 +64,7 @@ export async function acceptPrivateEmployeeUpdate(d:Dependencies,update:any) {
   const subject=message?.from?.id;
   if (!positive(subject) || subject===owner || message.chat?.type!=="private" || message.chat.id!==subject ||
       !d.current() || message.from.is_bot || message.sender_chat || message.business_connection_id) return false;
-  if (!positive(message.message_id) || !positive(update.update_id)) return true;
+  if (!withinPilot(subject) || !positive(message.message_id) || !positive(update.update_id)) return true;
   const file=groupExample(message);
   const text=(typeof message.text==="string" ? message.text :
     typeof message.caption==="string" ? message.caption : "").trim().slice(0,16000);
@@ -130,10 +139,16 @@ export async function processPrivateEmployeeInputs(d:Dependencies,signal:AbortSi
             try {
               const received=await receive(job.file,job);
               if (!allowed()) {finish("revoked");continue;}
-              const input="type" in received ? received : job.file.image ? await readSavedImage(received,signal) :
-                isolatedFile(await worker.upload(received,signal));
-              if (input.type==="image" && input.url.length>maxEncodedImages) throw Error("private_image_too_large");
-              attachments.push(input);
+              const image="type" in received ? received : job.file.image
+                ? await readSavedImage(received,signal).catch(err=>{if (!job.file?.document) throw err;})
+                : undefined;
+              if (image) {
+                if (image.url.length>maxEncodedImages) throw Error("private_image_too_large");
+                attachments.push(image);
+              }
+              if (!("type" in received) && (!image || job.file.document)) {
+                attachments.push(isolatedFile(await worker.upload(received,signal),!job.file.pdf));
+              }
             } catch {
               if (signal.aborted) return;
               job.answer="Не удалось получить вложение. Попробуйте приложить файл ещё раз.";
@@ -155,12 +170,45 @@ export async function processPrivateEmployeeInputs(d:Dependencies,signal:AbortSi
         job.state="ready";
         store.put(key,job);
       }
-      const parts=splitText(job.answer?.trim()||"Не удалось получить ответ на это сообщение.");
+      let text=job.answer?.trim()||"Не удалось получить ответ на это сообщение.";
+      const links=localArtifacts(text);
+      const artifacts=[...new Map(links.map(link=>[link.path,link])).values()].slice(0,3);
+      const caption=routedCaption(text,links);
+      const reply={chatId:job.subject,topicId:0,replyTo:job.messageId};
+      for (let i=job.artifactIndex??0;i<artifacts.length;i++) {
+        if (!allowed()) break;
+        const link=artifacts[i];
+        const {path}=link;
+        const kind=routedArtifactKind(link);
+        const file=await worker[kind](job.token,path,signal).catch(()=>undefined);
+        if (!allowed()) break;
+        if (!file) {
+          job.failedArtifacts=[...(job.failedArtifacts??[]),path];
+        } else {
+          store.put(key,{...job,state:"sending"});
+          const {method,body}=outboundMessagePayload({...reply,text:caption,
+            file:{name:file.name,...("document" in file ? {kind:"document",data:file.document} : {kind:"photo",data:file.photo})}});
+          const sent=await transport(job.subject)(method,body);
+          if (!positive(sent?.message_id) || ("document" in file ? !sent.document?.file_id : !sent.photo?.length))
+            throw Error("unconfirmed_private_file_delivery");
+          if (caption) job.captionSent=true;
+        }
+        job.artifactIndex=i+1;
+        store.put(key,job);
+      }
+      if (!allowed()) {
+        if (!signal.aborted) finish("revoked");
+        continue;
+      }
+      for (const link of links) text=text.replace(link.markdown,
+        !artifacts.some(artifact=>artifact.path===link.path) || job.failedArtifacts?.includes(link.path) ? "Вложение недоступно для отправки." : "");
+      if (job.captionSent || !text.trim()) {finish("done");continue;}
+      const parts=splitText(text.trim());
       for (let i=job.part??0;i<parts.length;i++) {
         if (!allowed()) {finish("revoked");break;}
         store.put(key,{...job,state:"sending"});
-        const sent=await transport(job.subject)("sendMessage",{chat_id:job.subject,
-          reply_parameters:{message_id:job.messageId},text:parts[i]});
+        const {method,body}=outboundMessagePayload({...reply,text:parts[i]});
+        const sent=await transport(job.subject)(method,body);
         if (!positive(sent?.message_id)) {finish("unknown");break;}
         if (i+1===parts.length) finish("done");
         else store.put(key,{...job,part:i+1});

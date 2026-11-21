@@ -202,3 +202,22 @@ test("cloud getFile streams bounded image bytes with no token or URL in the atta
   await assert.rejects(downloadGroupImage(token,{...file,file_size:pixel.length+1},0,signal,request),/size_mismatch/);
   assert.equal(called,2);
 });
+
+test("photo validation applies Telegram dimensions and keeps other files eligible as documents",async()=>{
+  const {validTelegramPhoto}=await import("../group-attachments");
+  const {routedArtifactKind,routedCaption}=await import("../routed-message");
+  const {localArtifacts}=await import("../telegram-ux");
+  const bytes=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=","base64");
+  assert.equal(validTelegramPhoto(bytes,"png"),true);
+  const tooWide=Buffer.from(bytes);
+  tooWide.writeUInt32BE(10_000,16);
+  assert.equal(validTelegramPhoto(tooWide,"png"),false);
+  const tooNarrow=Buffer.from(bytes);
+  tooNarrow.writeUInt32BE(21,20);
+  assert.equal(validTelegramPhoto(tooNarrow,"png"),false);
+  assert.equal(validTelegramPhoto(Buffer.from("<html>not a photo</html>"),"png"),false);
+  const links=localArtifacts('[Файл](/task/outputs/picture.png "telegram:document")');
+  assert.equal(routedArtifactKind(links[0]),"document");
+  assert.equal(routedCaption("б".repeat(1024)+"\n"+links[0].markdown,links)?.length,1024);
+  assert.equal(routedCaption("б".repeat(1025)+"\n"+links[0].markdown,links),undefined);
+});

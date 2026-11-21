@@ -118,3 +118,32 @@ test("revocation during a PDF download blocks handoff and delivery", () => using
     else process.env.BB_TELEGRAM_GROUP_EXECUTORS=previous;
   }
 }));
+
+test("ordinary HTML, WAV, ZIP, unknown and empty documents are identical after scoped cloud receipt", () => usingInbox(async root => {
+  const {receiveCloudTelegramDocument}=await import("../adapters");
+  const fixtures=[
+    ["учебный образец.html",Buffer.from("<p>synthetic &amp; neutral</p>")],
+    ["neutral.wav",Buffer.from("524946462400000057415645666d74201000000001000100401f0000803e0000020010006461746100000000","hex")],
+    ["neutral.zip",Buffer.from("504b0506000000000000000000000000000000000000","hex")],
+    ["unknown.zzz",Buffer.from([0,255,143,7])],
+    ["empty.dat",Buffer.alloc(0)],
+  ] as const;
+  for (const [i,[name,data]] of fixtures.entries()) {
+    const fileId="document-"+i;
+    const found={file_id:fileId,file_path:"documents/file_"+i+".dat",file_size:data.length};
+    const request=(async (url,opts)=>{
+      assert.equal(url,`https://api.telegram.org/file/bot${bot}/${found.file_path}`);
+      assert.equal(opts.redirect,"error");
+      return new Response(data);
+    }) as typeof fetch;
+    const params={...input(root),name,fileId,size:data.length};
+    const saved=await receiveCloudTelegramDocument(getToken,found,params,request);
+    assert.equal(saved.name,name);
+    assert.deepEqual(await readFile(saved.path),data);
+    assert.equal(saved.sha256,createHash("sha256").update(data).digest("hex"));
+    await assert.rejects(receiveCloudTelegramDocument(getToken,{...found,file_id:"another-task"},params,request),/invalid_document/);
+  }
+  const max=2*1024*1024;
+  await assert.rejects(receiveCloudTelegramDocument(getToken,{...file,file_size:undefined},
+    {...input(root),size:0},cloud(()=>new Response(new Uint8Array(max+1)))),/too_large/);
+}));

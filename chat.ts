@@ -203,6 +203,7 @@ export class ChatBridge {
       tg: Telegram;
       /** The paired Telegram user; input from anyone else is refused. */
       owner: () => number | undefined;
+      captureOwnerGroupPost?: (threadId:string, owner:number)=>boolean;
       /** Optional companion spool; the plugin's own receiver writes to storage directly. */
       spool?: string;
       collectMs?: number;
@@ -284,15 +285,35 @@ export class ChatBridge {
       if (notice?.kind.startsWith("child-") && (subject?.kind === "thread" || subject?.kind === "thread-batch") &&
           (!subject.outcomes?.length || subject.outcomes.some(outcome => !("turnId" in outcome) || !outcome.turnId))) return {action: "proceed"};
     }
-    if (ctx.attempt === "join-turn")
-      return {action: "wait", reason: "Предыдущее поручение ещё выполняется; ответ останется в исходном интерфейсе.", sendAt: Date.now() + 1000};
+    if (ctx.attempt === "join-turn" && await this.canJoinNativeAgent(ctx))
+      return {action: "proceed"};
     if (ctx.queuedMessages.length > 1) {
       // Core has already claimed these rows when invoking this hook. Record
       // the work; mutate the boundary only after returning wait releases them.
       this.s.put("reply:separate-queue:" + ctx.thread.id, {threadId: ctx.thread.id});
       return {action: "wait", reason: "Поручения из очереди выполняются отдельно, чтобы сохранить адрес каждого ответа.", sendAt: Date.now() + 1000};
     }
+    if (ctx.attempt === "join-turn")
+      return {action: "wait", reason: "Предыдущее поручение ещё выполняется; ответ останется в исходном интерфейсе.", sendAt: Date.now() + 1000};
     return {action: "proceed"};
+  }
+  private async canJoinNativeAgent(ctx: MessageDispatchHookContext) {
+    const sender=ctx.senderThreadId;
+    if (ctx.initiator!=="agent" || !sender || sender==="mixed" || sender===ctx.thread.id ||
+        ctx.origin!==null || ctx.originPluginId!==null || ctx.queuedMessages.length>1) return false;
+    const queued=ctx.queuedMessages[0];
+    if (queued && (queued.initiator!=="agent" || queued.senderThreadId!==sender ||
+        queued.origin!==null || queued.originPluginId!==null)) return false;
+    try {
+      const events=await this.d.sdk.threads.events.list({
+        threadId:ctx.thread.id,order:"desc",limit:"100",
+        types:["client/turn/requested","turn/input/accepted","turn/started","turn/completed"],
+        signal:AbortSignal.any([this.d.signal,AbortSignal.timeout(1000)]),
+      });
+      return this.routes.canJoinNativeAgent(ctx.thread.id,sender,events);
+    } catch {
+      return false;
+    }
   }
   async separateQueuedTasks() {
     for (const {key, value} of this.s.list<{threadId: string}>("reply:separate-queue:")) {
@@ -1808,7 +1829,9 @@ export class ChatBridge {
     }
     if (!parts) text = this.withReplyContext(input,text);
     const originalDigest=(this.s.get("group:shared-project:"+b.projectId) ||
-      this.s.get("group:topic-manager-project:"+b.projectId)) && input.originalText && (!parts || parts.length===1) && text===input.text?.trim() &&
+      this.s.get("group:topic-manager-project:"+b.projectId) ||
+      (b.threadId && input.chatId===this.d.owner() &&
+       this.d.captureOwnerGroupPost?.(b.threadId,input.chatId))) && input.originalText && (!parts || parts.length===1) && text===input.text?.trim() &&
       !input.forwarded && !input.attachment && !input.voice && !input.replyTo
       ? createHash("sha256").update(text).digest("hex") : undefined;
     if (b.threadId) {

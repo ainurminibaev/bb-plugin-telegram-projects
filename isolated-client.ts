@@ -1,15 +1,15 @@
-import {imageFormat,type IsolatedAttachment} from "./group-attachments";
+import {validTelegramPhoto,type IsolatedAttachment} from "./group-attachments";
 import {createHash} from "node:crypto";
 import {pdfChunkSize} from "./group-pdf";
 import {constants} from "node:fs";
-import type {SavedTelegramFile} from "./telegram-files";
+import {safeTelegramFilename,type SavedTelegramFile} from "./telegram-files";
 import {execFile,spawn} from "node:child_process";
 import {mkdtemp,writeFile,rm,open} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {basename,dirname,isAbsolute,join} from "node:path";
 import {promisify} from "node:util";
 import {z} from "zod";
-import {isolatedGroupResult,isolatedAnswer,isolatedPdfPart,isolatedImagePart} from "./isolated-group";
+import {isolatedGroupResult,isolatedAnswer,isolatedPdfPart,isolatedImagePart,isolatedDocumentPart} from "./isolated-group";
 
 const exec=promisify(execFile);
 const target=z.object({projectId:z.string().min(1),threadId:z.string().min(1),cli:z.string().refine(isAbsolute)}).strict();
@@ -64,9 +64,11 @@ function isolatedExecutor(entry:Target,personal:boolean) {
   return {...ids,
     upload:(file:SavedTelegramFile,signal:AbortSignal)=>uploadGroupFile(entry.cli,entry.threadId,file,signal),
     pdf:async(routeToken:string,path:string,signal:AbortSignal)=>collectIsolatedPdf(path,async offset=>
-      isolatedPdfPart.parse(await call("readIsolatedPdf",{...ids,routeToken,path,offset},signal))),
+      isolatedPdfPart.parse(await call(personal?"readIsolatedPrivatePdf":"readIsolatedPdf",{...ids,routeToken,path,offset},signal))),
     image:async(routeToken:string,path:string,signal:AbortSignal)=>collectIsolatedImage(path,async offset=>
-      isolatedImagePart.parse(await call("readIsolatedImage",{...ids,routeToken,path,offset},signal))),
+      isolatedImagePart.parse(await call(personal?"readIsolatedPrivateImage":"readIsolatedImage",{...ids,routeToken,path,offset},signal))),
+    document:async(routeToken:string,path:string,signal:AbortSignal)=>collectIsolatedDocument(path,async offset=>
+      isolatedDocumentPart.parse(await call(personal?"readIsolatedPrivateDocument":"readIsolatedDocument",{...ids,routeToken,path,offset},signal))),
     submit:async(routeToken:string,text:string,signal:AbortSignal,attachments:IsolatedAttachment[])=>
       isolatedGroupResult.parse(await call(personal?"submitIsolatedPrivate":"submitIsolatedGroup",{...ids,routeToken,text,...(attachments.length && {attachments})},signal)),
     read:async(routeToken:string,signal:AbortSignal)=>
@@ -98,8 +100,13 @@ export async function collectIsolatedPdf(path:string,part:(offset:number)=>Promi
 
 export async function collectIsolatedImage(path:string,part:(offset:number)=>Promise<z.infer<typeof isolatedImagePart>>) {
   const format=/\.png$/i.test(path) ? "png" : "jpeg";
-  const {chunks}=await collectIsolatedArtifact(part,bytes=>imageFormat(bytes)===format);
+  const {chunks}=await collectIsolatedArtifact(part,bytes=>validTelegramPhoto(bytes,format));
   return {name:basename(path),photo:new Blob(chunks,{type:"image/"+format})};
+}
+
+export async function collectIsolatedDocument(path:string,part:(offset:number)=>Promise<z.infer<typeof isolatedDocumentPart>>) {
+  const {chunks,sha256}=await collectIsolatedArtifact(part,()=>true);
+  return {name:safeTelegramFilename(basename(path)),path,document:new Blob(chunks,{type:"application/octet-stream"}),sha256};
 }
 
 async function uploadGroupFile(cli:string,threadId:string,file:SavedTelegramFile,signal:AbortSignal):Promise<SavedTelegramFile> {

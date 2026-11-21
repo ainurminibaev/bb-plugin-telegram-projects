@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { ChatBridge, inputSchema, splitText, type ChatInput } from "../chat";
 import { TelegramFailure, type Store } from "../model";
 const OWNER_ID = 259034221;
-function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{path: string; name: string; bytes: number; sha256: string}>, transcribe?: () => Promise<string>, collectMs = 0) {
+function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{path: string; name: string; bytes: number; sha256: string}>, transcribe?: () => Promise<string>, collectMs = 0, captureOwnerGroupPost?: (threadId:string, owner:number)=>boolean) {
   const data = new Map<string, any>();
   const calls: any[] = [];
   const sent: any[] = [];
@@ -113,6 +113,7 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
   const controller = new AbortController();
   const dir = mkdtempSync(join(tmpdir(), "bb-chat-test-"));
   const makeBridge = () => new ChatBridge({
+    captureOwnerGroupPost,
     store,
     sdk,
     tg: async (method, payload) => {
@@ -1012,6 +1013,86 @@ test("dispatch queues steering and splits grouped tasks through the native queue
     assert.equal(f.store.list("reply:separate-queue:").length,1);
     assert.equal(f.calls.filter(x => x[0] === "send").length,0);
   } finally { f.cleanup(); }
+});
+
+function nativeDispatchHistory() {
+  const sender="thr_coord";
+  const scope={kind:"turn",turnId:"current-turn"};
+  const previous={kind:"turn",turnId:"preceding-turn"};
+  const completed={seq:1,type:"turn/completed",scope:previous,data:{status:"completed"}};
+  const started={seq:3,type:"turn/started",scope,data:{}};
+  const requested=(requestId:string,seq:number,data:object={})=>({seq,type:"client/turn/requested",
+    scope:{kind:"thread"},data:{requestId,initiator:"agent",senderThreadId:sender,target:{kind:"new-turn"},...data}});
+  const accepted=(requestId:string,seq:number)=>({seq,type:"turn/input/accepted",scope,data:{clientRequestId:requestId}});
+  const queued={id:"queued",initiator:"agent",senderThreadId:sender,origin:null,originPluginId:null};
+  const dispatch={thread:{id:"thr_one"},attempt:"join-turn",initiator:"agent",senderThreadId:sender,
+    origin:null,originPluginId:null,queuedMessages:[],input:{blocks:[]}};
+  return {sender,scope,completed,started,requested,accepted,queued,dispatch};
+}
+
+test("native coordinator input joins a running BB turn and autonomous continuation",async()=>{
+  const f=fixture();
+  try {
+    await f.bridge.handle(f.input("Bind"));
+    const sends=f.calls.filter(([kind])=>kind==="send").length;
+    const h=nativeDispatchHistory();
+    let events:any[]=[h.completed,h.started];
+    f.sdk.threads.events.list=async()=>events;
+    const decide=(ctx:object={})=>f.bridge.admitDispatch({...h.dispatch,...ctx} as any);
+    assert.equal((await decide()).action,"proceed");
+    assert.equal((await decide({queuedMessages:[h.queued]})).action,"proceed");
+    events=[h.completed,h.requested("primary",2),h.started,h.accepted("primary",4)];
+    assert.equal((await decide()).action,"proceed");
+    assert.equal((await decide({origin:"plugin",originPluginId:"codex-delegation-watch"})).action,"wait");
+    assert.equal((await decide({senderThreadId:"thr_other"})).action,"wait");
+    assert.equal((await decide({queuedMessages:[{...h.queued,senderThreadId:"thr_other"}]})).action,"wait");
+
+    const sibling={...h.queued,id:"parallel",senderThreadId:"thr_other"};
+    const boundaries:unknown[]=[];
+    f.sdk.threads.queuedMessages={list:async()=>[h.queued,sibling],
+      setGroupBoundary:async(input:unknown)=>boundaries.push(input)};
+    assert.equal((await decide({queuedMessages:[h.queued,sibling]})).action,"wait");
+    assert.deepEqual(boundaries,[]);
+    await f.bridge.separateQueuedTasks();
+    assert.deepEqual(boundaries,[{threadId:"thr_one",expectedGroupedPrefixQueuedMessageIds:["queued"],
+      groupBoundaryQueuedMessageId:"queued"}]);
+
+    events.push(h.requested("pending",5,{target:{kind:"auto",expectedTurnId:h.scope.turnId}}));
+    assert.equal((await decide()).action,"wait");
+    events.push(h.accepted("pending",6));
+    assert.equal((await decide()).action,"proceed");
+    events.push({seq:7,type:"turn/completed",scope:h.scope,data:{status:"completed"}});
+    assert.equal((await decide()).action,"wait");
+    assert.equal((await decide({attempt:"start-turn",queuedMessages:[sibling]})).action,"proceed");
+    f.sdk.threads.events.list=async()=>{throw new DOMException("timeout","TimeoutError");};
+    assert.equal((await decide()).action,"wait");
+    assert.equal(f.calls.filter(([kind])=>kind==="send").length,sends);
+  } finally {f.cleanup();}
+});
+
+test("joining requires the original coordinator for a Telegram delegation and preserves its exact route",async()=>{
+  const f=fixture();
+  try {
+    await f.bridge.handle(f.input("Bind"));
+    const h=nativeDispatchHistory();
+    const routes=new ReplyRoutes(f.store);
+    const original={kind:"telegram" as const,chatId:OWNER_ID,topicId:100,updateId:711};
+    const marker=routes.ingress("thr_one",original,h.sender);
+    const req=h.requested("delegated",2,{originPluginId:"telegram-projects",input:[marker]});
+    f.sdk.threads.events.list=async()=>[h.completed,req,h.started,h.accepted("delegated",4)];
+    routes.requested("thr_one",req.data);
+    const decide=(ctx:object={})=>f.bridge.admitDispatch({...h.dispatch,...ctx} as any);
+    assert.equal((await decide()).action,"wait","stale observer cannot authorize Telegram steering");
+    routes.accept("thr_one",h.scope.turnId,"delegated");
+    assert.equal((await decide({senderThreadId:"thr_other"})).action,"wait");
+    assert.equal((await decide()).action,"proceed");
+    const clarification=h.requested("clarification",5,{target:{kind:"auto",expectedTurnId:h.scope.turnId}});
+    routes.requested("thr_one",clarification.data);
+    routes.accept("thr_one",h.scope.turnId,"clarification");
+    routes.accept("thr_one",h.scope.turnId,"clarification");
+    assert.deepEqual(routes.destination("thr_one",h.scope.turnId),original);
+    assert.deepEqual(routes.routeOf("thr_one","clarification"),{kind:"bb"});
+  } finally {f.cleanup();}
 });
 
 for (const exactIdentity of [false, true]) test(`native child completion requires proven run identity (exact identity: ${exactIdentity})`, async () => {
@@ -2475,4 +2556,31 @@ for (const primary of ["bb", "telegram"]) test("busy owner can receive a reply d
     assert.equal(f.sent.filter(x => x.text === "Original result").length, primary === "telegram" ? 1 : 0);
     assert.equal(f.sent.filter(x => x.text === "Your answer").length, 1);
   } finally { f.cleanup(); }
+});
+
+test("a configured private thread captures only original owner input for group publication",async()=>{
+  const f=fixture(undefined,undefined,0,(thread,owner)=>thread==="thr_one" && owner===OWNER_ID);
+  try {
+    f.store.put("chat:binding:100",{topicId:100,projectId:"proj_one",threadId:"thr_one",revision:"private",ready:true,cursor:0});
+    const original=(id:number,extra:Record<string,unknown>={})=>routeUpdate({update_id:id,message:{
+      message_id:id,chat:{id:OWNER_ID,type:"private"},from:{id:OWNER_ID},message_thread_id:100,
+      text:"Предложи ответ в рабочей группе.",...extra,
+    }},OWNER_ID);
+    const handle=async(route:ReturnType<typeof original>)=>{
+      assert.equal(route.kind,"chat");
+      if (route.kind!=="chat") throw Error("private ingress rejected");
+      await f.bridge.handle(route.input);
+      const [,send]=f.calls.findLast(([kind])=>kind==="send")!;
+      const token=send.input[1].text.match(/bb-telegram-reply-route:([a-f0-9-]+)/)[1];
+      const request={type:"client/turn/requested",seq:1,data:{originPluginId:"telegram-projects",requestId:"req",input:send.input}};
+      const accepted={type:"turn/input/accepted",seq:2,data:{clientRequestId:"req"},scope:{kind:"turn",turnId:"turn"}};
+      f.sdk.threads.events.list=async(options:any)=>[accepted,request].filter(e=>!options.types || options.types.includes(e.type));
+      return token;
+    };
+    const token=await handle(original(120));
+    const proof=await f.bridge.proveOwnerForumRequest("thr_one",token,OWNER_ID);
+    assert.equal(proof.text,"Предложи ответ в рабочей группе.");
+    const forwarded=await handle(original(121,{forward_origin:{type:"user",sender_user:{id:8},date:1}}));
+    await assert.rejects(f.bridge.proveOwnerForumRequest("thr_one",forwarded,OWNER_ID),/original_owner_text_required/);
+  } finally {f.cleanup();}
 });

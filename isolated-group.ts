@@ -1,10 +1,11 @@
-import {isolatedAttachments,isolatedAttachmentInput,maxImageBytes} from "./group-attachments";
+import {isolatedAttachments,isolatedAttachmentInput,maxImageBytes,verifyIsolatedFile,opaqueFileReference,readOpaqueAttachment,opaqueAttachmentInput} from "./group-attachments";
 import {createHash} from "node:crypto";
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {z} from "zod";
 import {localArtifacts} from "./telegram-ux";
-import {pdfChunkSize,maxGroupPdfSize,readGroupPdfBytes,readGroupImageBytes} from "./group-pdf";
+import {pdfChunkSize,maxGroupPdfSize,readGroupPdfBytes,readGroupImageBytes,readGroupDocumentBytes} from "./group-pdf";
 import {routeMarker} from "./reply-routing";
+import {maxRoutedDocumentBytes,type SavedTelegramFile} from "./telegram-files";
 import type {Store} from "./model";
 
 export const isolatedGroupInput = z.object({
@@ -24,7 +25,7 @@ export const isolatedAnswer = z.discriminatedUnion("state",[
   z.object({state:z.literal("finished"),text:z.string().max(256*1024)}),
 ]);
 type Receipt = {hash:string; threadId:string; projectId:string; cursor:number; state:"accepted"|"unconfirmed";
-  requestId?:string; turnId?:string; answer?:string; finished?:boolean};
+  requestId?:string; turnId?:string; answer?:string; finished?:boolean; opaqueFiles?:SavedTelegramFile[]};
 
 
 // Runs in the group's BB instance. The personal bridge retains the Telegram
@@ -43,8 +44,16 @@ export async function submitIsolatedGroup(
   const key = submissionKey(args.routeToken,personal);
   const hash = createHash("sha256").update(JSON.stringify([args.projectId,args.threadId,args.text,...(args.attachments?.length ? [args.attachments] : [])])).digest("hex");
   const latest = await sdk.threads.events.list({threadId:args.threadId,order:"desc",limit:"1"});
-  const attachments=await Promise.all((args.attachments??[]).map(item=>isolatedAttachmentInput(item,thread.id,inboxRoot)));
-  const fresh:Receipt = {hash,state:"unconfirmed",projectId:args.projectId,threadId:args.threadId,cursor:latest[0]?.seq??0};
+  const opaqueFiles:SavedTelegramFile[]=[];
+  const attachments=[];
+  for (const item of args.attachments??[]) {
+    if (item.type==="opaque") {
+      const file=await verifyIsolatedFile(item,thread.id,inboxRoot);
+      opaqueFiles.push(file);
+      attachments.push(opaqueAttachmentInput(file));
+    } else attachments.push(await isolatedAttachmentInput(item,thread.id,inboxRoot));
+  }
+  const fresh:Receipt = {hash,state:"unconfirmed",projectId:args.projectId,threadId:args.threadId,cursor:latest[0]?.seq??0,...(opaqueFiles.length && {opaqueFiles})};
   let previous:Receipt|undefined;
   store.atomic(()=>{
     previous = store.get<Receipt>(key);
@@ -54,9 +63,10 @@ export async function submitIsolatedGroup(
   if (previous) return {state:previous.state};
   await sdk.threads.send({threadId:thread.id,mode:"queue-if-active",input:[
     {type:"text",text:personal ? args.text : [
-      "Telegram group delivery: Save each requested PDF under outputs/ in this thread’s working directory. " +
+      "Telegram delivery: Save each requested PDF under outputs/ in this thread’s working directory. " +
       "For revisions, use a new filename. Include a Markdown link to the absolute PDF path in the final answer. " +
-      "Requested JPG or PNG images can also be delivered when saved under outputs/ and linked by absolute path.",
+      "Requested JPG or PNG images can be delivered by link, and any file under outputs/ may be linked as a document. " +
+      'To send a PNG or JPG unmodified as a document, append the Markdown link title "telegram:document".',
       args.text,
     ].join("\n\n"),mentions:[]},
     ...attachments,
@@ -128,22 +138,30 @@ export const isolatedImageInput=isolatedPdfInput.extend({offset:z.number().int()
 export const isolatedImagePart=isolatedPdfPart.extend({size:z.number().int().min(5).max(maxImageBytes)});
 
 async function readIsolatedExport(sdk:BbPluginApi["sdk"],store:Store,project:string,
-  hostId:string|undefined,args:z.infer<typeof isolatedPdfInput>,format:"pdf"|"image") {
+  hostId:string|undefined,args:z.infer<typeof isolatedPdfInput>,format:"pdf"|"image"|"document",personal:boolean) {
   if (!hostId || args.projectId!==project) throw Error("isolated_export_unavailable");
-  const row=store.get<Receipt>("group:submission:"+args.routeToken);
+  const row=store.get<Receipt>(submissionKey(args.routeToken,personal));
   if (!row?.finished || row.projectId!==project || row.threadId!==args.threadId ||
       !localArtifacts(row.answer??"").some(link=>link.path===args.path)) throw Error("isolated_export_unavailable");
   const thread=await sdk.threads.get({threadId:args.threadId});
   if (!thread.environmentId || thread.projectId!==project || thread.visibility!=="visible" ||
-      thread.archivedAt || thread.deletedAt) throw Error("isolated_thread_required");
+      thread.archivedAt || thread.deletedAt || (personal && thread.parentThreadId)) throw Error("isolated_thread_required");
   const env=await sdk.environments.get({environmentId:thread.environmentId});
   if (env.projectId!==project || env.hostId!==hostId || !env.path) throw Error("isolated_export_unavailable");
-  const readBytes=format==="pdf" ? readGroupPdfBytes : readGroupImageBytes;
-  const {size,revision,bytes}=await readBytes(env.path,args.path,args.offset,pdfChunkSize);
+  const opaque=format==="document" && row.opaqueFiles?.find(file=>opaqueFileReference(file)===args.path);
+  const readBytes=format==="pdf" ? readGroupPdfBytes : format==="image" ? readGroupImageBytes : readGroupDocumentBytes;
+  const {size,revision,bytes}=opaque ? await readOpaqueAttachment(opaque,args.offset,pdfChunkSize)
+    : await readBytes(env.path,args.path,args.offset,pdfChunkSize);
   return {size,revision,data:bytes.toString("base64")};
 }
 
 export const readIsolatedPdf=(sdk:BbPluginApi["sdk"],store:Store,project:string,hostId:string|undefined,
-  args:z.infer<typeof isolatedPdfInput>)=>readIsolatedExport(sdk,store,project,hostId,args,"pdf");
+  args:z.infer<typeof isolatedPdfInput>,personal=false)=>readIsolatedExport(sdk,store,project,hostId,args,"pdf",personal);
 export const readIsolatedImage=(sdk:BbPluginApi["sdk"],store:Store,project:string,hostId:string|undefined,
-  args:z.infer<typeof isolatedImageInput>)=>readIsolatedExport(sdk,store,project,hostId,args,"image");
+  args:z.infer<typeof isolatedImageInput>,personal=false)=>readIsolatedExport(sdk,store,project,hostId,args,"image",personal);
+
+export const isolatedDocumentInput=isolatedPdfInput.extend({offset:z.number().int().min(0).max(maxRoutedDocumentBytes-1)});
+export const isolatedDocumentPart=isolatedPdfPart.extend({size:z.number().int().min(0).max(maxRoutedDocumentBytes),
+  data:z.string().max(4*Math.ceil(pdfChunkSize/3))});
+export const readIsolatedDocument=(sdk:BbPluginApi["sdk"],store:Store,project:string,hostId:string|undefined,
+  args:z.infer<typeof isolatedDocumentInput>,personal=false)=>readIsolatedExport(sdk,store,project,hostId,args,"document",personal);

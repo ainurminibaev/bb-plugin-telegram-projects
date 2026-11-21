@@ -186,5 +186,64 @@ test("isolated image export requires an exact completed task link, matching proj
     await assert.rejects(read(link,0),/export_path_required/);
     await assert.rejects(read(join(dir,"unlinked.png"),0),/export_unavailable/);
     await assert.rejects(read(photoPath,0,"other-host"),/export_unavailable/);
+    const request={...args,path:photoPath,offset:0};
+    await assert.rejects(readIsolatedImage(sdk,store,"group","worker",request,true),/export_unavailable/);
+    const receipt=store.get("group:submission:"+args.routeToken);
+    store.put("group:submission:"+args.routeToken,undefined);
+    store.put("private:submission:"+args.routeToken,receipt);
+    const privateResult=await readIsolatedImage(sdk,store,"group","worker",request,true);
+    assert.deepEqual(Buffer.from(privateResult.data,"base64"),pixel);
+    await assert.rejects(read(photoPath,0),/export_unavailable/);
+    await assert.rejects(readIsolatedImage(sdk,store,"group","worker",{...request,threadId:"other"},true),/export_unavailable/);
+
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+
+test("opaque inbound files enter only their own finished receipt and can be returned byte for byte",async()=>{
+  const {mkdtemp,mkdir,writeFile,rm,realpath}=await import("node:fs/promises");
+  const {tmpdir}=await import("node:os");
+  const {join}=await import("node:path");
+  const {createHash}=await import("node:crypto");
+  const {isolatedFile,opaqueFileReference}=await import("../group-attachments");
+  const {readIsolatedDocument}=await import("../isolated-group");
+  const {collectIsolatedDocument}=await import("../isolated-client");
+  const {localArtifacts}=await import("../telegram-ux");
+  const root=await realpath(await mkdtemp(join(tmpdir(),"opaque-route-")));
+  try {
+    const media=[
+      ["résultat (1).html",Buffer.from("<html>NO_INPUT_BYTES</html>")],
+      ["neutral.wav",Buffer.from("524946462400000057415645666d74201000000001000100401f0000803e0000020010006461746100000000","hex")],
+      ["neutral.zip",Buffer.from("504b0506000000000000000000000000000000000000","hex")],
+      ["neutral.unknown",Buffer.from([0,255,143,7])],
+      ["empty.dat",Buffer.alloc(0)],
+    ] as const;
+    for (const personal of [false,true]) for (const [i,[name,data]] of media.entries()) {
+      const dir=join(root,(i+(personal?media.length:0))+"-0123456789abcdef0123");
+      await mkdir(dir);
+      const file={path:join(dir,name),name,bytes:data.length,
+        sha256:createHash("sha256").update(data).digest("hex")};
+      await writeFile(file.path,data);
+      const sent:any[]=[];
+      const {sdk,store,args}=fixture(async q=>{sent.push(q);});
+      await writeFile(join(dir,".complete.json"),JSON.stringify({...file,threadId:args.threadId}));
+      sdk.threads.get=async()=>({id:args.threadId,projectId:"group",visibility:"visible",environmentId:"scope"});
+      sdk.environments={get:async()=>({projectId:"group",hostId:"worker",path:root})};
+      await submitIsolatedGroup(sdk,store,"group",{...args,attachments:[isolatedFile(file,true)]},root,personal);
+      assert.doesNotMatch(JSON.stringify(sent),/NO_INPUT_BYTES|localFile|opaque-route-/);
+      const reference=opaqueFileReference(file);
+      assert.equal(localArtifacts(sent[0].input[1].text)[0].path,reference);
+      const key=(personal?"private":"group")+":submission:"+args.routeToken;
+      const receipt={...store.get(key),finished:true,answer:"[Вернуть]("+encodeURI(reference).replaceAll(")","%29")+")"};
+      store.put(key,receipt);
+      const read=(offset:number)=>readIsolatedDocument(sdk,store,"group","worker",{...args,path:reference,offset},personal);
+      const result=await collectIsolatedDocument(reference,read);
+      assert.equal(result.name,file.name);
+      assert.equal(result.document.type,"application/octet-stream");
+      assert.deepEqual(Buffer.from(await result.document.arrayBuffer()),data);
+      await assert.rejects(readIsolatedDocument(sdk,store,"group","worker",{...args,path:reference,offset:0},!personal),/export_unavailable/);
+      await assert.rejects(readIsolatedDocument(sdk,store,"group","worker",{...args,routeToken:randomUUID(),path:reference,offset:0},personal),/export_unavailable/);
+      await writeFile(file.path,Buffer.alloc(Math.max(data.length,1),42));
+      await assert.rejects(read(0),/invalid_attachment_receipt/);
+    }
   } finally {await rm(root,{recursive:true,force:true});}
 });

@@ -1,6 +1,6 @@
 import {isTopicPaused} from "./topic-lifecycle";
 import {groupThreadMatches,isSharedOwnerPolicy,sharedGroupScopeKey,sharedGroupThreadKey} from "./group-binding";
-import {isolatedFile,localFileInput,maxEncodedImages,maxGroupAttachments,readSavedImage,type ImageAttachment,type IsolatedAttachment} from "./group-attachments";
+import {isolatedFile,localFileInput,maxEncodedImages,maxGroupAttachments,readSavedImage,opaqueAttachmentInput,opaqueFileReference,readOpaqueAttachment,type ImageAttachment,type IsolatedAttachment} from "./group-attachments";
 import {awaitProjectProposal} from "./owner-selection";
 import {NO_REPLY} from "./group-result";
 import {sourcesVisible} from "./source-access";
@@ -9,7 +9,9 @@ import {groupExecutor} from "./isolated-client";
 import {historyPrefix,topicPassages} from "./topic-search";
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {localArtifacts} from "./telegram-ux";
-import {groupImagePath,readGroupImage,readGroupPdf} from "./group-pdf";
+import {readGroupImage,readGroupPdf,readGroupDocument} from "./group-pdf";
+import {outboundMessagePayload} from "./outbound-message";
+import {routedArtifactKind,routedCaption} from "./routed-message";
 import {splitText} from "./chat";
 import {ReplyRoutes, stripTelegramMarkers} from "./reply-routing";
 import {refersToExamples, promisesExamples, canInvokeGroup, contextMediaPrefix, type GroupTopicPolicy, type Ingress} from "./ingress";
@@ -26,6 +28,7 @@ type Job = {
   executionToken?:string; executorRetryAt?:number;
   pdfIndex?:number; failedPdfs?:string[];
   imageIndex?:number; failedImages?:string[];
+  opaqueFiles?:SavedTelegramFile[]; captionSent?:true;
   cursor?:number; turnId?:string; answer?:string; part?:number;
 };
 
@@ -291,7 +294,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         }
       }
     }
-    const localInputs:(ImageAttachment|ReturnType<typeof localFileInput>)[]=[];
+    const localInputs:(ImageAttachment|ReturnType<typeof localFileInput>|ReturnType<typeof opaqueAttachmentInput>)[]=[];
     const remoteInputs:IsolatedAttachment[]=[];
     if (job.state==="pending" && r.examples?.length) {
       try {
@@ -302,22 +305,29 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           if (!allowed()) break;
           const received=await receiveExample(example,r);
           if (!allowed()) break;
-          if ("type" in received || example.image) {
-            const image="type" in received ? received : await readSavedImage(received,signal);
+          const image="type" in received ? received : example.image
+            ? await readSavedImage(received,signal).catch(err=>{if (!example.document) throw err;})
+            : undefined;
+          if (image) {
             imageSize+=image.url.length;
             if (imageSize>maxEncodedImages) throw Error("attachment_too_large");
             if (executor) remoteInputs.push(image);
             else localInputs.push(image);
-          } else if (executor) {
-            remoteInputs.push(isolatedFile(await executor.upload(received,signal)));
-          } else {
-            localInputs.push(localFileInput(received,fileHostId));
+          }
+          if (!("type" in received) && (!image || example.document)) {
+            if (executor) remoteInputs.push(isolatedFile(await executor.upload(received,signal),!example.pdf));
+            else if (example.pdf) localInputs.push(localFileInput(received,fileHostId));
+            else {
+              (job.opaqueFiles??=[]).push(received);
+              localInputs.push(opaqueAttachmentInput(received));
+            }
           }
         }
         if (!allowed()) {finish("revoked");continue;}
       } catch {
         if (signal.aborted) return;
         if (!allowed()) {finish("revoked");continue;}
+        delete job.opaqueFiles;
         job.answer="Не удалось получить все файлы. Ответьте на исходное сообщение и приложите материалы ещё раз.";
         job.state="ready";
         store.put(key,job);
@@ -421,16 +431,28 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       };
       let text=stripTelegramMarkers(job.answer!);
       const artifacts=localArtifacts(text);
-      const links=artifacts.filter(link=>/\.pdf$/i.test(link.path));
-      const paths=[...new Set(links.map(link=>link.path))];
+      const caption=routedCaption(text,artifacts);
+      const reply={chatId:r.chatId,topicId:r.topicId,replyTo:r.messageId};
+      const byPath=new Map(artifacts.map(link=>[link.path,link]));
+      const unique=[...byPath.values()];
+      const links=artifacts.filter(link=>routedArtifactKind(byPath.get(link.path)!)!=="image");
+      const paths=[...unique.filter(link=>routedArtifactKind(link)==="pdf"),
+        ...unique.filter(link=>routedArtifactKind(link)==="document").slice(0,3)].map(link=>link.path);
       for (let i=job.pdfIndex??0;i<paths.length;i++) {
-        let pdf;
+        let document;
+        const path=paths[i];
+        const kind=routedArtifactKind(byPath.get(path)!);
         try {
           if (executor) {
             if (!job.executionToken) throw Error("missing_isolated_receipt");
-            pdf=await executor.pdf(job.executionToken,paths[i],signal);
-          } else {
-            pdf=await readGroupPdf(await outputRoot(),paths[i]);
+            document=await executor[kind==="pdf"?"pdf":"document"](job.executionToken,path,signal);
+          } else if (kind==="pdf") document=await readGroupPdf(await outputRoot(),path);
+          else {
+            const source=job.opaqueFiles?.find(file=>opaqueFileReference(file)===path);
+            if (source) {
+              const {bytes}=await readOpaqueAttachment(source);
+              document={name:source.name,document:new Blob([new Uint8Array(bytes)],{type:"application/octet-stream"})};
+            } else document=await readGroupDocument(await outputRoot(),path);
           }
         } catch {
           if (signal.aborted) return;
@@ -441,22 +463,25 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         }
         if (!allowed() || !await safeToSend()) {finish("revoked");break;}
         store.put(key,{...job,state:"sending"});
-        const sent=await transport(r.chatId)("sendDocument",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
-          reply_parameters:{message_id:r.messageId},document:pdf.document,document_filename:pdf.name,caption:pdf.name.slice(0,900)});
+        const {method,body}=outboundMessagePayload({...reply,text:caption ??
+          (kind==="pdf" && artifacts.length>1 ? document.name.slice(0,900) : undefined),
+          file:{kind:"document",name:document.name,data:document.document}});
+        const sent=await transport(r.chatId)(method,body);
         if (!Number.isSafeInteger(sent?.message_id) || !sent.document?.file_id) throw Error("missing_document_receipt");
         job.pdfIndex=i+1;
+        if (caption) job.captionSent=true;
         store.atomic(()=>{
-          if (job.taskId) store.put("group:completed-pdf:"+job.taskId,sent.message_id);
-          store.put(`group:pdf:${botId}:${r.chatId}:${r.topicId}:${sent.message_id}`,{
-            owner,threadId:r.threadId,path:pdf.path,sha256:pdf.sha256,fileId:sent.document.file_id});
+          if (kind==="pdf" && job.taskId) store.put("group:completed-pdf:"+job.taskId,sent.message_id);
+          if (kind==="pdf" && "sha256" in document && "path" in document) store.put(`group:pdf:${botId}:${r.chatId}:${r.topicId}:${sent.message_id}`,{
+            owner,threadId:r.threadId,path:document.path,sha256:document.sha256,fileId:sent.document.file_id});
           store.put(key,job);
         });
       }
       if (!store.get(key)) continue;
       if (!allowed()) {finish("revoked");continue;}
       for (const link of links) text=text.replace(link.markdown,
-        job.failedPdfs?.includes(link.path) ? "PDF недоступен для отправки." : "");
-      const imageLinks=artifacts.filter(link=>groupImagePath.test(link.path));
+        !paths.includes(link.path) || job.failedPdfs?.includes(link.path) ? "Вложение недоступно для отправки." : "");
+      const imageLinks=artifacts.filter(link=>routedArtifactKind(byPath.get(link.path)!)==="image");
       const images=[...new Set(imageLinks.map(link=>link.path))];
       for (let i=job.imageIndex??0;i<images.length;i++) {
         let image;
@@ -476,23 +501,24 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         }
         if (!allowed() || !await safeToSend()) {finish("revoked");break;}
         store.put(key,{...job,state:"sending"});
-        const sent=await transport(r.chatId)("sendPhoto",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
-          reply_parameters:{message_id:r.messageId},photo:image.photo,photo_filename:image.name});
+        const {method,body}=outboundMessagePayload({...reply,text:caption,file:{kind:"photo",name:image.name,data:image.photo}});
+        const sent=await transport(r.chatId)(method,body);
         if (!Number.isSafeInteger(sent?.message_id) || !sent.photo?.length) throw Error("missing_photo_receipt");
         job.imageIndex=i+1;
+        if (caption) job.captionSent=true;
         store.put(key,job);
       }
       if (!store.get(key)) continue;
       if (!allowed()) {finish("revoked");continue;}
       for (const link of imageLinks) text=text.replace(link.markdown,
         job.failedImages?.includes(link.path) ? "Изображение недоступно для отправки." : "");
-      if (!text.trim()) {finish("done");continue;}
+      if (job.captionSent || !text.trim()) {finish("done");continue;}
       const parts=splitText(text.trim());
       for (let i=job.part??0;i<parts.length;i++) {
         if (!allowed() || !await safeToSend()) {finish("revoked");break;}
         store.put(key,{...job,state:"sending",part:i});
-        const sent=await transport(r.chatId)("sendMessage",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
-          reply_parameters:{message_id:r.messageId},text:parts[i]});
+        const {method,body}=outboundMessagePayload({...reply,text:parts[i]});
+        const sent=await transport(r.chatId)(method,body);
         if (job.taskId && Number.isSafeInteger(sent?.message_id))
           store.put(`group:task-message:${botId}:${r.chatId}:${r.topicId}:${sent.message_id}`,job.taskId);
         if (i+1===parts.length) finish("done",sent?.message_id);

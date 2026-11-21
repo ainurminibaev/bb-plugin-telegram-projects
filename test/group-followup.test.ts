@@ -50,7 +50,7 @@ test("at the due time the employee's own turn re-reads the task and answers unde
   assert.match(prompt,/Прислала файл/);
   assert.doesNotMatch(prompt,/раньше/);
   assert.match(f.inputs[0].map((x:any)=>x.text).join("\n"),/Group taskId: task/);
-  assert.deepEqual(f.sent,[{chat_id:-1001,message_thread_id:3,reply_parameters:{message_id:10},text:"Файл от Лены пришёл, Олег, можно проверять."}]);
+  assert.deepEqual(f.sent,[{chat_id:-1001,message_thread_id:3,reply_parameters:{message_id:10,allow_sending_without_reply:false},text:"Файл от Лены пришёл, Олег, можно проверять.",link_preview_options:{is_disabled:true}}]);
   await f.tick();
   assert.equal(f.inputs.length,1);
   assert.equal(f.sent.length,1);

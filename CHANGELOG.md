@@ -1,3 +1,9 @@
+# 0.9.44
+
+- Admit a single native BB follow-up into the current turn when its sender and the existing reply route are verified. Keep separately addressed work in the durable queue.
+- Carry text, photos and documents with or without a caption across authorized group and isolated private routes. Ordinary documents retain their original name and bytes.
+- Extend explicit and scheduled outbound posts to text, a supported photo or a document. Keep existing permissions, confirmations, schedule proof, topic scope and duplicate protection.
+
 # 0.9.43
 
 - Accept incoming PDF documents up to 2 MiB through the cloud Telegram Bot API on configured isolated group and approved private routes. Files are checked and staged through the existing isolated inbox and transfer path.

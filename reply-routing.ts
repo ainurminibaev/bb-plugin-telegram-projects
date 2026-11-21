@@ -1,3 +1,4 @@
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { randomUUID } from "node:crypto";
 import type { Store } from "./model";
 
@@ -363,6 +364,47 @@ export class ReplyRoutes {
       }
       return !(aux?.kind === "child-notice" || (aux?.kind === "agent" && delegatedBy && aux.senderThreadId === delegatedBy));
     });
+  }
+  canJoinNativeAgent(threadId:string,senderThreadId:string,
+    history:Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["events"]["list"]>>) {
+    const events=[...history].sort((a,b)=>b.seq-a.seq);
+    const started=events.find(event=>event.type==="turn/started");
+    const boundary=events.find(event=>event.type==="turn/completed");
+    if (started?.scope.kind!=="turn" || (boundary && boundary.seq>started.seq) ||
+        (!boundary && events.length>=100)) return false;
+
+    const turnId=started.scope.turnId;
+    const requests=new Map(events.flatMap(event=>event.type==="client/turn/requested" ?
+      [[event.data.requestId,event] as const] : []));
+    const acceptedIds=new Set(events.flatMap(event=>event.type==="turn/input/accepted" ?
+      [event.data.clientRequestId] : []));
+    const active=events.flatMap(event=>event.type==="turn/input/accepted" &&
+      event.scope.kind==="turn" && event.scope.turnId===turnId ? [event.data.clientRequestId] : []).reverse();
+    for (const event of requests.values()) {
+      // Let the provider finish accepting any earlier input before joining.
+      const target=event.data.target;
+      if (event.seq>(boundary?.seq??0) && !acceptedIds.has(event.data.requestId) &&
+          (target.kind==="new-turn" || ("expectedTurnId" in target && target.expectedTurnId===turnId))) return false;
+    }
+
+    const turn=this.store.get<TurnRoutes>(this.turnKey(threadId,turnId));
+    if (turn?.ambiguous) return false;
+    const primary=active[0];
+    const delegated=primary && this.parentOf(threadId,primary)===senderThreadId &&
+      this.destination(threadId,turnId)?.kind==="telegram";
+    for (const id of active) {
+      const request=requests.get(id)?.data;
+      if (!request) return false;
+      if (request.originPluginId) {
+        if (delegated && id===primary) continue;
+        // An addressed Telegram check-in already proven auxiliary leaves the
+        // BB or delegated turn's exact original destination intact.
+        if (!turn || !turn.requestIds.includes(id) || this.owningRequests(threadId,turn).includes(id)) return false;
+      } else if (request.initiator==="agent" && request.senderThreadId!==senderThreadId) {
+        return false;
+      }
+    }
+    return true;
   }
   routeOf(threadId: string, requestId: string) {
     return this.store.get<ReplyRoute>(this.requestKey(threadId, requestId));

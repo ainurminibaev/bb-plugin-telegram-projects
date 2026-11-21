@@ -45,14 +45,15 @@ export function refersToExamples(text:string) {
   return /(?:^|[^\p{L}])(?:использу[йе]|возьми|прочита[йе]|посмотри|учти|на основе|из|по|как|эти|этом|этой|мо[ий]|присланн|скинул|отправил).{0,40}(?:пример|образц|фото|файл|картин|скрин|референс)|(?:пример|образц|фото|файл|картин|скрин|референс).{0,25}(?:выше|прислал|скинул|отправил)/iu.test(text);
 }
 
-export type GroupExample = {fileId:string; name:string; size:number; messageId:number; album?:string; image?:true; pdf?:true};
+export type GroupExample = {fileId:string; name:string; size:number; messageId:number; album?:string; image?:true; pdf?:true; document?:true};
 
 export function groupExample(message:any):GroupExample|undefined {
   const photo=Array.isArray(message?.photo) ? message.photo.at(-1) : undefined;
   const file=message?.document ?? photo;
   if (!file?.file_id || !Number.isSafeInteger(message.message_id)) return;
-  return {fileId:file.file_id, name:file.file_name ?? `photo-${message.message_id}.jpg`,
+  return {fileId:file.file_id, name:typeof file.file_name==="string" ? file.file_name : file===photo ? `photo-${message.message_id}.jpg` : "attachment.bin",
     size:file.file_size ?? 0, messageId:message.message_id,
+    ...(file!==photo && {document:true as const}),
     ...((file===photo || /^image\/(jpeg|png|webp|gif)$/.test(file.mime_type ?? "")) && {image:true as const}),
     ...(file!==photo && file.mime_type==="application/pdf" &&
       typeof file.file_name==="string" && /\.pdf$/i.test(file.file_name) && {pdf:true as const}),
