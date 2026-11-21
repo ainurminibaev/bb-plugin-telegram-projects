@@ -273,6 +273,17 @@ export class ChatBridge {
     if (!managed) return {action: "proceed"};
     // Use BB's durable queue. Never inject a new human task into an existing
     // turn whose answer already has a different request identity.
+    if (ctx.attempt === "join-turn" && ctx.queuedMessages.length <= 1 &&
+        ctx.originPluginId === "telegram-projects" && ctx.initiator === "user" &&
+        this.routes.busyInput(ctx.thread.id, ctx.input.blocks)) return {action: "proceed"};
+    if (ctx.attempt === "join-turn" && ctx.initiator === "system" && ctx.queuedMessages.length === 1) {
+      const notice = ctx.queuedMessages[0].systemNotice;
+      const subject = notice?.subject;
+      // observe() treats a child notice without exact run IDs as auxiliary.
+      // Such a notice cannot claim the running turn's reply destination.
+      if (notice?.kind.startsWith("child-") && (subject?.kind === "thread" || subject?.kind === "thread-batch") &&
+          (!subject.outcomes?.length || subject.outcomes.some(outcome => !("turnId" in outcome) || !outcome.turnId))) return {action: "proceed"};
+    }
     if (ctx.attempt === "join-turn")
       return {action: "wait", reason: "Предыдущее поручение ещё выполняется; ответ останется в исходном интерфейсе.", sendAt: Date.now() + 1000};
     if (ctx.queuedMessages.length > 1) {
@@ -1815,16 +1826,22 @@ export class ChatBridge {
         );
         return;
       }
-      await this.validThread(b, b.threadId);
+      const thread = await this.validThread(b, b.threadId);
       this.watchInput(b);
       const own = {kind: "telegram" as const, chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId};
       const followUp = await this.forwardFollowUp(b, parts ?? [input]);
-      await this.d.sdk.threads.send({
+      const busy = thread.status === "active" && !followUp;
+      const metadata = busy ? this.routes.busyIngress(b.threadId, own, originalDigest) :
+        [this.routes.ingress(b.threadId, followUp?.route ?? own, undefined, undefined, followUp ? undefined : originalDigest)];
+      const dispatched = await this.d.sdk.threads.send({
         threadId: b.threadId,
-        mode: followUp ? "steer-if-active" : "queue-if-active",
+        mode: busy || followUp ? "steer-if-active" : "queue-if-active",
         input: [{ type: "text", text: followUp ? followUp.prefix + text : text, mentions: [] },
-          this.routes.ingress(b.threadId, followUp?.route ?? own,undefined,undefined,followUp ? undefined : originalDigest)],
+          ...metadata],
       });
+      if (dispatched?.delivery === "queued")
+        this.enqueue(b.topicId, this.tr("Сообщение в очереди. Помощник получит его, когда BB разрешит продолжить."),
+          undefined, "event:" + b.revision + ":queued:" + input.updateId, false, undefined, own);
       this.rememberDispatch(b.threadId, parts ?? [input], followUp?.route ?? own);
     } else {
       if (!b.ready) {
@@ -2553,6 +2570,20 @@ export class ChatBridge {
           }
           if (event.type === "turn/completed" && event.scope.kind === "turn" &&
               this.s.get(observingKey) === event.scope.turnId) this.s.del(observingKey);
+          if (event.scope.kind === "turn" && event.type === "item/completed" &&
+              event.data.item.type === "agentMessage" && !event.data.item.parentToolCallId) {
+            const text = event.data.item.text.trim();
+            if (text.startsWith("[telegram-answer:")) {
+              const reply = /^\[telegram-answer:([a-f0-9-]{36})\][ \t]*\r?\n([\s\S]+?)\r?\n\[\/telegram-answer\]$/.exec(text);
+              const route = reply && this.routes.busyAnswer(b.threadId, event.scope.turnId, reply[1]);
+              if (route && route.chatId === this.d.owner() && route.topicId === b.topicId && reply[2].trim() &&
+                  !/\[\/?telegram-answer[\]:]/.test(reply[2]))
+                this.enqueue(b.topicId, reply[2].trim(), undefined, "event:" + b.revision + ":busy:" + event.seq,
+                  false, undefined, route);
+              b.cursor = event.seq;
+              continue;
+            }
+          }
           if (event.scope.kind !== "turn" || !this.canDeliver(b, event.scope.turnId)) {
             b.cursor = event.seq;
             continue;

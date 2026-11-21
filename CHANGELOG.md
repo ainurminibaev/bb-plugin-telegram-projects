@@ -1,3 +1,8 @@
+# 0.9.42
+
+- Deliver private follow-up questions from the paired owner to a busy assistant through BB steering. Send each addressed answer back to its original Telegram message while work continues.
+- Allow queued native child notifications without identifiable turn results to join ongoing work. Keep independent requests, delegated results and handoffs subject to their existing routing rules.
+
 # 0.9.41
 
 - Apply explicit forum defaults to new topics and keep individual topic settings. Route each bot by its own address in the same group and use Telegram topic names as reference data.

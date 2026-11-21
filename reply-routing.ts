@@ -63,10 +63,43 @@ export class ReplyRoutes {
   private turnKey(threadId: string, turnId: string) {
     return "reply:turn:" + JSON.stringify([threadId, turnId]);
   }
-  ingress(threadId: string | null, route: Extract<ReplyRoute, {kind: "telegram"}>, delegatedBy?: string, reportKey?: string, originalDigest?:string) {
-    const id = randomUUID();
+  ingress(threadId: string | null, route: Extract<ReplyRoute, {kind: "telegram"}>, delegatedBy?: string, reportKey?: string, originalDigest?:string, id = randomUUID()) {
     this.store.put("reply:ingress:" + id, {threadId, route, delegatedBy, reportKey,...(originalDigest && {originalDigest})});
     return routeMarker(id, !delegatedBy && !reportKey);
+  }
+  // The reply label is public in the native timeline and carries no permission
+  // to delegate. The separate hidden ingress token proves the native request.
+  busyIngress(threadId: string, route: Extract<ReplyRoute, {kind: "telegram"}>, digest?: string) {
+    const token = randomUUID();
+    const marker = this.ingress(threadId, route, undefined, undefined, digest, token);
+    const label = randomUUID();
+    this.store.put("reply:busy-ingress:" + token, label);
+    return [marker, {type: "text" as const, visibility: "agent-only" as const, mentions: [],
+      text: "This private Telegram message arrived while work was running. Answer the owner's message promptly in a separate public assistant message. " +
+        "Start that message with this line exactly: [telegram-answer:" + label + "]. On the following lines write only the answer intended for this message. " +
+        "End it with [/telegram-answer] on a line of its own. The bridge sends the enclosed answer immediately. Continue the ongoing work in a separate message."}];
+  }
+  private markerId(input: readonly {type: string; text?: string; visibility?: string}[]) {
+    const ids = input.flatMap(block => {
+      if (block.type !== "text" || block.visibility !== "agent-only") return [];
+      const id = /^\[bb-telegram-reply-route:([a-f0-9-]{36})\]/.exec(block.text ?? "")?.[1];
+      return id && (block.text === routeMarker(id).text || block.text === routeMarker(id, true).text) ? [id] : [];
+    });
+    return ids.length === 1 ? ids[0] : undefined;
+  }
+  busyInput(threadId: string, input: readonly {type: string; text?: string; visibility?: string}[]) {
+    const token = this.markerId(input);
+    if (!token || !this.store.get<string>("reply:busy-ingress:" + token)) return false;
+    const ingress = this.store.get<{threadId: string; route: ReplyRoute; requestId?: string}>("reply:ingress:" + token);
+    return ingress?.threadId === threadId && !ingress.requestId && !this.cancelled(ingress.route);
+  }
+  busyAnswer(threadId: string, turnId: string, label: string) {
+    const requestId = this.store.get<string>("reply:busy-answer:" + label);
+    if (!requestId) return;
+    const turn = this.store.get<TurnRoutes>(this.turnKey(threadId, turnId));
+    if (!turn?.requestIds.includes(requestId)) return;
+    const route = this.routeOf(threadId, requestId);
+    return route?.kind === "telegram" && !this.cancelled(route) ? route : undefined;
   }
   delegatedIngress(parentThreadId: string, token: string, childThreadId: string | null) {
     if (!/^[a-f0-9-]{36}$/.test(token)) throw Error("invalid_parent_route_token");
@@ -254,17 +287,18 @@ export class ReplyRoutes {
         this.store.put(this.auxiliaryKey(threadId, data.requestId), {kind: "agent", senderThreadId: data.senderThreadId});
       return true;
     }
-    const ids = (data.input ?? []).flatMap(block => {
-      if (block.type !== "text" || block.visibility !== "agent-only") return [];
-      const id = /^\[bb-telegram-reply-route:([a-f0-9-]{36})\]/.exec(block.text ?? "")?.[1];
-      return id && (block.text === routeMarker(id).text || block.text === routeMarker(id, true).text) ? [id] : [];
-    });
-    if (ids.length !== 1) return false;
-    const ingress = this.store.get<{threadId: string; route: ReplyRoute; requestId?: string; delegatedBy?: string; reportKey?: string}>("reply:ingress:" + ids[0]);
+    const token = this.markerId(data.input ?? []);
+    if (!token) return false;
+    const ingress = this.store.get<{threadId: string; route: ReplyRoute; requestId?: string; delegatedBy?: string; reportKey?: string}>("reply:ingress:" + token);
     if (!ingress || ingress.threadId !== threadId ||
         (ingress.requestId && ingress.requestId !== data.requestId)) return false;
     this.record(threadId, data.requestId, ingress.route);
-    this.store.put("reply:ingress:" + ids[0], {...ingress, requestId: data.requestId});
+    this.store.put("reply:ingress:" + token, {...ingress, requestId: data.requestId});
+    const label = this.store.get<string>("reply:busy-ingress:" + token);
+    if (label) {
+      this.store.put("reply:busy-answer:" + label, data.requestId);
+      this.store.put(this.auxiliaryKey(threadId, data.requestId), {kind: "busy-reply"});
+    }
     // A persisted native request proves BB accepted the submission even if the
     // original SDK response was lost. Replaying this event is idempotent.
     if (ingress.reportKey) this.store.del(ingress.reportKey);
@@ -319,6 +353,14 @@ export class ReplyRoutes {
     return turn.requestIds.filter((id, i) => {
       if (i === 0) return true;
       const aux = this.store.get<{kind: string; senderThreadId?: string}>(this.auxiliaryKey(threadId, id));
+      if (aux?.kind === "busy-reply") {
+        const primary = this.routeOf(threadId, turn.requestIds[0]);
+        const incoming = this.routeOf(threadId, id);
+        // Only the addressed message is delivered to the owner. The original
+        // turn keeps its own destination, including BB-only background work.
+        if (primary?.kind === "bb" || (primary?.kind === "telegram" && incoming?.kind === "telegram" &&
+            primary.chatId === incoming.chatId && primary.topicId === incoming.topicId)) return false;
+      }
       return !(aux?.kind === "child-notice" || (aux?.kind === "agent" && delegatedBy && aux.senderThreadId === delegatedBy));
     });
   }

@@ -991,6 +991,11 @@ test("dispatch queues steering and splits grouped tasks through the native queue
     const ctx:any = {thread:{id:"thr_one"},originPluginId:null,attempt:"join-turn",initiator:"user",queuedMessages:[]};
     assert.equal((await f.bridge.admitDispatch(ctx)).action,"wait");
     assert.equal((await f.bridge.admitDispatch({...ctx,initiator:"system"})).action,"wait");
+    const notice = {kind:"child-outcome-batch", subject:{kind:"thread-batch", outcomes:[{threadId:"child",status:"completed"}]}};
+    const child = {...ctx, initiator:"system", queuedMessages:[{systemNotice:notice}]};
+    assert.equal((await f.bridge.admitDispatch(child)).action,"proceed");
+    assert.equal((await f.bridge.admitDispatch({...child, queuedMessages:[{systemNotice:{...notice,
+      subject:{...notice.subject,outcomes:[{threadId:"child",turnId:"specific",status:"completed"}]}}}]})).action,"wait");
     assert.equal((await f.bridge.admitDispatch({...ctx,thread:{id:"unrelated"}})).action,"proceed");
     assert.equal((await f.bridge.admitDispatch({...ctx,attempt:"start-turn"})).action,"proceed");
     const boundaries:any[] = [];
@@ -2427,4 +2432,47 @@ test("private chat and menu still work alongside shared forum roots and prove on
     const forgedToken=forged.text.match(/bb-telegram-reply-route:([a-f0-9-]+)/)![1];
     await assert.rejects(f.bridge.proveOwnerForumRequest("thr_one",forgedToken,OWNER_ID),/original_owner_text_required/);
   } finally {f.cleanup();}
+});
+
+for (const primary of ["bb", "telegram"]) test("busy owner can receive a reply during " + primary + " work", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Start"));
+    const scope = {kind:"turn", turnId:"long-turn"};
+    const routes = new ReplyRoutes(f.store);
+    if (primary === "telegram") f.acceptTelegramTurn(scope.turnId);
+    else {
+      routes.requested("thr_one", {requestId:"original", initiator:"user"});
+      routes.accept("thr_one", scope.turnId, "original");
+    }
+    f.thread.status = "active";
+    const question = f.input("What has finished?");
+    await f.bridge.handle(question);
+    const send = f.calls.filter(c => c[0] === "send").at(-1)[1];
+    assert.equal(send.mode, "steer-if-active");
+    const label = /\[telegram-answer:([a-f0-9-]+)\]/.exec(send.input.at(-1).text)![1];
+    const ctx:any = {thread:f.thread, attempt:"join-turn", initiator:"user", originPluginId:"telegram-projects",
+      queuedMessages:[], input:{blocks:send.input}};
+    assert.equal((await f.bridge.admitDispatch(ctx)).action, "proceed");
+    assert.equal((await f.bridge.admitDispatch({...ctx, originPluginId:null})).action, "wait");
+    const reply = (text:string, seq:number, turn=scope) =>
+      ({seq, type:"item/completed", scope:turn, data:{item:{type:"agentMessage", text}}});
+    f.setEvents([
+      {seq:1, type:"client/turn/requested", scope:{kind:"thread"}, data:{
+        requestId:"owner-question", originPluginId:"telegram-projects", input:send.input}},
+      {seq:2, type:"turn/input/accepted", scope, data:{clientRequestId:"owner-question"}},
+      reply("[telegram-answer:" + label + "]\nUnrelated turn\n[/telegram-answer]", 3, {kind:"turn",turnId:"other"}),
+      reply("[telegram-answer:" + label + "]\nYour answer\n[/telegram-answer]", 4),
+      reply("Original result", 5),
+    ]);
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter(x => x.text === "Your answer").length, 1);
+    assert.equal(f.sent.find(x => x.text === "Your answer")?.reply_parameters?.message_id, question.messageId);
+    assert.equal(f.sent.some(x => x.text?.includes("Unrelated turn")), false);
+    assert.equal(routes.destination("thr_one", scope.turnId)?.kind, primary);
+    f.setEvents([{seq:6, type:"turn/completed", scope, data:{status:"completed"}}]);
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter(x => x.text === "Original result").length, primary === "telegram" ? 1 : 0);
+    assert.equal(f.sent.filter(x => x.text === "Your answer").length, 1);
+  } finally { f.cleanup(); }
 });

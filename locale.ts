@@ -85,6 +85,8 @@ export const english: Record<string, string> = {
   "Голосовое сохранено целиком как файл. Автоматическое распознавание доступно для записей до 10 минут и 15 МБ.":
     "Voice recording saved in full as a file. Automatic transcription supports recordings up to 10 minutes and 15 MB.",
   "🎙 Распознано:\n": "🎙 Transcribed:\n",
+  "Сообщение в очереди. Помощник получит его, когда BB разрешит продолжить.":
+    "Your message is queued. The assistant will receive it when BB can continue.",
   "Отправь текст или голосовое сообщение. Вложения пока открывай в BB.":
     "Send text or a voice message. Open attachments in BB for now.",
   "В чате есть вопрос. Ответь через кнопку или ответом на его карточку. Если форма сложная — открой BB.":
