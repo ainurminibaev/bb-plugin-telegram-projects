@@ -1,3 +1,7 @@
+# 0.9.36
+
+Single asynchronous Codex questions from direct or delegated Telegram requests can be answered in the original private chat with a choice or a text reply. The bridge checks the originating request and skips forms that already closed or expired. Forms with multiple questions still open in BB.
+
 # 0.9.35
 
 A coordinator can identify the exact worker turn it covered in its final private Telegram reply. The bridge waits for confirmed delivery before closing that result. Launch acknowledgements, undelivered finals, and separate worker turns still allow their own follow-up reports.

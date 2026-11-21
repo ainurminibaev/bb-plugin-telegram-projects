@@ -2258,3 +2258,132 @@ test("a relative name matching files in two workspaces is left as text", async (
     assert.equal(f.sent.filter(x=>x.method==='sendPhoto').length,0);
   } finally {f.cleanup();rmSync(a,{recursive:true,force:true});rmSync(b,{recursive:true,force:true});}
 });
+
+test("Codex async forms reach the owner from the root, worker and nested worker", async () => {
+  const f = fixture();
+  try {
+    const original = f.input("Choose an approach");
+    await f.bridge.handle(original);
+    const rootInput = f.calls.find(([name]) => name === "spawn")![1].input;
+    const parentIds = new Map([["thr_one", null]]);
+    const history = new Map<string, any[]>();
+    const interactions = new Map<string, any[]>();
+    const timestamp = Date.now() - 2000;
+    const recordTurn = (threadId: string, input: any[], seq = 1, pluginId = "telegram-projects") => {
+      const turnId = "turn-" + threadId + "-" + seq;
+      const requestId = "request-" + turnId;
+      const scope = {kind: "turn", turnId};
+      const events = history.get(threadId) ?? [];
+      events.push(
+        {seq, createdAt: timestamp + seq, type: "client/turn/requested", data: {requestId, originPluginId:pluginId, input}},
+        {seq:seq + 1, createdAt:timestamp + seq + 1, type:"turn/started", scope},
+        {seq:seq + 2, createdAt:timestamp + seq + 2, type:"turn/input/accepted", scope, data:{clientRequestId:requestId}},
+      );
+      history.set(threadId, events);
+      return {events, scope};
+    };
+    const showForm = (threadId: string, id: string, title: string, options: string[] | null, seq: number,
+      {status = "pending", expiresAt = Date.now() + 60_000} = {}) => {
+      const questions = [{title, options}];
+      const form = {id, threadId, status, expiresAt, createdAt:timestamp + seq + 1, turnId:null,
+        origin:{kind:"plugin", pluginId:"provider-codex", rendererId:"async-question"},
+        payload:{kind:"plugin", title, data:{questions}}};
+      history.get(threadId)!.push({seq, createdAt:timestamp + seq, type:"thread/extensionState/updated",
+        scope:{kind:"thread"}, data:{kind:"provider-codex/async-question", payload:{itemId:"item-" + id, questions}}});
+      interactions.set(threadId, [...(interactions.get(threadId) ?? []), form]);
+      return form;
+    };
+    const thread = (id: string) => ({...f.thread, id, parentThreadId:parentIds.get(id)});
+    f.sdk.threads.list = async ({parentThreadId}: any) =>
+      [...parentIds].filter(([, parent]) => parent === parentThreadId).map(([id]) => thread(id));
+    f.sdk.threads.get = async ({threadId}: any) => thread(threadId);
+    f.sdk.threads.events.list = async ({threadId, types, afterSeq, beforeSeq, order, limit}: any) => {
+      const events = (history.get(threadId) ?? []).filter(e => types.includes(e.type) &&
+        e.seq > Number(afterSeq ?? 0) && e.seq < Number(beforeSeq ?? Infinity)).sort((a, b) => a.seq - b.seq);
+      if (order === "desc") events.reverse();
+      return events.slice(0, Number(limit));
+    };
+    f.sdk.threads.interactions.list = async ({threadId}: any) => interactions.get(threadId) ?? [];
+    f.sdk.threads.interactions.get = async ({threadId, interactionId}: any) =>
+      interactions.get(threadId)!.find(form => form.id === interactionId);
+    f.sdk.threads.interactions.respond = async (args: any) => {
+      const form = await f.sdk.threads.interactions.get(args);
+      assert.equal(form.status, "pending");
+      form.status = "resolved";
+      f.calls.push(["respond", args]);
+    };
+    f.sdk.threads.spawn = async (args: any) => {
+      const id = args.title;
+      parentIds.set(id, args.parentThreadId);
+      recordTurn(id, args.input);
+      f.calls.push(["spawn", args]);
+      return thread(id);
+    };
+    const token = (input: any[]) => input[1].text.match(/route:([^\]]+)/)[1];
+    recordTurn("thr_one", rootInput);
+    await f.bridge.spawnDelegated({parentThreadId:"thr_one", routeToken:token(rootInput),
+      projectId:"proj_one", environmentId:"env_one", providerId:"codex",
+      title:"worker", text:"Do work", deliveryId:"worker-form-test"});
+    const workerInput = f.calls.filter(([name]) => name === "spawn").at(-1)![1].input;
+    await f.bridge.spawnDelegated({parentThreadId:"worker", routeToken:token(workerInput),
+      projectId:"proj_one", environmentId:"env_one", providerId:"codex",
+      title:"nested", text:"Do nested work", deliveryId:"nested-form-test"});
+
+    showForm("thr_one", "root", "Choose a direct answer", ["Alpha", "Beta"], 4);
+    showForm("worker", "worker-form", "Choose a worker answer", ["Alpha", "Beta"], 4);
+    showForm("nested", "nested-form", "Describe the nested result", null, 4);
+    showForm("worker", "already-answered", "Already answered by coordinator", null, 6, {status:"resolved"});
+    showForm("worker", "expired", "Expired question", null, 8, {expiresAt:Date.now() - 1});
+    const aboutToClose = showForm("worker", "will-close", "Closed before delivery", null, 10);
+    const willExpire = showForm("worker", "will-expire", "Expired before delivery", null, 12);
+    const worker = history.get("worker")!;
+    worker.push({seq:20, createdAt:timestamp + 20, type:"turn/completed", scope:{kind:"turn", turnId:"turn-worker-1"},
+      data:{status:"completed"}});
+    recordTurn("worker", [{type:"text", text:"Private BB work"}], 21, "provider-codex");
+    showForm("worker", "private-bb", "A question from BB", ["private", "details"], 24);
+    showForm("worker", "ambiguous-bb", "Repeated prompt", null, 26, {status:"resolved"});
+    const rootAmbiguous = showForm("thr_one", "ambiguous-root", "Repeated prompt", null, 30);
+    history.get("thr_one")!.push({seq:29, createdAt:timestamp + 29, type:"thread/extensionState/updated",
+      scope:{kind:"thread"}, data:{kind:"provider-codex/async-question",
+        payload:{itemId:"different-item", questions:rootAmbiguous.payload.data.questions}}});
+    interactions.get("worker")!.push({id:"plugin-approval", threadId:"worker", status:"pending", turnId:null,
+      origin:{kind:"plugin", pluginId:"provider-codex", rendererId:"macos-permission"},
+      payload:{kind:"plugin", data:{questions:[{title:"Fake approval", options:["Allow"]}]}}});
+
+    await f.bridge.observe();
+    aboutToClose.status = "resolved";
+    willExpire.expiresAt = Date.now() - 1;
+    await f.bridge.flush();
+    const cards = f.sent.filter(x => x.text?.includes("BB ждёт ответа"));
+    assert.equal(cards.length, 3);
+    for (const card of cards) {
+      assert.equal(card.message_thread_id, original.topicId);
+      assert.equal(card.reply_parameters.message_id, original.messageId);
+    }
+    const restarted = f.restart();
+    await restarted.observe();
+    await restarted.flush();
+    assert.equal(f.sent.filter(x => x.text?.includes("BB ждёт ответа")).length, 3);
+
+    // An ordinary Telegram message is still accepted while the root form is open.
+    await restarted.handle(f.input("A separate message"));
+    assert.ok(f.calls.some(([name, args]) => name === "send" && args.threadId === "thr_one"));
+    const pressOption = async (prompt: string, label: string) => {
+      const card = cards.find(x => x.text.includes(prompt));
+      const button = card.reply_markup.inline_keyboard.flat().find((key: any) => key.text === label);
+      await restarted.handle({...f.input(""), callback:button.callback_data});
+    };
+    await pressOption("Choose a direct answer", "Alpha");
+    await pressOption("Choose a worker answer", "Beta");
+    const nestedCard = f.store.list<any>("chat:question:100:").find(row => row.value.interactionId === "nested-form")!;
+    await restarted.handle({...f.input("Use the existing plan"), replyTo:Number(nestedCard.key.split(":").at(-1))});
+    assert.deepEqual(f.calls.filter(([name]) => name === "respond").map(([, args]) => args), [
+      {threadId:"thr_one", interactionId:"root", value:{answers:{"question-1":{selected:["option-1"]}}}},
+      {threadId:"worker", interactionId:"worker-form", value:{answers:{"question-1":{selected:["option-2"]}}}},
+      {threadId:"nested", interactionId:"nested-form", value:{answers:{"question-1":{selected:[], freeText:"Use the existing plan"}}}},
+    ]);
+    await pressOption("Choose a worker answer", "Alpha");
+    assert.equal(f.calls.filter(([name]) => name === "respond").length, 3);
+    assert.equal(f.calls.filter(([name]) => name === "resolve").length, 0);
+  } finally {f.cleanup();}
+});

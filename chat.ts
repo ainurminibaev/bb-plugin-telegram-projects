@@ -1,3 +1,4 @@
+import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interactionOpen } from "./codex-async-question";
 import { splitChildResultClaims, ReplyRoutes, type ReplyRoute } from "./reply-routing";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
 import { TelegramHandoff, type HandoffJob } from "./handoff";
@@ -116,6 +117,13 @@ type Inbox = {
   phase?: "attachment-download" | "preparing";
   attachmentThreadId?: string;
   at: number;
+};
+type QuestionDelivery = {
+  threadId: string;
+  interactionId: string;
+  revision: string;
+  turnId?: string;
+  route?: ReplyRoute;
 };
 type Outbox = {
   taskRoute?: ReplyRoute;
@@ -438,30 +446,35 @@ export class ChatBridge {
     }
   }
   private async observeChildRoutes(parent: Binding) {
-    const parentThreadId = parent.threadId!;
     let caughtUp = true;
-    const children = await this.d.sdk.threads.list({parentThreadId,archived:false,includeHidden:false,limit:100,signal:this.d.signal});
-    for (const child of children.filter(c => c.parentThreadId === parentThreadId && !c.deletedAt && !c.archivedAt)) {
-      const key = "reply:child-cursor:" + child.id;
-      if (this.s.get(key) === undefined) continue;
-      const events = await this.d.sdk.threads.events.list({threadId:child.id,
-        afterSeq:String(this.s.get<number>(key) ?? 0),limit:"100",signal:this.d.signal,
-        types:["client/turn/requested","turn/input/accepted","turn/completed"]});
-      if (events.length === 100) caughtUp = false;
-      for (const event of events) {
-        if (event.type === "client/turn/requested") this.routes.requested(child.id,event.data);
-        else if (event.type === "turn/input/accepted" && event.scope.kind === "turn")
-          this.routes.accept(child.id,event.scope.turnId,event.data.clientRequestId);
-        else if (event.type === "turn/completed" && event.scope.kind === "turn")
-          this.routes.complete(child.id,event.scope.turnId,event.data.status,event.createdAt);
-        this.s.put(key,event.seq);
-      }
-      const questions = await this.d.sdk.threads.interactions.list({threadId:child.id,signal:this.d.signal});
-      for (const question of questions.filter(q=>q.status === "pending" && this.canDeliver(parent,q.turnId,child.id))) {
+    const parents = [parent.threadId!];
+    const seen = new Set(parents);
+    for (const parentThreadId of parents) {
+      const children = await this.d.sdk.threads.list({parentThreadId,archived:false,includeHidden:false,limit:100,signal:this.d.signal});
+      for (const child of children) {
+        if (seen.has(child.id) || child.parentThreadId !== parentThreadId || child.deletedAt || child.archivedAt ||
+            child.visibility === "hidden" || this.s.get("group:thread:" + child.id)) continue;
+        const key = "reply:child-cursor:" + child.id;
+        if (this.s.get(key) === undefined) continue;
+        seen.add(child.id);
+        parents.push(child.id);
+        const events = await this.d.sdk.threads.events.list({threadId:child.id,
+          afterSeq:String(this.s.get<number>(key) ?? 0),limit:"100",signal:this.d.signal,
+          types:["client/turn/requested","turn/input/accepted","turn/completed"]});
+        if (events.length === 100) caughtUp = false;
+        for (const event of events) {
+          if (event.type === "client/turn/requested") this.routes.requested(child.id,event.data);
+          else if (event.type === "turn/input/accepted" && event.scope.kind === "turn")
+            this.routes.accept(child.id,event.scope.turnId,event.data.clientRequestId);
+          else if (event.type === "turn/completed" && event.scope.kind === "turn" && parentThreadId === parent.threadId)
+            this.routes.complete(child.id,event.scope.turnId,event.data.status,event.createdAt);
+          this.s.put(key,event.seq);
+        }
+        if (events.length === 100) continue;
         const revision = parent.revision + "-child-" + child.id;
         const binding: Binding = {...parent,projectId:child.projectId,threadId:child.id,revision,questionOnly:true};
-        this.s.put("reply:watch:"+revision,{...binding,owner:this.d.owner()});
-        this.question(binding,question);
+        const pending = await this.d.sdk.threads.interactions.list({threadId:child.id,signal:this.d.signal});
+        await this.observeQuestions(binding, pending, parentThreadId === parent.threadId);
       }
     }
     return caughtUp;
@@ -834,7 +847,8 @@ export class ChatBridge {
     ))
       if (
         ((key.startsWith("chat:in:") && (value as Inbox).state === "done") ||
-          (key.startsWith("chat:out:") && (value as Outbox).sentId)) &&
+          (key.startsWith("chat:out:") && (value as Outbox).sentId) ||
+          key.startsWith("chat:async-question:")) &&
         value.at &&
         value.at < Date.now() - 7 * 86400_000
       )
@@ -1433,7 +1447,7 @@ export class ChatBridge {
         await this.validThread(b, b.threadId);
         const questions = await this.d.sdk.threads.interactions.list({threadId: b.threadId, signal: this.d.signal});
         const replyQuestion = input.replyTo && this.s.get("chat:question:" + input.topicId + ":" + input.replyTo);
-        if (questions.some(q => q.status === "pending") && !replyQuestion) {
+        if (questions.some(q => interactionOpen(q) && !codexAsyncQuestions(q)) && !replyQuestion) {
           this.enqueue(input.topicId, "Помощник ждёт ответ на вопрос. Сначала ответь ему, затем отправь файл ещё раз. Файл пока не передан помощнику.");
           return;
         }
@@ -1747,12 +1761,8 @@ export class ChatBridge {
       );
       return;
     }
-    if (b.threadId && input.replyTo) {
-      const q = this.s.get<{
-        threadId: string;
-        interactionId: string;
-        revision: string;
-      }>("chat:question:" + input.topicId + ":" + input.replyTo);
+    if (input.replyTo) {
+      const q = this.s.get<QuestionDelivery>("chat:question:" + input.topicId + ":" + input.replyTo);
       if (q) {
         await this.answerText(this.deliveryBinding(input.topicId, q.revision) ?? b, q, text);
         return;
@@ -1764,7 +1774,7 @@ export class ChatBridge {
         threadId: b.threadId,
         signal: this.d.signal,
       });
-      if (pending.some((i) => i.status === "pending")) {
+      if (pending.some(i => interactionOpen(i) && !codexAsyncQuestions(i))) {
         this.enqueue(
           input.topicId,
           this.tr(
@@ -2150,12 +2160,18 @@ export class ChatBridge {
       threadId: b.threadId,
       interactionId: a.arg!,
     });
-    if (interaction.status !== "pending") {
+    const delivery = this.s.get<QuestionDelivery>("chat:question-out:question:" + b.revision + ":" + interaction.id);
+    if (!interactionOpen(interaction) || (delivery && !this.questionRouteCurrent(delivery))) {
       this.enqueue(b.topicId, this.tr("Этот вопрос уже закрыт в BB."));
       return;
     }
     const payload = interaction.payload;
-    if (
+    const asyncQuestions = delivery?.turnId && codexAsyncQuestions(interaction);
+    if (asyncQuestions) {
+      const value = codexAsyncAnswer(asyncQuestions, {option: a.extra ?? ""});
+      if (!value) throw Error("unsupported_question");
+      await this.d.sdk.threads.interactions.respond({threadId:b.threadId, interactionId:interaction.id, value});
+    } else if (
       payload.kind === "approval" &&
       (a.extra === "allow_once" || a.extra === "deny") &&
       payload.availableDecisions.includes(a.extra)
@@ -2194,7 +2210,7 @@ export class ChatBridge {
   }
   private async answerText(
     b: Binding,
-    q: { threadId: string; interactionId: string; revision: string },
+    q: QuestionDelivery,
     text: string,
   ) {
     if (q.threadId !== b.threadId || q.revision !== b.revision) {
@@ -2208,9 +2224,18 @@ export class ChatBridge {
       threadId: q.threadId,
       interactionId: q.interactionId,
     });
-    if (i.status !== "pending") {
+    if (!interactionOpen(i) || !this.questionRouteCurrent(q)) {
       this.enqueue(b.topicId, this.tr("Этот вопрос уже закрыт."));
       return;
+    }
+    const asyncQuestions = q.turnId && codexAsyncQuestions(i);
+    if (asyncQuestions) {
+      const value = codexAsyncAnswer(asyncQuestions, {text});
+      if (value) {
+        await this.d.sdk.threads.interactions.respond({threadId:q.threadId, interactionId:q.interactionId, value});
+        this.enqueue(b.topicId, this.tr("Ответ передан BB."));
+        return;
+      }
     }
     if (
       i.payload.kind !== "user_question" ||
@@ -2234,12 +2259,49 @@ export class ChatBridge {
     });
     this.enqueue(b.topicId, this.tr("Ответ передан BB."));
   }
-  private question(b: Binding, i: PendingInteraction) {
+  private questionRouteCurrent(delivery: QuestionDelivery) {
+    return !delivery.turnId || this.routes.sameTask(delivery.route,
+      this.routes.destination(delivery.threadId, delivery.turnId));
+  }
+  private async observeQuestions(b: Binding, pending: PendingInteraction[], allowOther: boolean) {
+    const threadId = b.threadId!;
+    for (const interaction of pending) {
+      const outId = "question:" + b.revision + ":" + interaction.id;
+      if (!interactionOpen(interaction) || this.s.get("chat:out:" + outId)) continue;
+      const asyncQuestions = codexAsyncQuestions(interaction);
+      const asyncKey = "chat:async-question:" + JSON.stringify([threadId, interaction.id]);
+      if (asyncQuestions && this.s.get(asyncKey)) continue;
+      if (!asyncQuestions && !allowOther && interaction.payload.kind !== "user_question") continue;
+      const turnId = interaction.turnId ?? (asyncQuestions
+        ? await codexAsyncQuestionTurn(this.d.sdk.threads, threadId, interaction, asyncQuestions, this.d.signal)
+        : undefined);
+      if (!turnId || !this.canDeliver(b, turnId, threadId)) continue;
+      if (b.questionOnly) {
+        this.s.put("reply:watch:" + b.revision, {...b, owner:this.d.owner()});
+        this.s.put("chat:thread-project:" + threadId, b.projectId);
+      }
+      const route = this.routes.destination(threadId, turnId);
+      this.s.atomic(() => {
+        if (asyncQuestions && this.s.get(asyncKey)) return;
+        this.question(b, interaction, asyncQuestions ? {turnId, route} : undefined);
+        if (asyncQuestions) this.s.put(asyncKey, {at:Date.now()});
+      });
+    }
+  }
+  private question(b: Binding, i: PendingInteraction, asyncDelivery?: {turnId: string; route?: ReplyRoute}) {
     const id = "question:" + b.revision + ":" + i.id;
     if (this.s.get("chat:out:" + id)) return;
     let text = this.tr("❓ BB ждёт ответа\n");
     const keys: Key[][] = [];
-    if (i.payload.kind === "approval") {
+    const asyncQuestions = asyncDelivery && codexAsyncQuestions(i);
+    if (asyncQuestions) {
+      text += asyncQuestions.map(q => q.title).join("\n\n").slice(0, 1550);
+      if (asyncQuestions.length === 1) {
+        for (const [index, option] of (asyncQuestions[0].options ?? []).entries())
+          keys.push([this.button(b, "resolve", label(option), i.id, "option-" + (index + 1))]);
+        text += this.tr("\n\nМожно ответить текстом через «Ответить» на это сообщение.");
+      } else text += this.tr("\n\nНесколько вопросов: открой форму в BB.");
+    } else if (i.payload.kind === "approval") {
       const p = i.payload;
       text +=
         this.tr("Требуется разрешение\n") +
@@ -2278,12 +2340,13 @@ export class ChatBridge {
       } else text += this.tr("\n\nНесколько вопросов: открой форму в BB.");
     } else text += this.tr("Эта форма открывается в BB.");
     keys.push([this.link(b.threadId!)]);
-    this.enqueue(b.topicId, text, keys, id);
     this.s.put("chat:question-out:" + id, {
-      threadId: b.threadId,
+      threadId: b.threadId!,
       interactionId: i.id,
       revision: b.revision,
-    });
+      ...asyncDelivery,
+    } satisfies QuestionDelivery);
+    this.enqueue(b.topicId, text, keys, id, false, undefined, asyncDelivery?.route);
   }
   private async observeFailures(b: Binding, parent: any): Promise<void> {
     const children = await this.d.sdk.threads.list({parentThreadId: b.threadId!, archived: false, includeHidden: false, limit: 100, signal: this.d.signal});
@@ -2563,8 +2626,7 @@ export class ChatBridge {
           threadId: b.threadId,
           signal: this.d.signal,
         });
-        for (const i of pending.filter((i) => i.status === "pending" && this.canDeliver(b, i.turnId)))
-          this.question(b, i);
+        if (events.length < 100) await this.observeQuestions(b, pending, true);
         try { await this.observeFailures(b, t); } catch { /* Keep delivery alive when status is unavailable. */ }
         let delegated: string[] = [];
         const activeTurn = this.s.get<string>("reply:active-turn:" + b.threadId);
@@ -2804,6 +2866,21 @@ export class ChatBridge {
       }
       count++;
       try {
+        const question = this.s.get<QuestionDelivery>(
+          "chat:question-out:" + key.slice("chat:out:".length),
+        );
+        if (question?.turnId) {
+          const thread = await this.d.sdk.threads.get({threadId:question.threadId, signal:this.d.signal});
+          const interaction = await this.d.sdk.threads.interactions.get({
+            threadId:question.threadId, interactionId:question.interactionId, signal:this.d.signal,
+          });
+          if (thread.archivedAt || thread.deletedAt || thread.visibility === "hidden" ||
+              this.s.get("group:thread:" + thread.id) || !interactionOpen(interaction) ||
+              !this.questionRouteCurrent(question)) {
+            this.s.put(key, {...o, sentId:-1, text:"", keys:undefined});
+            continue;
+          }
+        }
         const assistantOutput = key.startsWith("chat:out:event:") || key.startsWith("chat:out:explicit:");
         const delivered = assistantOutput ? await this.deliverArtifacts(o.text, key, o) : {text: o.text, lastMediaId: 0};
         const chunks = assistantOutput ? renderTelegramParts(cleanAssistantText(delivered.text).trim()) : splitText(delivered.text, 1800);
@@ -2879,10 +2956,7 @@ export class ChatBridge {
           this.s.put("chat:progress:" + o.topicId + ":" + o.revision, last);
         if ((key.startsWith("chat:out:event:") || key.startsWith("chat:out:end:")) && o.revision)
           await this.clearProgress(o.topicId, o.revision);
-        const question = this.s.get(
-          "chat:question-out:" + key.slice("chat:out:".length),
-        );
-        if (question)
+        if (question && last > 0)
           this.s.put("chat:question:" + o.topicId + ":" + last, question);
       } catch (e) {
         if (o.coversChildResults && e instanceof TelegramFailure && !e.ambiguous && e.code === "telegram_400") {
