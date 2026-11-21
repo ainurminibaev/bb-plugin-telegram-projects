@@ -35,11 +35,16 @@ export function privateExecutor(bot:number,owner:number,subject:number) {
 
 // The administrator supplies a BB CLI launcher pointing only at the isolated instance.
 // No file path or command from the group conversation is executed by the bridge.
-export function groupExecutor(chatId:number,topicId:number) {
-  const entry=configuredTargets(process.env.BB_TELEGRAM_GROUP_EXECUTORS)[chatId+":"+topicId];
-  if (entry && Object.values(configuredTargets(process.env.BB_TELEGRAM_PRIVATE_EXECUTORS)).some(other=>sameIsolation(entry,other)))
+export function groupExecutor(chatId:number,topicId:number,exclusive=false) {
+  const groups=configuredTargets(process.env.BB_TELEGRAM_GROUP_EXECUTORS);
+  const key=chatId+":"+topicId;
+  const entry=groups[key];
+  if (!entry) return;
+  if (Object.values(configuredTargets(process.env.BB_TELEGRAM_PRIVATE_EXECUTORS)).some(other=>sameIsolation(entry,other)))
     throw Error("private_worker_isolation_required");
-  return entry && isolatedExecutor(entry,false);
+  if (exclusive && Object.entries(groups).some(([scope,other])=>scope!==key && sameIsolation(entry,other)))
+    throw Error("forum_topic_requires_distinct_executor");
+  return isolatedExecutor(entry,false);
 }
 
 function isolatedExecutor(entry:Target,personal:boolean) {

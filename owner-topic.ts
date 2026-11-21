@@ -1,3 +1,4 @@
+import {forumDefaults,rememberForumName} from "./forum-defaults";
 import {groupThreadMatches,isSharedOwnerPolicy,sharedOwnerForum} from "./group-binding";
 import { createHash, randomUUID } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
@@ -205,10 +206,10 @@ export function ownerTopicTool(d: Dependencies) {
     try {
       await currentSource();
       await proveTurn();
-      const thread = await sdk.threads.get({threadId,signal});
-      if (thread.id!==threadId || thread.projectId!==projectId || !thread.environmentId ||
+      const thread=work?undefined:await sdk.threads.get({threadId,signal});
+      if (!work && (!thread || thread.id!==threadId || thread.projectId!==projectId || !thread.environmentId ||
           thread.archivedAt || thread.deletedAt || thread.visibility!=="visible" ||
-          (sourceIsShared && thread.parentThreadId))
+          (sourceIsShared && thread.parentThreadId)))
         throw Error("group_source_thread_unavailable");
       const tg = d.transport(chatId,signal);
       const checkForum=()=>checkOwnerForum(tg,chatId,owner,bot,{shared:sourceIsShared,work});
@@ -283,6 +284,7 @@ export function ownerTopicTool(d: Dependencies) {
         if (store.get(`group:policy:${chatId}:${stage.topicId}`))
           throw Error("owner_topic_binding_conflict");
         save({...stage,phase:"spawning"});
+        if (!thread?.environmentId) throw Error("group_source_thread_unavailable");
         const newThread = await sdk.threads.spawn({
           projectId, title:args.title, visibility:"visible", permissionMode:"accept-edits",
           // BB 0.50.1 requires input to spawn a standalone thread. This
@@ -304,7 +306,7 @@ export function ownerTopicTool(d: Dependencies) {
         await proveTurn();
         const newThread = await sdk.threads.get({threadId:stage.threadId,signal});
         if (newThread.id!==stage.threadId || newThread.projectId!==projectId ||
-            newThread.environmentId!==thread.environmentId || newThread.archivedAt || newThread.deletedAt ||
+            newThread.environmentId!==thread?.environmentId || newThread.archivedAt || newThread.deletedAt ||
             newThread.visibility!=="visible")
           throw Error("owner_topic_thread_unavailable");
         const targetKey = `group:policy:${chatId}:${stage.topicId}`;
@@ -312,10 +314,16 @@ export function ownerTopicTool(d: Dependencies) {
         if (target && (target.threadId!==stage.threadId || target.revision!==stage.revision))
           throw Error("owner_topic_binding_conflict");
         signal.throwIfAborted();
+        const configured=sourceIsShared ? forumDefaults(store,bot,owner,chatId)?.source : undefined;
+        const defaults=configured?.ownerSharedProject && configured.projectId===projectId ? configured : undefined;
         if (!target) bindGroupTopic(store,{
           chatId, topicId:stage.topicId, threadId:stage.threadId, projectId,
           revision:stage.revision, botId:bot, botUsername:username,
-          ownerId:owner, ownerOnly:true, ownerTopic:true, requireMention:false,
+          ownerId:owner, ownerOnly:true, ownerTopic:true, requireMention:defaults?.requireMention??false,
+          ...(defaults && {
+            addressName:defaults.addressName,includeTopicContext:defaults.includeTopicContext,
+            searchableHistory:defaults.searchableHistory,retainFullHistory:defaults.retainFullHistory,
+          }),
           ...(sourceIsShared && {ownerSharedProject:true}),
         },projectId);
         await checkForum();
@@ -325,7 +333,7 @@ export function ownerTopicTool(d: Dependencies) {
         const bound = store.get<GroupTopicPolicy>(targetKey);
         if (bound?.revision!==stage.revision || bound.threadId!==stage.threadId ||
             bound.ownerId!==owner || bound.botId!==bot || bound.ownerTopic!==true ||
-            bound.ownerSharedProject!==sourceIsShared || !bound.ownerOnly || bound.requireMention || bound.allowedSenderIds?.length || bound.projectId!==projectId ||
+            bound.ownerSharedProject!==sourceIsShared || !bound.ownerOnly || bound.requireMention!==(defaults?.requireMention??false) || bound.allowedSenderIds?.length || bound.projectId!==projectId ||
             bound.chatId!==chatId || bound.topicId!==stage.topicId || store.get("group:thread:"+stage.threadId)!==targetKey)
           throw Error("owner_topic_binding_conflict");
         save({...stage,phase:"posting"});
@@ -338,6 +346,7 @@ export function ownerTopicTool(d: Dependencies) {
         save(stage);
       }
       if (stage.phase!=="done") throw Error("owner_topic_operation_unconfirmed");
+      rememberForumName(store,bot,chatId,stage.topicId,args.title,-1,true,Math.floor(Date.now()/1000));
       store.put(`group:managed-topic:${bot}:${chatId}:${stage.topicId}`,{title:args.title,messageId:stage.messageId});
       return {topicId:stage.topicId,...(stage.threadId ? {threadId:stage.threadId} : {requiresBinding:true as const}),
         messageId:stage.messageId,

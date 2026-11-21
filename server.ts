@@ -1,9 +1,11 @@
+import {describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,type ForumDefaults} from "./forum-defaults";
+import {handleDelegatedForumCommand} from "./forum-delegation";
 import {handleOwnerForumCommand} from "./forum-commands";
 import {topicStateKey} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,processPrivateEmployeeInputs,type PrivateJob} from "./employee-private";
-import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum} from "./group-binding";
+import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
-import { ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
+import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
 import { privacyKey, privacySummary, rememberMembership, sendVisibilityUpdates } from "./group-visibility";
 import {reconcileEmployeeTicket,employeeHome,employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
 import {proposalInput,presentProposal,handleOwnerSelection,collectDecisionResults,presentProjectProposals} from "./owner-selection";
@@ -154,6 +156,13 @@ export const rpcContract = defineRpcContract({
       deliverySources:z.array(z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)).max(100).optional(),
       allowedSenderIds:z.array(z.number().int().positive().safe()).max(100).optional(),includeTopicContext:z.boolean().optional(),searchableHistory:z.boolean().optional(),retainFullHistory:z.boolean().optional()}).strict(),
     output:z.object({bound:z.literal(true),warning:z.string().optional()}),
+  },
+  setForumTopicDefaults:{
+    input:z.object({confirm:z.literal(true),chatId:z.number().int().negative(),sourceTopicId:z.number().int().min(2),
+      enabled:z.boolean(),managers:z.array(z.number().int().positive().safe()).max(100).default([]),
+      closeManagers:z.array(z.number().int().positive().safe()).max(100).optional(),
+      deleteManagers:z.array(z.number().int().positive().safe()).max(100).default([])}).strict(),
+    output:z.object({enabled:z.boolean()}),
   },
   unbindGroupTopic: {
     input:z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative()}).strict(),
@@ -597,11 +606,62 @@ export default async function plugin(bb: BbPluginApi) {
       return bridge.proveOwnerForumRequest(threadId,token,owner);
     },
   });
+  async function inheritForumTopic(owner:number,bot:number,signal:AbortSignal,update:unknown) {
+    const topic=describeForumTopic(store,bot,owner,update);
+    const candidate=inheritableForumTopic(store,bot,owner,topic);
+    if (!topic || !candidate) return topic?.service??false;
+    const {chat,topic:topicId}=topic;
+    const {source,metadata}=candidate;
+    const executor=source.isolated?groupExecutor(chat,topicId,true):undefined;
+    if (source.isolated && (!executor || executor.threadId===source.threadId || executor.projectId===source.projectId)) return topic.service;
+    const targetKey=`group:policy:${chat}:${topicId}`;
+    const journal=`group:forum-provision:${bot}:${chat}:${topicId}`;
+    if (store.get(journal)) return topic.service;
+    const current=()=>{
+      const live=forumDefaults(store,bot,owner,chat)?.source;
+      return ownerId()===owner && botId()===bot && !stateTransferBusy &&
+        live?.revision===source.revision && live?.threadId===source.threadId &&
+        !store.get(targetKey) &&
+        !!inheritableForumTopic(store,bot,owner,topic);
+    };
+    let projectId=executor?.projectId,threadId=executor?.threadId;
+    if (source.ownerSharedProject) {
+      const tg=telegram(botToken,signal,15_000,()=>chat,apiRoot);
+      await checkOwnerForum(tg,chat,owner,bot,{shared:true});
+      const sourceThread=await bb.sdk.threads.get({threadId:source.threadId,signal});
+      if (!sourceThread.environmentId || sourceThread.projectId!==source.projectId || sourceThread.visibility!=="visible" ||
+          sourceThread.archivedAt || sourceThread.deletedAt || sourceThread.parentThreadId || !current()) return topic.service;
+      store.put(journal,"spawning");
+      const child=await bb.sdk.threads.spawn({projectId:sourceThread.projectId,visibility:"visible",
+        title:metadata.name,permissionMode:"accept-edits",
+        environment:{type:"reuse",environmentId:sourceThread.environmentId},
+        ...(sourceThread.providerId && {providerId:sourceThread.providerId}),
+        input:[{type:"text",visibility:"agent-only",mentions:[],
+          text:"Initialize an empty Telegram topic conversation. Wait for a Telegram request and reply NO_REPLY."}]});
+      if (child.projectId!==source.projectId || child.id===source.threadId) throw Error("forum_topic_thread_unconfirmed");
+      projectId=child.projectId;threadId=child.id;
+    }
+    if (current() && projectId && threadId) {
+      const policy=inheritedForumPolicy(source,topicId,{threadId,projectId},crypto.randomUUID());
+      bindGroupTopic(store,policy,projectId);
+      store.del(journal);
+    }
+    return topic.service;
+  }
   async function forumCommand(owner:number,bot:number,signal:AbortSignal,update:unknown) {
     activeTelegramWrites++;
     try {
+      const since=store.get<number>("group:forum-command-since:"+bot);
+      if (since===undefined) return false;
+      const delegated=await handleDelegatedForumCommand({
+        store,owner,bot,signal,since,
+        transport:chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),
+        current:()=>!!bridge && ownerId()===owner && botId()===bot && !stateTransferBusy,
+        create:createOwnerTopic,
+      },update);
+      if (delegated) return true;
       return await handleOwnerForumCommand({
-        store,owner,bot,signal,
+        store,owner,bot,signal,since,
         transport:chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),
         binding:topicId=>{
           const b=bridge?.bindings().find(row=>row.topicId===topicId);
@@ -1506,7 +1566,26 @@ export default async function plugin(bb: BbPluginApi) {
       if (topicState==="deleted" || topicState==="working" || topicState==="uncertain") throw Error("forum_topic_unavailable");
       bindGroupTopic(store,{ownerSharedProject,ownerTopicManagerProjectId,addressName,deliverySources:deliverySources ? [...new Set(deliverySources)].sort() : store.get<{deliverySources?:string[]}>(`group:policy:${chatId}:${topicId}`)?.deliverySources,isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},projectId);
+      store.del(forumOptOutKey(bot,chatId,topicId));
       return warning ? {bound:true as const,warning} : {bound:true as const};
+    },
+    setForumTopicDefaults: async ({chatId,sourceTopicId,enabled,managers,closeManagers,deleteManagers})=>{
+      const owner=ownerId(),bot=botId();
+      if (!owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
+      const key=forumDefaultsKey(bot,chatId);
+      if (!enabled) {store.del(key);return {enabled:false};}
+      const sourceKey=`group:policy:${chatId}:${sourceTopicId}`;
+      const source=store.get<GroupTopicPolicy>(sourceKey);
+      if (!source || source.ownerId!==owner || source.botId!==bot || !source.projectId ||
+          !groupThreadMatches(store,source,source.projectId) || (!source.ownerSharedProject && (!source.isolated || !source.ownerTopicManagerProjectId)))
+        throw Error("forum_default_scope_required");
+      const tg=telegram(botToken,lifetime.signal,15_000,()=>chatId,apiRoot);
+      await checkOwnerForum(tg,chatId,owner,bot,{shared:source.ownerSharedProject,work:source.ownerSharedProject?undefined:true});
+      if (stateTransferBusy || owner!==ownerId() || bot!==botId() ||
+          store.get<GroupTopicPolicy>(sourceKey)?.revision!==source.revision) throw Error("forum_default_scope_changed");
+      store.put(key,{sourceTopicId,managers:[...new Set(managers)],closeManagers:[...new Set(closeManagers??[])],
+        deleteManagers:[...new Set(deleteManagers)],since:Math.floor(Date.now()/1000)} satisfies ForumDefaults);
+      return {enabled:true};
     },
     unbindGroupTopic: ({chatId,topicId})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
@@ -1516,6 +1595,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (state==="working" || state==="uncertain") throw Error("forum_topic_operation_pending");
       const removed=!!previous;
       store.atomic(()=>{if (previous) {
+        store.put(forumOptOutKey(previous.botId,chatId,topicId),true);
         for (const row of store.list(`group:recent-files:${previous.botId}:${chatId}:${topicId}:`)) store.del(row.key);
         for (const row of store.list(contextMediaPrefix(previous.botId,chatId,topicId))) store.del(row.key);
       }
@@ -2153,6 +2233,11 @@ export default async function plugin(bb: BbPluginApi) {
         }
         try {
           let updates: any[];
+          const forumCommandsBot=botId();
+          if (forumCommandsBot) {
+            const key="group:forum-command-since:"+forumCommandsBot;
+            if (!store.get(key)) store.put(key,Math.floor(Date.now()/1000)+1);
+          }
           ingressPolling = true;
           try {
             updates = await tg<any[]>("getUpdates", {
@@ -2163,6 +2248,7 @@ export default async function plugin(bb: BbPluginApi) {
           } finally { ingressPolling = false; }
           ingressError = null;
           for (const u of updates) {
+            if (skipExcludedForumUpdate(store, u)) continue;
             const privateOwner=ownerId(),privateBot=botId();
             if (privateOwner && privateBot && cfg.chatEnabled && bridge &&
                 await forumCommand(privateOwner,privateBot,signal,u)) {
@@ -2185,7 +2271,17 @@ export default async function plugin(bb: BbPluginApi) {
               store.put(privacyKey(me.id), !me.readsAllGroups);
               if (ownerId()) await sendGroupVisibility();
             }
-            if (skipExcludedForumUpdate(store, u)) continue;
+            if (privateOwner && privateBot && cfg.chatEnabled && bridge) {
+              activeTelegramWrites++;
+              try {
+                if (await inheritForumTopic(privateOwner,privateBot,signal,u)) {
+                  store.put("ingress:offset",u.update_id+1);
+                  continue;
+                }
+              } catch {
+                bb.log.warn("Telegram forum topic provisioning deferred");
+              } finally { activeTelegramWrites--; }
+            }
             const profilePath=legacyOperations ? process.env.BB_TELEGRAM_EMPLOYEE_PROFILE : undefined;
             const configured=profilePath!==undefined ? readEmployeeProfile(profilePath) : undefined;
             if (botId() && ownerId() && await handleConsentCallback(consentContext(signal), u)) {

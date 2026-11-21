@@ -1,3 +1,4 @@
+import {forumName} from "./forum-defaults";
 import {isTopicPaused} from "./topic-lifecycle";
 import {historyCutoff,historyPrefix,topicPassages} from "./topic-search";
 import type { Store } from "./model";
@@ -150,7 +151,9 @@ export function routeUpdate(
         (e.type === "text_mention" && e.user?.id === group.botId) ||
         (e.type === "bot_command" && value.split("@")[1] === username.slice(1));
     });
-    if (group.requireMention && !addressed) return {kind: "ignore"};
+    const replyAuthor=m.reply_to_message?.from;
+    const repliesToDifferentBot=replyAuthor?.is_bot===true && replyAuthor.id!==group.botId;
+    if (group.requireMention && (!addressed || repliesToDifferentBot)) return {kind: "ignore"};
     const reply = m.reply_to_message;
     const sameTopic = reply?.chat?.id === group.chatId && (reply.message_thread_id ?? 0) === topicId;
     const repliedToMessage = sameTopic && reply.message_id !== topicId;
@@ -433,6 +436,8 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       }
     }
     if (route.kind !== "group") return;
+    const topicName=forumName(store,botId,chatId,topicId);
+    if (topicName) route.text="Название темы Telegram (справочные данные): "+JSON.stringify(topicName)+"\n"+route.text;
     const reply=message.reply_to_message;
     if (reply?.from?.id===botId && reply.chat?.id===chatId && (reply.message_thread_id??0)===topicId) {
       const pdf=store.get<{owner:number;threadId:string;path:string;sha256:string;fileId:string}>(

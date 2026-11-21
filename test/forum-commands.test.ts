@@ -57,27 +57,26 @@ function fixture() {
   }};
   // The test runs stock topic creation without a live provider or a synthetic agent route.
   const create=ownerTopicTool({store,sdk:sdk as never,identity:async()=>({owner,bot}),transport});
-  let actualBinding=main;
   const deps={store,owner,bot,signal:new AbortController().signal,transport,
-    binding:(id:number)=>id===0?actualBinding:undefined,current:()=>true,create};
+    binding:(id:number)=>id===0?main:undefined,current:()=>true,create};
+  const since=Math.floor(Date.now()/1000);
   const post=(text:string,extra:object={},messageId=++seq)=>{
-    return handleOwnerForumCommand(deps,{update_id:++seq,message:{
-      message_id:messageId,chat:{id:owner,type:"private"},from:{id:owner},text,...extra,
+    return handleOwnerForumCommand({...deps,since},{update_id:++seq,message:{
+      message_id:messageId,chat:{id:owner,type:"private"},from:{id:owner},text,date:since,
+      entities:[{type:"bot_command",offset:0,length:text.split(/\s/)[0].length}],...extra,
     }});
   };
-  const preview=()=>calls.findLast(c=>c.destination===owner && c.body.reply_markup?.inline_keyboard)!;
-  const press=(card=preview(),opts:{sender?:number;chat?:number;message?:number;cancel?:boolean;botId?:number}={})=>
-    handleOwnerForumCommand({...deps,bot:opts.botId??bot},{update_id:++seq,callback_query:{
-      id:String(seq),from:{id:opts.sender??owner},message:{message_id:opts.message??card.id,chat:{id:opts.chat??owner,type:"private"}},
-      data:card.body.reply_markup.inline_keyboard[0][opts.cancel?1:0].callback_data,
-    }});
+  const oldCard=()=>handleOwnerForumCommand(deps,{callback_query:{
+    id:"old",from:{id:owner},message:{message_id:33,chat:{id:owner,type:"private"},from:{id:bot}},
+    data:"ft:confirm:"+"a".repeat(32),
+  }});
   const groupPost=(chat:number)=>acceptGroupUpdate(store,{update_id:++seq,message:{
     message_id:seq,date:Math.floor(Date.now()/1000)+3,
     chat:{id:chat,type:"supergroup"},is_topic_message:true,message_thread_id:topic,from:{id:owner},text:"Owner topic request",
   }},owner,bot);
   const writes=()=>calls.filter(c=>c.method==="createForumTopic" || c.method==="spawn" ||
     ["deleteForumTopic","closeForumTopic","reopenForumTopic"].includes(c.method) || (c.method==="sendMessage" && c.destination!==owner));
-  return {store,calls,rights,post,preview,press,groupPost,writes,changeBinding:()=>{actualBinding={...main,threadId:"another-private"};}};
+  return {store,calls,rights,post,oldCard,since,groupPost,writes};
 }
 
 test("owner command in the same DM creates once, selects the exact forum and uses a new childless BB conversation",async()=>{
@@ -86,13 +85,8 @@ test("owner command in the same DM creates once, selects the exact forum and use
   await f.post("/topic_create Счётчик");
   assert.deepEqual(f.writes(),[]);
   await f.post("/topic_create Счётчик | Второй форум | Начинаем.");
-  const card=f.preview();
-  assert.match(card.body.text,/Второй форум/);
-  await f.press(card,{sender:9});
-  await f.press(card,{botId:99});
-  assert.deepEqual(f.writes(),[]);
-  await f.press(card);
-  await f.press(card);
+  await f.post("/topic_create Счётчик | Второй форум | Начинаем.");
+  assert(!f.calls.some(c=>c.body.reply_markup));
   assert.deepEqual(f.writes().map(c=>c.method),["createForumTopic","spawn","sendMessage"]);
   assert.equal(f.writes()[0].destination,second);
   assert.equal(f.writes()[2].body.text,"Начинаем.");
@@ -103,59 +97,56 @@ test("owner command in the same DM creates once, selects the exact forum and use
 
 test("closing preserves context, reopening allows new work, and the other forum stays independent",async()=>{
   const f=fixture();
-  await f.post("/topic_close "+topicLink(first));await f.press();
+  await f.post("/topic_close "+topicLink(first));
   assert.equal(isTopicPaused(f.store,bot,first,topic),true);
   assert.ok(f.store.get(historyPrefix(first,topic)+"8"));
   assert.equal(f.groupPost(first),false);
   assert.equal(f.groupPost(second),true);
-  await f.post("/topic_reopen "+topicLink(first));await f.press();
+  await f.post("/topic_reopen "+topicLink(first));
   assert.equal(isTopicPaused(f.store,bot,first,topic),false);
   assert.equal(f.groupPost(first),true);
   assert.deepEqual(f.writes().map(c=>[c.method,c.destination]),[["closeForumTopic",first],["reopenForumTopic",first]]);
 });
 
-test("deletion needs the original confirmation and fresh permissions, and removes only this Telegram scope",async()=>{
+test("deletion requires one explicit topic and fresh Telegram permissions",async()=>{
   const f=fixture();
+  const command="/topic_delete "+topicLink(second);
   await f.post("/topic_delete Проверка"); // Equal titles alone are ambiguous.
-  assert.deepEqual(f.writes(),[]);
-  await f.post("/topic_delete "+topicLink(second),{},42);
-  const card=f.preview();
-  assert.match(card.body.text,/безвозвратно удалены тема и все её сообщения/);
-  assert.match(card.body.text,/9898\/3/);
-  await f.post("/topic_delete "+topicLink(second),{},42);
-  assert.equal(f.preview().id,card.id);
-  for (const options of [{sender:9},{chat:9},{message:999}]) await f.press(card,options);
+  await f.post("/topic_delete "+topicLink(first)+" "+topicLink(second));
+  await f.post(command,{from:{id:9}});
+  await f.post(command,{forward_origin:{type:"user"}});
+  await f.post(command,{entities:[]});
+  await f.post(command,{entities:[{type:"blockquote",offset:0,length:command.length},
+    {type:"bot_command",offset:0,length:"/topic_delete".length}]});
+  await f.post(command,{date:f.since-1});
+  await f.oldCard();
   assert.deepEqual(f.writes(),[]);
   f.rights.deleteBot=false;
-  await f.press(card);
+  await f.post(command,{},4002);
   assert.deepEqual(f.writes(),[]);
   f.rights.deleteBot=true;
-  await f.post("/topic_delete "+topicLink(second));const approved=f.preview();
-  await f.press(approved);await f.press(approved);
+  await f.post(command,{},4002); // Redelivery after gaining rights does not gain authorization.
+  assert.deepEqual(f.writes(),[]);
+  await Promise.all([f.post(command,{},4003),f.post(command,{},4003)]);
+  await f.oldCard();
   assert.deepEqual(f.writes().map(c=>[c.method,c.destination,c.body.message_thread_id]),[["deleteForumTopic",second,topic]]);
+  assert(!f.calls.some(c=>c.body.reply_markup));
   assert.equal(f.store.get(historyPrefix(second,topic)+"8"),undefined);
   assert.ok(f.store.get(historyPrefix(first,topic)+"8"));
   assert.equal(f.store.get(topicStateKey(bot,second,topic)),"deleted");
-  assert.ok(f.store.get("group:thread:seed-"+second)); // Keep BB history separate and retain ownership.
+  assert.ok(f.store.get("group:thread:seed-"+second));
 });
 
-test("cancellation, changed binding, active work and uncertain sends fail without retrying the mutation",async()=>{
+test("active work and uncertain sends fail without retrying the mutation",async()=>{
   const f=fixture();
-  await f.post("/topic_delete "+topicLink(first));const cancelled=f.preview();
-  await f.press(cancelled,{cancel:true});await f.press(cancelled);
-  assert.deepEqual(f.writes(),[]);
   assert.equal(f.groupPost(first),true);
-  await f.post("/topic_delete "+topicLink(first));await f.press();
-  assert.deepEqual(f.writes(),[]);
-  await f.post("/topic_close "+topicLink(second));
-  f.changeBinding();
-  await f.press();
+  await f.post("/topic_delete "+topicLink(first));
   assert.deepEqual(f.writes(),[]);
   const other=fixture();
   other.rights.fail="ambiguous";
-  await other.post("/topic_delete "+topicLink(first));await other.press();
+  await other.post("/topic_delete "+topicLink(first));
   assert.equal(other.store.get(topicStateKey(bot,first,topic)),"uncertain");
   assert.ok(other.store.get(historyPrefix(first,topic)+"8"));
-  await other.post("/topic_delete "+topicLink(first));await other.press();
+  await other.post("/topic_delete "+topicLink(first));
   assert.equal(other.writes().length,1);
 });

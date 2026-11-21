@@ -1,3 +1,9 @@
+# 0.9.41
+
+- Apply explicit forum defaults to new topics and keep individual topic settings. Route each bot by its own address in the same group and use Telegram topic names as reference data.
+- Execute direct authorized forum commands without a second card. Deletion requires an exact topic link and separate authorization to delete. Older cards cannot trigger topic operations.
+- Keep each topic's BB thread, context and media scoped to its own binding. New work topics require a distinct isolated executor before the bridge starts accepting tasks.
+
 # 0.9.40
 
 - Add paired-owner forum commands in the existing private chat, independent of a restored model session's tool inventory. Create, close and reopen topics from a preview card. Delete a specific topic only after a separate confirmation that warns about permanent loss of its Telegram history.
