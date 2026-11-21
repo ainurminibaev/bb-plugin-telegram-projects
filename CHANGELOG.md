@@ -1,3 +1,9 @@
+# 0.9.38
+
+- Deliver authorized group photos as native agent input, including an explicit same-topic reply and unambiguous recent media explicitly referenced by the paired owner.
+- Bind a closed owner-only forum topic to its own thread in an existing assistant project. Keep the paired private chat and project menus available and allow new-topic requests from the paired owner's current private Telegram message.
+- Permit an optional exact name address in mention mode and deliver verified PNG and JPEG files from group output directories to the original topic. Isolated image export requires the same bridge version and an updated launcher on the worker side.
+
 # 0.9.37
 
 - Remove standalone bridge markers from outgoing Telegram text, including group replies with attachments, while preserving private reply deduplication.

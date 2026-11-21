@@ -24,6 +24,7 @@ test("owner text in a topic becomes a chat input", () => {
     topicId: 42,
     messageId: 3,
     text: "привет",
+    originalText: true,
     callback: undefined,
     replyTo: undefined,
     voice: undefined,

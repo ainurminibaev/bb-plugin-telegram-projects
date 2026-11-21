@@ -1,3 +1,4 @@
+import {imageFormat,type IsolatedAttachment} from "./group-attachments";
 import {createHash} from "node:crypto";
 import {pdfChunkSize} from "./group-pdf";
 import {constants} from "node:fs";
@@ -8,7 +9,7 @@ import {tmpdir} from "node:os";
 import {basename,dirname,isAbsolute,join} from "node:path";
 import {promisify} from "node:util";
 import {z} from "zod";
-import {isolatedGroupResult,isolatedAnswer,isolatedPdfPart} from "./isolated-group";
+import {isolatedGroupResult,isolatedAnswer,isolatedPdfPart,isolatedImagePart} from "./isolated-group";
 
 const exec=promisify(execFile);
 const target=z.object({projectId:z.string().min(1),threadId:z.string().min(1),cli:z.string().refine(isAbsolute)}).strict();
@@ -38,14 +39,17 @@ export function groupExecutor(chatId:number,topicId:number) {
     upload:(file:SavedTelegramFile,signal:AbortSignal)=>uploadGroupFile(entry.cli,entry.threadId,file,signal),
     pdf:async(routeToken:string,path:string,signal:AbortSignal)=>collectIsolatedPdf(path,async offset=>
       isolatedPdfPart.parse(await call("readIsolatedPdf",{...ids,routeToken,path,offset},signal))),
-    submit:async(routeToken:string,text:string,signal:AbortSignal)=>
-      isolatedGroupResult.parse(await call("submitIsolatedGroup",{...ids,routeToken,text},signal)),
+    image:async(routeToken:string,path:string,signal:AbortSignal)=>collectIsolatedImage(path,async offset=>
+      isolatedImagePart.parse(await call("readIsolatedImage",{...ids,routeToken,path,offset},signal))),
+    submit:async(routeToken:string,text:string,signal:AbortSignal,attachments:IsolatedAttachment[])=>
+      isolatedGroupResult.parse(await call("submitIsolatedGroup",{...ids,routeToken,text,...(attachments.length && {attachments})},signal)),
     read:async(routeToken:string,signal:AbortSignal)=>
       isolatedAnswer.parse(await call("readIsolatedGroup",{...ids,routeToken},signal)),
   };
 }
 
-export async function collectIsolatedPdf(path:string,part:(offset:number)=>Promise<z.infer<typeof isolatedPdfPart>>) {
+async function collectIsolatedArtifact(part:(offset:number)=>Promise<z.infer<typeof isolatedPdfPart>>,
+  validHeader:(bytes:Buffer)=>boolean) {
   const chunks:Uint8Array<ArrayBuffer>[]=[];
   const hash=createHash("sha256");
   let size=0,revision="",offset=0;
@@ -54,11 +58,22 @@ export async function collectIsolatedPdf(path:string,part:(offset:number)=>Promi
     if (offset && (next.revision!==revision || next.size!==size)) throw Error("isolated_pdf_changed");
     size=next.size; revision=next.revision;
     const bytes=Buffer.from(next.data,"base64");
-    if (bytes.length!==Math.min(pdfChunkSize,size-offset) || (!offset && bytes.toString("ascii",0,5)!=="%PDF-"))
+    if (bytes.length!==Math.min(pdfChunkSize,size-offset) || (!offset && !validHeader(bytes)))
       throw Error("invalid_isolated_pdf");
     hash.update(bytes); chunks.push(new Uint8Array(bytes)); offset+=bytes.length;
   } while (offset<size);
-  return {name:basename(path),path,document:new Blob(chunks,{type:"application/pdf"}),sha256:hash.digest("hex")};
+  return {chunks,sha256:hash.digest("hex")};
+}
+
+export async function collectIsolatedPdf(path:string,part:(offset:number)=>Promise<z.infer<typeof isolatedPdfPart>>) {
+  const {chunks,sha256}=await collectIsolatedArtifact(part,bytes=>bytes.toString("ascii",0,5)==="%PDF-");
+  return {name:basename(path),path,document:new Blob(chunks,{type:"application/pdf"}),sha256};
+}
+
+export async function collectIsolatedImage(path:string,part:(offset:number)=>Promise<z.infer<typeof isolatedImagePart>>) {
+  const format=/\.png$/i.test(path) ? "png" : "jpeg";
+  const {chunks}=await collectIsolatedArtifact(part,bytes=>imageFormat(bytes)===format);
+  return {name:basename(path),photo:new Blob(chunks,{type:"image/"+format})};
 }
 
 async function uploadGroupFile(cli:string,threadId:string,file:SavedTelegramFile,signal:AbortSignal):Promise<SavedTelegramFile> {

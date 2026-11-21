@@ -1,10 +1,12 @@
-import { ownerTopicInput, ownerTopicTool } from "./owner-topic";
+import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum} from "./group-binding";
+import {maxImageBytes} from "./group-attachments";
+import { ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
 import { privacyKey, privacySummary, rememberMembership, sendVisibilityUpdates } from "./group-visibility";
 import {reconcileEmployeeTicket,employeeHome,employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
 import {proposalInput,presentProposal,handleOwnerSelection,collectDecisionResults,presentProjectProposals} from "./owner-selection";
 import {groupFollowUpInput,bbReminderInput,isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
 import {groupExecutor} from "./isolated-client";
-import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf} from "./isolated-group";
+import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf,isolatedImageInput,isolatedImagePart,readIsolatedImage} from "./isolated-group";
 import {cleanInbox} from "./inbox-retention";
 import {openTopicSearch,historyPrefix,topicPassages} from "./topic-search";
 import { transcribeWithVoiceRouter } from "./voice-router";
@@ -21,7 +23,7 @@ import { bindGroupTopic, groupCliRestricted, groupTyping, processGroupInputs } f
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
-import { acceptGroupUpdate, routeUpdate, skipExcludedForumUpdate } from "./ingress";
+import { acceptGroupUpdate, contextMediaPrefix, routeUpdate, skipExcludedForumUpdate, type GroupTopicPolicy } from "./ingress";
 import { accessList, accessModeKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, setAccess } from "./rights";
 import { handleConsentCallback, watchConsents } from "./consent";
 import { handleSetupUpdate, notifyGroupsAdded, welcomeScreen } from "./setup-screens";
@@ -53,7 +55,7 @@ import {
 } from "node:fs";
 import {
   telegram,
-  transcribeTelegramVoice,
+  transcribeTelegramVoice, downloadGroupImage,
   checkBot,
   runBb,
   readEnvToken,
@@ -123,6 +125,7 @@ export const rpcContract = defineRpcContract({
   reconcileEmployeeTicket:{input:z.object({idempotencyKey:z.string().regex(/^[a-f0-9]{32}$/)}).strict(),output:z.object({state:z.string(),messageId:z.number().optional()})},
   checkEmployeeWrite:{input:employeeWriteCheck,output:z.object({allowed:z.boolean()})},
   readIsolatedPdf:{input:isolatedPdfInput,output:isolatedPdfPart},
+  readIsolatedImage:{input:isolatedImageInput,output:isolatedImagePart},
   readIsolatedGroup:{input:isolatedLookup,output:isolatedAnswer},
   submitIsolatedGroup:{input:isolatedGroupInput,output:isolatedGroupResult},
   inspectChannelRights:{input:z.object({channelId:z.number().int().negative()}).strict(),
@@ -140,6 +143,8 @@ export const rpcContract = defineRpcContract({
   bindGroupTopic: {
     input: z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative(),
       threadId:z.string().min(1),ownerOnly:z.boolean(),requireMention:z.boolean(),
+      ownerSharedProject:z.literal(true).optional(),
+      addressName:z.string().trim().min(3).max(40).regex(/^[\p{L}][\p{L}\p{M} -]*[\p{L}\p{M}]$/u).optional(),
       deliverySources:z.array(z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)).max(100).optional(),
       allowedSenderIds:z.array(z.number().int().positive().safe()).max(100).optional(),includeTopicContext:z.boolean().optional(),searchableHistory:z.boolean().optional(),retainFullHistory:z.boolean().optional()}).strict(),
     output:z.object({bound:z.literal(true),warning:z.string().optional()}),
@@ -421,7 +426,7 @@ export default async function plugin(bb: BbPluginApi) {
   try { history=openTopicSearch(db); } catch(error) {
     if (!String(error).includes("no such module: fts5")) throw error;
   }
-  const forgetExamples=db.prepare("DELETE FROM state WHERE key GLOB 'group:recent-files:*' AND json_extract(value,'$.expiresAt')<=?");
+  const forgetExamples=db.prepare("DELETE FROM state WHERE (key GLOB 'group:recent-files:*' OR key GLOB 'group:context-media:*') AND json_extract(value,'$.expiresAt')<=?");
   const purgeHistory=()=>{history?.prune();forgetExamples.run(Date.now());};
   purgeHistory();
   const historyTimer=setInterval(purgeHistory,3600_000);
@@ -577,11 +582,25 @@ export default async function plugin(bb: BbPluginApi) {
       return {owner,bot};
     },
     transport: (chatId,signal) => telegram(botToken,AbortSignal.any([signal,lifetime.signal]),15000,()=>chatId,apiRoot),
+    provePrivate:async (threadId,token,owner)=>{
+      if (!bridge) throw Error("bot_unavailable");
+      return bridge.proveOwnerForumRequest(threadId,token,owner);
+    },
   });
   bb.agents.registerTool({
     name:"telegram_create_owner_topic",
     description:"Create a topic in the same private Telegram forum and post its first message. Use only if the paired owner explicitly requested a new topic in this current group task and gave its title. Copy the title from their request. Supply text only if the owner specified the exact first message; otherwise the bridge posts a fixed confirmation. A confirmed receipt may be repeated; do not retry an unconfirmed mutation or send the first message through another tool.",
     parameters:ownerTopicInput,
+    async execute(args,ctx) {
+      activeTelegramWrites++;
+      try { return JSON.stringify(await createOwnerTopic(args,ctx)); }
+      finally { activeTelegramWrites--; }
+    },
+  });
+  bb.agents.registerTool({
+    name:"telegram_create_private_forum_topic",
+    description:"From a current direct Telegram request by the paired owner, create a topic in a configured private owner forum in this project. If several forums are available, the owner must explicitly give the exact forum name or a private forum link, and the forum argument must copy it. Use only for an explicit instruction to create a topic. Copy the exact topic title and any exact first message. Otherwise a fixed confirmation is used. Pass the current Telegram route token.",
+    parameters:ownerPrivateTopicInput,
     async execute(args,ctx) {
       activeTelegramWrites++;
       try { return JSON.stringify(await createOwnerTopic(args,ctx)); }
@@ -644,7 +663,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const apiRoot = async () => (await settings.get()).telegramApiRoot;
   async function receiveLocalFile(incoming:{fileId:string;name:string;size:number},updateId:number,
-    threadId:string,fileSignal:AbortSignal,scope?:string[],isolated=false) {
+    threadId:string,fileSignal:AbortSignal,scope?:string[],isolated=false,maxBytes?:number) {
     const c = await settings.get();
     if (checkedApiRoot(c.telegramApiRoot) === "https://api.telegram.org" ||
         !c.telegramLocalRoot || !c.telegramInboxRoot)
@@ -662,7 +681,19 @@ export default async function plugin(bb: BbPluginApi) {
     return saveLocalTelegramFile({sourcePath:file.file_path,
       localRoot:c.telegramLocalRoot, inboxRoot:scope ? join(c.telegramInboxRoot,...scope) : c.telegramInboxRoot,
       threadId:isolated ? "isolated:"+threadId : threadId, updateId:updateId, fileId:incoming.fileId, name:incoming.name,
-      expectedBytes:incoming.size || undefined, signal:fileSignal});
+      expectedBytes:incoming.size || undefined, maxBytes, signal:fileSignal});
+  }
+  async function receiveGroupFile(file:import("./ingress").GroupExample,
+    route:Extract<import("./ingress").Ingress,{kind:"group"}>, signal:AbortSignal,bot:number) {
+    if (file.image && checkedApiRoot(await apiRoot())==="https://api.telegram.org") {
+      if (file.size>maxImageBytes) throw Error("attachment_too_large");
+      const getFile=telegram(botToken,signal,30_000,undefined,apiRoot);
+      return downloadGroupImage(botToken,await getFile("getFile",{file_id:file.fileId}),file.size,signal);
+    }
+    const policy=store.get<import("./ingress").GroupTopicPolicy>(`group:policy:${route.chatId}:${route.topicId}`);
+    return receiveLocalFile(file,route.updateId,route.threadId,signal,
+      ["groups",String(bot),String(route.chatId),String(route.topicId),String(route.senderId)],
+      policy?.isolated===true,file.image ? maxImageBytes : undefined);
   }
   let cleaning=false;
   const inboxTimer=setInterval(async()=>{
@@ -1135,6 +1166,7 @@ export default async function plugin(bb: BbPluginApi) {
           !project ||
           t.parentThreadId ||
           bound.has(threadId) ||
+          store.get(sharedGroupThreadKey(threadId)) ||
           t.deletedAt ||
           t.archivedAt ||
           t.visibility === "hidden"
@@ -1299,8 +1331,9 @@ export default async function plugin(bb: BbPluginApi) {
       const p=readEmployeeProfile(path);
       return {allowed:p.botId===botId() && p.owner===ownerId() && employeeWriteAllowed(store,p,args)};
     },
-    submitIsolatedGroup: async args => submitIsolatedGroup(bb.sdk,store,await isolatedProject(),args),
+    submitIsolatedGroup: async args => submitIsolatedGroup(bb.sdk,store,await isolatedProject(),args,(await settings.get()).telegramInboxRoot),
     readIsolatedPdf: async args => readIsolatedPdf(bb.sdk,store,await isolatedProject(),(await settings.get()).isolatedFileHost,args),
+    readIsolatedImage: async args => readIsolatedImage(bb.sdk,store,await isolatedProject(),(await settings.get()).isolatedFileHost,args),
     readIsolatedGroup: async args => readIsolatedGroup(bb.sdk,store,await isolatedProject(),args),
     inspectChannelRights: async ({channelId})=>{
       const owner=ownerId(), bot=botId();
@@ -1377,7 +1410,7 @@ export default async function plugin(bb: BbPluginApi) {
       try { return await channelPost(store,tg,owner,bot,current.managedChannels,args); }
       finally { activeTelegramWrites--; }
     },
-    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,allowedSenderIds,deliverySources,includeTopicContext,searchableHistory,retainFullHistory})=>{
+    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,ownerSharedProject,addressName,allowedSenderIds,deliverySources,includeTopicContext,searchableHistory,retainFullHistory})=>{
       const owner=ownerId(), bot=botId();
       if (!owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
       const tg=telegram(botToken,lifetime.signal,15_000,()=>chatId,apiRoot);
@@ -1390,20 +1423,37 @@ export default async function plugin(bb: BbPluginApi) {
       if (retainFullHistory && !searchableHistory) throw Error("full_history_requires_search");
       if (searchableHistory && (!includeTopicContext || !history)) throw Error("history_requires_topic_context_and_fts5");
       let warning:string|undefined;
-      if ((includeTopicContext || requireMention) && !me.readsAllGroups) {
+      if ((includeTopicContext || requireMention || addressName) && !me.readsAllGroups) {
         const self=await tg("getChatMember",{chat_id:chatId,user_id:bot});
         if (!["creator","administrator"].includes(self.status)) {
           warning="Пока бот в этой группе обычный участник, Telegram показывает ему только ответы на его сообщения и команды для него; отметки через @ до него не доходят. Чтобы бота можно было просто отметить, сделайте его администратором группы (права можно не давать). До этого обращайтесь ответом на его сообщение.";
-          if (includeTopicContext) throw Error(warning);
+          if (includeTopicContext || addressName) throw Error(warning);
         }
       }
       const executor=groupExecutor(chatId,topicId);
+      if (ownerSharedProject) {
+        if (executor || !await sharedOwnerForum(tg,chatId,owner,bot))
+          throw Error("private_owner_forum_required");
+        if (!requireMention && !me.readsAllGroups) {
+          const self=await tg("getChatMember",{chat_id:chatId,user_id:bot});
+          if (self.status!=="administrator") throw Error("private_owner_forum_cannot_read_plain_messages");
+        }
+      }
       if (executor && executor.threadId!==threadId) throw Error("isolated_thread_required");
       const thread=executor ?? await bb.sdk.threads.get({threadId});
       if (!thread.projectId || ("visibility" in thread && (thread.archivedAt || thread.deletedAt || thread.visibility==="hidden")))
         throw Error("thread_unavailable");
+      if (ownerSharedProject) {
+        if (!("parentThreadId" in thread) || thread.parentThreadId) throw Error("separate_group_root_required");
+        if (!store.get(sharedGroupThreadKey(threadId))) {
+          const lineage=await bb.sdk.threads.experimental_listDescendants({threadIds:[threadId],
+            includeHidden:true,includeArchived:true,signal:lifetime.signal});
+          if (lineage.threads.length!==1 || lineage.threads[0].descendantIds.length)
+            throw Error("separate_group_root_required");
+        }
+      }
       if (owner!==ownerId() || bot!==botId() || stateTransferBusy) throw Error("bot_changed");
-      bindGroupTopic(store,{deliverySources:deliverySources ? [...new Set(deliverySources)].sort() : store.get<{deliverySources?:string[]}>(`group:policy:${chatId}:${topicId}`)?.deliverySources,isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
+      bindGroupTopic(store,{ownerSharedProject,addressName,deliverySources:deliverySources ? [...new Set(deliverySources)].sort() : store.get<{deliverySources?:string[]}>(`group:policy:${chatId}:${topicId}`)?.deliverySources,isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},thread.projectId);
       return warning ? {bound:true as const,warning} : {bound:true as const};
     },
@@ -1412,7 +1462,10 @@ export default async function plugin(bb: BbPluginApi) {
       const key=`group:policy:${chatId}:${topicId}`;
       const previous=store.get<{botId:number}>(key);
       const removed=!!previous;
-      store.atomic(()=>{if (previous) for (const row of store.list(`group:recent-files:${previous.botId}:${chatId}:${topicId}:`)) store.del(row.key);
+      store.atomic(()=>{if (previous) {
+        for (const row of store.list(`group:recent-files:${previous.botId}:${chatId}:${topicId}:`)) store.del(row.key);
+        for (const row of store.list(contextMediaPrefix(previous.botId,chatId,topicId))) store.del(row.key);
+      }
         for (const row of store.list(historyPrefix(chatId,topicId))) store.del(row.key);store.del(key);store.del(`group:context:${chatId}:${topicId}`);});
       return {removed};
     },
@@ -1654,7 +1707,8 @@ export default async function plugin(bb: BbPluginApi) {
       },
     ],
     async run(argv,ctx) {
-      if (argv[0] !== "search-history" && groupCliRestricted(store, ctx.projectId, ctx.threadId))
+      if (argv[0] !== "search-history" && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
+          (ctx.threadId && (await sharedGroupThreads(store,bb.sdk.threads,[ctx.threadId])).has(ctx.threadId))))
         return {exitCode: 1, stderr: "bridge_admin_command_unavailable_in_group"};
       if(argv[0]==="search-history"){
         const threadId=ctx.threadId;
@@ -1904,14 +1958,20 @@ export default async function plugin(bb: BbPluginApi) {
                 void typing?.();
                 await presentProjectProposals(store,owner,bot,telegram(botToken,signal,15000,ownerId,apiRoot));
                 collectDecisionResults(store,owner,bot);
+                const groupTransport=(chatId:number)=>telegram(botToken,signal,15000,()=>chatId,apiRoot);
+                const verifyOwnerForum=async (policy:GroupTopicPolicy)=> {
+                  try {
+                    return await sharedOwnerForum(groupTransport(policy.chatId),policy.chatId,owner,bot) &&
+                      ownerId()===owner && botId()===bot && !stateTransferBusy;
+                  } catch { return false; }
+                };
                 await deliverGroupResults(store,bb.sdk,o=>o.owner===ownerId() && o.bot===botId() && !stateTransferBusy,
-                  chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal);
+                  groupTransport,signal,verifyOwnerForum);
                 await processGroupInputs(store,bb.sdk,owner,bot,
-                  chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),signal,
+                  groupTransport,signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined),cfg.telegramFileHostId,
-                  (file,r)=>receiveLocalFile(file,r.updateId,r.threadId,signal,["groups",String(bot),String(r.chatId),String(r.topicId),String(r.senderId)],
-                    store.get<import("./ingress").GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`)?.isolated===true),true);
+                  (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum);
               } catch (error) { ingressError = safeError(error); }
             }
           } else {

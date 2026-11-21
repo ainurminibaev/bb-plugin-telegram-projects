@@ -86,7 +86,7 @@ export function senderRole(store: Store, bot: number, owner: number | undefined,
 
 /** The topic binding seen through the group settings, for the synchronous ingress gate. */
 export function effectiveGroupPolicy(store: Store, policy: GroupTopicPolicy, owner: number): GroupTopicPolicy {
-  if (policy.isolated || policy.ownerTopic) return policy;
+  if (policy.isolated || policy.ownerTopic || policy.ownerSharedProject) return policy;
   const s = groupSettings(store, policy.botId, policy.chatId);
   const access = [...new Set([owner, ...accessList(store, policy.botId).map((p) => p.id)])];
   const open = s ? s.who === "all" && s.members !== "silent" : false;

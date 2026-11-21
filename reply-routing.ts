@@ -63,9 +63,9 @@ export class ReplyRoutes {
   private turnKey(threadId: string, turnId: string) {
     return "reply:turn:" + JSON.stringify([threadId, turnId]);
   }
-  ingress(threadId: string | null, route: Extract<ReplyRoute, {kind: "telegram"}>, delegatedBy?: string, reportKey?: string) {
+  ingress(threadId: string | null, route: Extract<ReplyRoute, {kind: "telegram"}>, delegatedBy?: string, reportKey?: string, originalDigest?:string) {
     const id = randomUUID();
-    this.store.put("reply:ingress:" + id, {threadId, route, delegatedBy, reportKey});
+    this.store.put("reply:ingress:" + id, {threadId, route, delegatedBy, reportKey,...(originalDigest && {originalDigest})});
     return routeMarker(id, !delegatedBy && !reportKey);
   }
   delegatedIngress(parentThreadId: string, token: string, childThreadId: string | null) {

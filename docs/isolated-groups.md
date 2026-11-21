@@ -24,12 +24,12 @@ For Docker, copy [the supplied launcher](../companion/isolated-docker-cli) to th
 
 The administrator owns the launcher. Its target must be fixed by the administrator. The bridge uses two operations:
 
-1. For a BB RPC, the launcher receives `plugin rpc call telegram-projects METHOD --input-file LOCAL_JSON --json`. Forward the private JSON over stdin, use a private temporary file inside the worker, run the worker's BB CLI, return its JSON and remove the temporary file. The supported methods are `submitIsolatedGroup`, `readIsolatedGroup` and `readIsolatedPdf`.
+1. For a BB RPC, the launcher receives `plugin rpc call telegram-projects METHOD --input-file LOCAL_JSON --json`. Forward the private JSON over stdin, use a private temporary file inside the worker, run the worker's BB CLI, return its JSON and remove the temporary file. The supported methods are `submitIsolatedGroup`, `readIsolatedGroup`, `readIsolatedPdf` and `readIsolatedImage`.
 2. For an incoming attachment, it receives `isolated-upload THREAD_ID CACHE_ID SHA256 BYTES NAME`. Forward stdin as a binary stream to `node companion/isolated-inbox.mjs` inside the worker. Pass the five arguments unchanged as separate arguments. Set `BB_TELEGRAM_ISOLATED_THREAD` to the administrator-selected thread ID inside the worker. The receiver writes a private cache entry, checks size and SHA-256 and prints its JSON receipt. Telegram credentials and local source paths are absent from this transfer.
 
 Restart the personal bridge with the new environment and bind the group topic to the configured thread ID using the ordinary group binding procedure. Repeat the binding when moving an existing group from local execution. A saved isolated binding whose launcher disappears will not dispatch work to a local agent.
 
-The personal side currently downloads incoming files through its configured local Bot API. A group sees only the files chosen for its request. A PDF reply must link to a regular PDF under the worker environment's `outputs/` directory. The bridge fetches it in bounded chunks and checks its revision across reads. Cache maintenance in each instance uses the ordinary cache age, space and active-work checks.
+The personal bridge can download supported images through the cloud or local Bot API. Other documents use the configured local Bot API. A group receives only the files chosen for its request. PDF, JPG and PNG replies must link to regular files under the worker environment's `outputs/` directory. The bridge checks paths, signatures and bounded chunk revisions before sending a PDF document or photo to the original Telegram topic. Update the worker plugin and launcher together with the receiving bridge before using isolated image delivery. Cache maintenance in each instance uses the ordinary cache age, space and active-work checks.
 
 ## Acceptance
 

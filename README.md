@@ -164,3 +164,14 @@ Configure the bot/owner/channel triple under managedChannels and run the inspect
 The local inbox is temporary storage. Save durable files into the project. Hourly maintenance removes completed managed downloads after 30 days, or oldest first above 8 GiB, with a minimum age of one day. Unknown legacy entries and busy thread trees are retained; the storage target is therefore a soft cap.
 
 For private employee settings, per-group administration and scoped action adapters, see [Employee and group setup](docs/employee-policy.md).
+
+
+### Private owner forums and group attachments
+
+Use the administrative `bindGroupTopic` RPC with `ownerSharedProject: true` and `ownerOnly: true` to attach a named topic in a private owner forum to a dedicated root thread in the assistant's existing project. The forum must contain only its paired owner (the creator) and the bot. The bridge verifies the audience before starting a turn and before sending each result. A changed audience revokes the pending delivery. The paired owner's ordinary private chat and project menus stay available.
+
+After the first topic is bound, the owner can request a new topic from the forum or from an original message in the bot's private chat. If the project has multiple configured owner forums, give the exact forum name or a private forum link in the original private message. From a bound topic, the destination is always that topic’s forum. Specify the title and optionally the exact first message. The bot needs permission to manage topics. Each confirmed creation and delivery has a single receipt.
+
+For an ordinary or isolated group in mention mode, the administrator can optionally set `addressName` when binding a topic. Only the exact name at the start followed by a comma or colon addresses the bot this way. The normal sender gate still applies. Telegram must deliver ordinary messages to the bot for this feature.
+
+Photos and supported image documents in an addressed message or a same-topic reply arrive as native image inputs. An unambiguous owner request to respond to a named participant can also select that participant's recent reply attachment from the same topic when topic context is enabled. The bridge asks for a direct reply when it finds multiple matching attachments. A requested PDF, JPG or PNG in the worker's `outputs/` directory can be returned as an attachment in the original topic.

@@ -1,3 +1,4 @@
+import {groupThreadMatches} from "./group-binding";
 import {stripTelegramMarkers} from "./reply-routing";
 import {readFileSync} from "node:fs";
 import {isAbsolute} from "node:path";
@@ -29,8 +30,7 @@ function groupBindingActive(store:Store,origin:GroupOrigin) {
   const policy=store.get<GroupTopicPolicy>(key);
   return !!policy && policy.revision===origin.revision && policy.ownerId===owner && policy.botId===bot &&
     policy.threadId===threadId && policy.projectId===projectId && (sender===owner || policy.isolated===true) &&
-    canInvokeGroup(policy,owner,sender) && store.get("group:thread:"+threadId)===key &&
-    store.get("group:project:"+projectId)===true;
+    canInvokeGroup(policy,owner,sender) && groupThreadMatches(store,policy,projectId);
 }
 
 // A binding confirms the return address only. Delivery additionally checks the live worker.
@@ -135,7 +135,8 @@ export function queueGroupReminder(store:Store,owner:number,bot:number,args:z.in
 // This runs on the bridge's serial receiver loop. Consume the queue entry and
 // record uncertainty together before the request can reach Telegram.
 export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
-  current:(origin:GroupOrigin)=>boolean, transport:(chatId:number)=>Telegram, signal:AbortSignal) {
+  current:(origin:GroupOrigin)=>boolean, transport:(chatId:number)=>Telegram, signal:AbortSignal,
+  verifyOwnerForum?:(policy:GroupTopicPolicy)=>Promise<boolean>) {
   for (const row of [...store.list("group:result-queue:"), ...store.list("group:reminder-queue:")]) {
     if (signal.aborted) return;
     const reminder=row.key.startsWith("group:reminder-queue:");
@@ -161,8 +162,9 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     if (!sourceAllowed()) {finish("source_unavailable");continue;}
     const threadAccess=async()=>{
       if (!allowed()) return "revoked";
-      const isolated=store.get<GroupTopicPolicy>(policyKey)!.isolated;
-      if (isolated) {
+      const policy=store.get<GroupTopicPolicy>(policyKey)!;
+      if (policy.ownerSharedProject && !await verifyOwnerForum?.(policy)) return "revoked";
+      if (policy.isolated) {
         const worker=groupExecutor(chatId,topicId);
         if (worker?.threadId!==threadId || worker.projectId!==projectId || !origin.executionToken) return "revoked";
         // The isolated service checks the thread's current project and visibility.
@@ -176,7 +178,8 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
         try { thread=await sdk.threads.get({threadId,signal}); }
         catch { return "unavailable"; }
         if (thread.id!==threadId || thread.projectId!==projectId || thread.visibility!=="visible" ||
-            thread.archivedAt || thread.deletedAt) return "revoked";
+            thread.archivedAt || thread.deletedAt ||
+            (store.get<GroupTopicPolicy>(policyKey)?.ownerSharedProject && thread.parentThreadId)) return "revoked";
       }
       return "active";
     };
@@ -219,6 +222,10 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     } else if (satisfied()) {finish("cancelled");continue;}
     text=stripTelegramMarkers(text).trim();
     if (!text) {finish("cancelled");continue;}
+    const policy=store.get<GroupTopicPolicy>(policyKey);
+    if ((policy?.ownerSharedProject && !await verifyOwnerForum?.(policy)) || !allowed()) {
+      finish("revoked");continue;
+    }
     finish("unknown");
     try {
       const sent=await transport(chatId)("sendMessage",{chat_id:chatId,message_thread_id:topicId||undefined,

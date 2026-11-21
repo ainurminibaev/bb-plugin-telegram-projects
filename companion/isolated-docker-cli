@@ -15,7 +15,7 @@ case "${1:-}" in
     [ "$#" -eq 8 ] && [ "$2" = rpc ] && [ "$3" = call ] &&
       [ "$4" = telegram-projects ] && [ "$6" = --input-file ] && [ "$8" = --json ] || exit 2
     case "$5" in
-      submitIsolatedGroup|readIsolatedGroup|readIsolatedPdf) ;;
+      submitIsolatedGroup|readIsolatedGroup|readIsolatedPdf|readIsolatedImage) ;;
       *) exit 2 ;;
     esac
     exec docker exec -i "$container" sh -ec '

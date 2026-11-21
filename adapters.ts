@@ -1,3 +1,4 @@
+import {imageAttachment,maxImageBytes} from "./group-attachments";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -12,6 +13,38 @@ import {
 const exec = promisify(execFile);
 export type TokenSource = () => Promise<string>;
 export type ApiRootSource = () => Promise<string>;
+export async function downloadGroupImage(token:()=>Promise<string>, file:{file_path?:string;file_size?:number},
+  size:number, signal:AbortSignal, request=fetch) {
+  const path=file.file_path;
+  const expected=size || file.file_size;
+  if (!path || !/^[a-zA-Z0-9_/-]+(?:\.[a-zA-Z0-9_-]+)*$/.test(path) ||
+      path.startsWith("/") || path.includes("//") ||
+      (expected!==undefined && (!Number.isSafeInteger(expected) || expected<=0 || expected>maxImageBytes)) ||
+      (size && file.file_size!==undefined && size!==file.file_size))
+    throw Error("attachment_invalid_image");
+  const response=await request(`https://api.telegram.org/file/bot${await token()}/${path}`,{
+    redirect:"error",signal:AbortSignal.any([signal,AbortSignal.timeout(30_000)]),
+  }).catch(()=>{throw Error("attachment_download_failed");});
+  if (!response.ok || !response.body || Number(response.headers.get("content-length"))>maxImageBytes) {
+    await response.body?.cancel();
+    throw Error("attachment_download_failed");
+  }
+  const chunks:Uint8Array[]=[];
+  const reader=response.body.getReader();
+  let length=0;
+  try {
+    while (true) {
+      const {done,value}=await reader.read();
+      if (done) break;
+      length+=value.length;
+      if (length>maxImageBytes || (expected && length>expected)) throw Error("attachment_too_large");
+      chunks.push(value);
+    }
+  } finally { await reader.cancel(); }
+  if (expected && length!==expected) throw Error("attachment_size_mismatch");
+  return imageAttachment(Buffer.concat(chunks,length));
+}
+
 export function telegram(
   token: TokenSource,
   signal: AbortSignal,

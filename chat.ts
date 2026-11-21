@@ -1,3 +1,4 @@
+import {sharedGroupThreads} from "./group-binding";
 import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interactionOpen } from "./codex-async-question";
 import { splitChildResultClaims, stripTelegramMarkers, ReplyRoutes, type ReplyRoute } from "./reply-routing";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
@@ -8,7 +9,7 @@ import { markdownExcerpt } from "./events";
 import { localArtifacts, renderTelegramParts, cleanAssistantText, publicActivity, ARTIFACT_EXTENSIONS } from "./telegram-ux";
 import type { BbPluginApi, MessageDispatchHookContext, MessageDispatchHookDecision } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   mkdirSync,
   readdirSync,
@@ -41,6 +42,7 @@ export const inputSchema = z.object({
   text: z.string().max(16000).optional(),
   sentAt: z.number().int().nonnegative().optional(),
   forwarded: z.boolean().optional(),
+  originalText: z.literal(true).optional(),
   callback: z.string().max(64).optional(),
   replyTo: z.number().int().optional(),
   replyExcerpt: z.string().max(2000).optional(),
@@ -393,6 +395,28 @@ export class ChatBridge {
       throw Error("owner_request_required");
     await this.validateDelegationParent(threadId,token);
   }
+  async proveOwnerForumRequest(threadId:string,routeToken:string,owner:number) {
+    const row=this.s.get<{originalDigest?:string;route?:ReplyRoute}>("reply:ingress:"+routeToken);
+    if (!row?.originalDigest || this.routes.cancelled(row.route)) throw Error("original_owner_text_required");
+    const events=await this.d.sdk.threads.events.list({threadId,order:"desc",limit:"30",signal:this.d.signal,
+      types:["client/turn/requested","turn/input/accepted","turn/completed"]});
+    const accepted=events.find(e=>e.type==="turn/input/accepted");
+    const request=events.find(e=>e.type==="client/turn/requested");
+    if (accepted?.scope.kind!=="turn" || request?.type!=="client/turn/requested" ||
+        request.data.originPluginId!=="telegram-projects" || request.data.retryOfRequestId ||
+        request.data.requestId!==accepted.data.clientRequestId) throw Error("current_owner_request_required");
+    const turnId=accepted.scope.turnId;
+    if (events.some(e=>e.seq>accepted.seq && e.type==="turn/completed" &&
+        e.scope.kind==="turn" && e.scope.turnId===turnId) ||
+        events.filter(e=>e.type==="turn/input/accepted" && e.scope.kind==="turn" && e.scope.turnId===turnId).length!==1)
+      throw Error("current_owner_request_required");
+    const original=request.data.input?.[0];
+    if (original?.type!=="text" || original.visibility ||
+        createHash("sha256").update(original.text).digest("hex")!==row.originalDigest)
+      throw Error("original_owner_text_required");
+    await this.validateOwnerAction(threadId,routeToken,owner);
+    return {key:"private:"+routeToken,text:original.text};
+  }
   private async validateDelegationParent(threadId: string, token: string) {
     const events = await this.d.sdk.threads.events.list({threadId,order:"desc",limit:"1",
       types:["client/turn/requested"],signal:this.d.signal});
@@ -524,6 +548,7 @@ export class ChatBridge {
       ?? this.binding(topicId);
   }
   private save(b: Binding) {
+    if (b.threadId && this.s.get("group:thread:"+b.threadId)) throw Error("thread_not_available");
     if (this.s.get("group:project:"+b.projectId) && this.s.get("rights:install-kind")!=="employee") throw Error("group_project_unavailable");
     this.s.put("private:project:"+b.projectId,true);
     this.s.put("chat:binding:" + b.topicId, b);
@@ -978,13 +1003,14 @@ export class ChatBridge {
       signal: this.d.signal,
     });
     if (
-      this.s.get("group:thread:" + id) ||
       t.projectId !== b.projectId ||
       t.deletedAt ||
       t.archivedAt ||
       t.visibility === "hidden"
     )
       throw Error("thread_not_available");
+    if ((await sharedGroupThreads(this.s,this.d.sdk.threads,[id],this.d.signal)).has(id) ||
+        this.s.get("group:thread:"+id)) throw Error("thread_not_available");
     this.s.put("chat:thread-project:" + id, b.projectId);
     return t;
   }
@@ -996,8 +1022,9 @@ export class ChatBridge {
       offset,
       signal: this.d.signal,
     });
-    const keys = list
-      .slice(0, 8)
+    const page=list.slice(0,8);
+    const guarded=await sharedGroupThreads(this.s,this.d.sdk.threads,page.map(t=>t.id),this.d.signal);
+    const keys = page.filter(t=>!guarded.has(t.id))
       .map((t) => [
         this.button(
           b,
@@ -1769,6 +1796,9 @@ export class ChatBridge {
       }
     }
     if (!parts) text = this.withReplyContext(input,text);
+    const originalDigest=this.s.get("group:shared-project:"+b.projectId) && input.originalText && (!parts || parts.length===1) && text===input.text?.trim() &&
+      !input.forwarded && !input.attachment && !input.voice && !input.replyTo
+      ? createHash("sha256").update(text).digest("hex") : undefined;
     if (b.threadId) {
       const pending = await this.d.sdk.threads.interactions.list({
         threadId: b.threadId,
@@ -1792,7 +1822,7 @@ export class ChatBridge {
         threadId: b.threadId,
         mode: followUp ? "steer-if-active" : "queue-if-active",
         input: [{ type: "text", text: followUp ? followUp.prefix + text : text, mentions: [] },
-          this.routes.ingress(b.threadId, followUp?.route ?? own)],
+          this.routes.ingress(b.threadId, followUp?.route ?? own,undefined,undefined,followUp ? undefined : originalDigest)],
       });
       this.rememberDispatch(b.threadId, parts ?? [input], followUp?.route ?? own);
     } else {
@@ -1823,7 +1853,8 @@ export class ChatBridge {
         prompt = "[cli-agents-selection:" + selection.token + "]\n" + text;
       }
       const marker = this.routes.ingress(null,
-        {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId});
+        {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId},
+        undefined,undefined,prompt===text ? originalDigest : undefined);
       const t = await this.d.sdk.threads.spawn({
         projectId: b.projectId,
         environment,

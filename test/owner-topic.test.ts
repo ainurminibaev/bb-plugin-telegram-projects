@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { acceptGroupUpdate } from "../ingress";
 import { bindGroupTopic, processGroupInputs } from "../group-worker";
-import { ownerTopicInput, ownerTopicTool } from "../owner-topic";
+import { ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "../owner-topic";
 import { saveGroupSettings, setAccess } from "../rights";
 import { TelegramFailure, type Store } from "../model";
 
@@ -15,7 +15,7 @@ const scope = {threadId:"source",projectId:"team",signal:new AbortController().s
 const explicit = {confirm:true as const,title,text};
 
 async function fixture(message = `Создай тему ${title} и напиши туда ${text}`, sender = owner,
-  extra: Record<string,unknown> = {}) {
+  extra: Record<string,unknown> = {}, shared=false) {
   const rows = new Map<string,unknown>();
   const store:Store = {
     get:<T>(key:string)=>structuredClone(rows.get(key)) as T|undefined,
@@ -26,18 +26,22 @@ async function fixture(message = `Создай тему ${title} и напиши
     atomic:fn=>fn(),
   };
   bindGroupTopic(store,{chatId,topicId:3,threadId:"source",botId:bot,botUsername:"fixture_bot",
-    requireMention:false,ownerOnly:true,ownerId:owner,revision:"source-revision"},"team");
+    requireMention:false,ownerOnly:true,ownerId:owner,revision:"source-revision",
+    ...(shared && {ownerSharedProject:true})},"team");
   // The new topic must stay owner-only even when group-level settings and
   // the bot's access list allow other people to start ordinary group work.
   setAccess(store,bot,[{id:9,name:"Other administrator"}]);
   saveGroupSettings(store,bot,chatId,{who:"all",members:"read",reply:"auto"});
   const start = (request:string, userId:number, topic=3, update=8, more:Record<string,unknown>={}) =>
     acceptGroupUpdate(store,{update_id:update,message:{message_id:update+10,date:Math.floor(Date.now()/1000)+2,
-      chat:{type:"supergroup",id:chatId},from:{id:userId},message_thread_id:topic,text:request,...more}},owner,bot);
-  assert.ok(start(message,sender,3,8,extra));
+      chat:{type:"supergroup",id:chatId},from:{id:userId},message_thread_id:topic,is_topic_message:true,text:request,...more}},owner,bot);
+  if (!shared) assert.ok(start(message,sender,3,8,extra));
   const events:any[]=[];
   const calls: {method:string; payload:Record<string,any>}[]=[];
-  const config = {forum:true,isPublic:false,botMayManage:true,ownerMayManage:true,fail:"",newThread:false,revokeAfterCreate:false};
+  const forums=new Map([[chatId,"Первый форум"]]);
+  const spawned=new Set<number>();
+  let activeForum=chatId;
+  const config = {forum:true,isPublic:false,botMayManage:true,ownerMayManage:true,fail:"",newThread:false,revokeAfterCreate:false,audience:2};
   const record = (type:string,data:Record<string,unknown>,turnId="turn")=>
     events.push({seq:events.length+1,type,scope:{kind:"turn",turnId},data});
   const sdk = {threads:{
@@ -55,36 +59,41 @@ async function fixture(message = `Создай тему ${title} и напиши
     spawn:async (args:Record<string,unknown>)=>{
       calls.push({method:"spawn",payload:args});
       if (config.fail==="spawn") throw Error("connection_lost");
-      assert.equal(config.newThread,false);
+      assert.ok(!spawned.has(activeForum));
+      spawned.add(activeForum);
       config.newThread=true;
-      return {id:"new-thread",projectId:"team"};
+      return {id:activeForum===chatId?"new-thread":"another-thread",projectId:"team"};
     },
   }};
   const transport = (destination:number)=>async <T>(method:string,payload:Record<string,any>):Promise<T>=>{
-    assert.equal(destination,chatId);
+    assert.ok(forums.has(destination));
     calls.push({method,payload});
-    if (method==="getChat") return {id:chatId,type:"supergroup",is_forum:config.forum,
+    if (method==="getChat") return {id:destination,title:forums.get(destination),type:"supergroup",is_forum:config.forum,
       ...(config.isPublic && {active_usernames:["public"]})} as T;
     if (method==="getMe") return {id:bot,is_bot:true,username:"fixture_bot"} as T;
-    if (method==="getChatMember") return {user:{id:payload.user_id},status:"administrator",
+    if (method==="getChatMemberCount") return config.audience as T;
+    if (method==="getChatMember") return {user:{id:payload.user_id,is_bot:payload.user_id===bot},
+      status:shared && payload.user_id===owner ? "creator" : "administrator",
       can_manage_topics:payload.user_id===bot ? config.botMayManage : config.ownerMayManage} as T;
     if (method==="createForumTopic") {
       if (config.fail==="create") throw new TelegramFailure("telegram_network",30,true);
       if (config.revokeAfterCreate) config.botMayManage=false;
+      activeForum=destination;
       return {message_thread_id:22} as T;
     }
     if (method==="sendMessage") {
-      assert.equal(store.get<any>(`group:policy:${chatId}:22`)?.threadId,"new-thread");
+      assert.equal(store.get<any>(`group:policy:${destination}:22`)?.threadId,destination===chatId?"new-thread":"another-thread");
       if (config.fail==="post") throw new TelegramFailure("telegram_network",30,true);
       if (config.fail==="post-rejected") throw new TelegramFailure("telegram_429",30,false);
-      return {chat:{id:chatId},message_thread_id:22,message_id:23} as T;
+      return {chat:{id:destination},message_thread_id:22,message_id:23} as T;
     }
     throw Error("unexpected "+method);
   };
   await processGroupInputs(store,sdk as never,owner,bot,transport,scope.signal);
-  const makeTool=()=>ownerTopicTool({store,sdk:sdk as never,identity:async()=>({owner,bot}),transport});
+  const makeTool=(provePrivate?:Parameters<typeof ownerTopicTool>[0]["provePrivate"])=>
+    ownerTopicTool({store,sdk:sdk as never,identity:async()=>({owner,bot}),transport,provePrivate});
   const mutations=()=>calls.filter(c=>["createForumTopic","spawn","sendMessage"].includes(c.method));
-  return {store,start,config,record,makeTool,mutations};
+  return {store,start,config,record,makeTool,mutations,forums};
 }
 
 test("a proven owner request creates a topic, binds a separate thread and posts once",async()=>{
@@ -184,4 +193,58 @@ test("a revoked bot grant before the first post leaves a confirmed binding witho
   f.config.botMayManage=true;
   await f.makeTool()(explicit,scope);
   assert.deepEqual(f.mutations().map(c=>c.method),["createForumTopic","spawn","sendMessage"]);
+});
+
+test("a proven private Telegram request binds a clean topic thread and posts the exact first message once",async()=>{
+  const f=await fixture(undefined,owner,{},true);
+  const args=ownerPrivateTopicInput.parse({...explicit,routeToken:"5c8a898d-4b04-42f7-afe8-5a6bda456331"});
+  const sourceText=`Создай тему «${title}» и напиши туда «${text}»`;
+  const create=f.makeTool(async(thread,token,user)=>{
+    assert.deepEqual([thread,token,user],[scope.threadId,args.routeToken,owner]);
+    return {key:"private:"+token,text:sourceText};
+  });
+  await assert.rejects(create({...args,text:"A different first message"},scope),/explicit_owner_message_required/);
+  f.config.audience=3;
+  await assert.rejects(create(args,scope),/private_owner_forum_required/);
+  assert.deepEqual(f.mutations(),[]);
+  f.config.audience=2;
+  const receipt=await create(args,scope);
+  assert.deepEqual(await create(args,scope),receipt);
+  assert.deepEqual(f.mutations().map(c=>c.method),["createForumTopic","spawn","sendMessage"]);
+  assert.equal(f.store.get<any>(`group:policy:${chatId}:22`).ownerSharedProject,true);
+  assert.equal(f.store.get("group:project:team"),undefined);
+  assert.equal(f.mutations()[2].payload.text,text);
+  assert.equal(f.mutations()[2].payload.message_thread_id,22);
+});
+
+test("private owner request chooses an explicitly named forum and same named topics in two forums stay independent",async()=>{
+  const f=await fixture(undefined,owner,{},true);
+  const other=-1009898;
+  f.forums.set(other,"Второй форум");
+  bindGroupTopic(f.store,{chatId:other,topicId:3,threadId:"other-source",botId:bot,botUsername:"fixture_bot",
+    requireMention:true,ownerOnly:true,ownerSharedProject:true,ownerId:owner,revision:"other-revision"},"team");
+  let original=`Создай тему «${title}» в «Первый форум».`;
+  const create=f.makeTool(async(_id,token)=>({key:"private:"+token,text:original}));
+  const args={confirm:true as const,title,routeToken:"5c8a898d-4b04-42f7-afe8-5a6bda456331"};
+  await assert.rejects(create(args,scope),/explicit_private_forum_selection_required/);
+  await assert.rejects(create({...args,forum:"Второй форум"},scope),/explicit_private_forum_selection_required/);
+  assert.equal(f.mutations().length,0);
+  const a=await create({...args,forum:"Первый форум"},scope);
+  const link="https://t.me/c/9898/3";
+  original=`Создай тему «${title}» в форуме ${link}.`;
+  const b=await create({...args,forum:link,routeToken:"3139d265-e1de-4a77-ae95-f295edbecf20"},scope);
+  assert.equal(a.url,"https://t.me/c/4242/22/23");
+  assert.equal(b.url,"https://t.me/c/9898/22/23");
+  assert.notEqual(a.threadId,b.threadId);
+  assert.deepEqual(f.mutations().filter(m=>m.method==="sendMessage").map(m=>m.payload.chat_id),[chatId,other]);
+});
+
+test("a request originating inside a forum always creates its topic in that forum",async()=>{
+  const f=await fixture();
+  f.forums.set(-1009898,"Второй форум");
+  bindGroupTopic(f.store,{chatId:-1009898,topicId:3,threadId:"other-source",botId:bot,botUsername:"fixture_bot",
+    requireMention:false,ownerOnly:true,ownerId:owner,revision:"other-revision"},"different-project");
+  const receipt=await f.makeTool()(explicit,scope);
+  assert.equal(receipt.url,"https://t.me/c/4242/22/23");
+  assert.equal(f.store.get("group:policy:-1009898:22"),undefined);
 });

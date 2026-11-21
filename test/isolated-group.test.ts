@@ -35,6 +35,36 @@ test("ambiguous submissions cannot be retried into a duplicate turn",async()=>{
   assert.equal(calls,1);
 });
 
+test("isolated documents use the worker's validated cache receipt",async()=>{
+  const {mkdtemp,mkdir,writeFile,rm,realpath}=await import("node:fs/promises");
+  const {tmpdir}=await import("node:os");
+  const {join}=await import("node:path");
+  const {createHash}=await import("node:crypto");
+  const {isolatedFile}=await import("../group-attachments");
+  const root=await realpath(await mkdtemp(join(tmpdir(),"isolated-document-")));
+  try {
+    const cacheId="1-"+"f".repeat(20);
+    const name="synthetic.txt";
+    const directory=join(root,cacheId);
+    const path=join(directory,name);
+    const bytes=Buffer.from("synthetic document");
+    const sha256=createHash("sha256").update(bytes).digest("hex");
+    const file={path,name,bytes:bytes.length,sha256};
+    const turns:any[]=[];
+    const {sdk,store,args}=fixture(async q=>{turns.push(q);});
+    await mkdir(directory);
+    await writeFile(path,bytes);
+    const receiptPath=join(directory,".complete.json");
+    const input=isolatedGroupInput.parse({...args,attachments:[isolatedFile(file)]});
+    await writeFile(receiptPath,JSON.stringify({...file,threadId:"other-thread"}));
+    await assert.rejects(submitIsolatedGroup(sdk,store,"group",input,root),/invalid_attachment_receipt/);
+    assert.equal(turns.length,0);
+    await writeFile(receiptPath,JSON.stringify({...file,threadId:args.threadId}));
+    await submitIsolatedGroup(sdk,store,"group",input,root);
+    assert.deepEqual(turns[0].input[1],{type:"localFile",path,name,sizeBytes:bytes.length});
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+
 test("isolated replies follow the accepted request even when turns finish in reverse order",async()=>{
   const {sdk,store,args}=fixture(async()=>{});
   const other={...args,text:"Other work",routeToken:randomUUID()};
@@ -123,4 +153,38 @@ exec "${process.execPath}" "${receiver}" "$@"
     if(prior===undefined) delete process.env.BB_TELEGRAM_GROUP_EXECUTORS;else process.env.BB_TELEGRAM_GROUP_EXECUTORS=prior;
     await rm(root,{recursive:true,force:true});
   }
+});
+
+test("isolated image export requires an exact completed task link, matching project, host and safe output path",async()=>{
+  const {mkdtemp,mkdir,writeFile,rm,realpath,symlink}=await import("node:fs/promises");
+  const {tmpdir}=await import("node:os");
+  const {join}=await import("node:path");
+  const {readIsolatedImage}=await import("../isolated-group");
+  const {collectIsolatedImage}=await import("../isolated-client");
+  const root=await realpath(await mkdtemp(join(tmpdir(),"synthetic-group-image-")));
+  try {
+    const pixel=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=","base64");
+    const dir=join(root,"outputs");
+    await mkdir(dir);
+    const photoPath=join(dir,"result.png");
+    const outside=join(root,"private.png");
+    const link=join(dir,"alias.png");
+    await writeFile(photoPath,pixel);
+    await writeFile(outside,pixel);
+    await symlink(outside,link);
+    const {sdk,store,args}=fixture(async()=>{});
+    sdk.threads.get=async()=>({id:"thread",projectId:"group",environmentId:"env",visibility:"visible"});
+    sdk.environments={get:async()=>({projectId:"group",hostId:"worker",path:root})};
+    const read=(path:string,offset:number,host="worker")=>readIsolatedImage(sdk,store,"group",host,{...args,path,offset});
+    await assert.rejects(read(photoPath,0),/export_unavailable/);
+    store.put("group:submission:"+args.routeToken,{finished:true,projectId:"group",threadId:"thread",
+      answer:`[image](${photoPath}) [outside](${outside}) [alias](${link})`});
+    const result=await collectIsolatedImage(photoPath,offset=>read(photoPath,offset));
+    assert.equal(result.photo.type,"image/png");
+    assert.deepEqual(Buffer.from(await result.photo.arrayBuffer()),pixel);
+    await assert.rejects(read(outside,0),/export_path_required/);
+    await assert.rejects(read(link,0),/export_path_required/);
+    await assert.rejects(read(join(dir,"unlinked.png"),0),/export_unavailable/);
+    await assert.rejects(read(photoPath,0,"other-host"),/export_unavailable/);
+  } finally {await rm(root,{recursive:true,force:true});}
 });

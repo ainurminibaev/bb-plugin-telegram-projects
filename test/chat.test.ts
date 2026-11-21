@@ -1,3 +1,4 @@
+import {bindGroupTopic} from "../group-worker";
 import { ReplyRoutes } from "../reply-routing";
 import { routeUpdate } from "../ingress";
 import test from "node:test";
@@ -2385,5 +2386,45 @@ test("Codex async forms reach the owner from the root, worker and nested worker"
     await pressOption("Choose a worker answer", "Alpha");
     assert.equal(f.calls.filter(([name]) => name === "respond").length, 3);
     assert.equal(f.calls.filter(([name]) => name === "resolve").length, 0);
+  } finally {f.cleanup();}
+});
+
+test("private chat and menu still work alongside shared forum roots and prove only the current original owner request",async()=>{
+  const f=fixture();
+  try {
+    const projectId="proj_one";
+    f.store.put("chat:binding:100",{topicId:100,projectId,threadId:"thr_one",revision:"private",ready:true,cursor:0});
+    bindGroupTopic(f.store,{chatId:-1009876543,topicId:8,threadId:"forum-root",
+      botId:2,botUsername:"fixture_bot",ownerId:OWNER_ID,ownerOnly:true,ownerSharedProject:true,requireMention:false},projectId);
+    f.sdk.threads.experimental_listAncestors=async({threadIds}:any)=>({threads:threadIds.map((id:string)=>({
+      threadId:id,ancestorIds:id==="forum-child"?["forum-root"]:[],
+    }))});
+    f.sdk.threads.list=async()=>[f.thread,{...f.thread,id:"forum-root"},{...f.thread,id:"forum-child"}];
+    await f.bridge.projects(100);
+    assert.ok(f.store.list<any>("chat:button:").some(({value})=>value.kind==="project" && value.arg===projectId));
+    await f.bridge.handle(f.input("/menu"));
+    await f.bridge.handle(f.input("/chats"));
+    const inspect=f.store.list<any>("chat:button:").filter(({value})=>value.kind==="inspect");
+    assert.deepEqual(inspect.map(({value})=>value.arg),["thr_one"]);
+    const text="Создай тему Приёмка и напиши туда Начинаем.";
+    const dm=routeUpdate({update_id:900,message:{message_id:900,chat:{id:OWNER_ID,type:"private"},
+      from:{id:OWNER_ID},message_thread_id:100,text}},OWNER_ID);
+    assert.equal(dm.kind,"chat");
+    if (dm.kind!=="chat") throw Error("private ingress rejected");
+    await f.bridge.handle(dm.input);
+    const [,send]=f.calls.find(([kind])=>kind==="send");
+    assert.equal(send.threadId,"thr_one");
+    const token=send.input[1].text.match(/bb-telegram-reply-route:([a-f0-9-]+)/)[1];
+    const request={type:"client/turn/requested",seq:1,data:{originPluginId:"telegram-projects",requestId:"req",input:send.input}};
+    const accepted={type:"turn/input/accepted",seq:2,data:{clientRequestId:"req"},scope:{kind:"turn",turnId:"turn"}};
+    const events:any[]=[accepted,request];
+    f.sdk.threads.events.list=async(options:any)=>events.filter(e=>!options.types || options.types.includes(e.type));
+    assert.deepEqual(await f.bridge.proveOwnerForumRequest("thr_one",token,OWNER_ID),{key:"private:"+token,text});
+    events.unshift({type:"turn/completed",seq:3,scope:accepted.scope,data:{status:"completed"}});
+    await assert.rejects(f.bridge.proveOwnerForumRequest("thr_one",token,OWNER_ID),/current_owner_request_required/);
+    events.shift();
+    const forged=new ReplyRoutes(f.store).ingress("thr_one",{kind:"telegram",chatId:OWNER_ID,topicId:100,updateId:88});
+    const forgedToken=forged.text.match(/bb-telegram-reply-route:([a-f0-9-]+)/)![1];
+    await assert.rejects(f.bridge.proveOwnerForumRequest("thr_one",forgedToken,OWNER_ID),/original_owner_text_required/);
   } finally {f.cleanup();}
 });

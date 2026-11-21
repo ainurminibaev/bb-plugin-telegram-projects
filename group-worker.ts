@@ -1,3 +1,5 @@
+import {groupThreadMatches,isSharedOwnerPolicy,sharedGroupScopeKey,sharedGroupThreadKey} from "./group-binding";
+import {isolatedFile,localFileInput,maxEncodedImages,maxGroupAttachments,readSavedImage,type ImageAttachment,type IsolatedAttachment} from "./group-attachments";
 import {awaitProjectProposal} from "./owner-selection";
 import {NO_REPLY} from "./group-result";
 import {sourcesVisible} from "./source-access";
@@ -6,10 +8,10 @@ import {groupExecutor} from "./isolated-client";
 import {historyPrefix,topicPassages} from "./topic-search";
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {localArtifacts} from "./telegram-ux";
-import {readGroupPdf} from "./group-pdf";
+import {groupImagePath,readGroupImage,readGroupPdf} from "./group-pdf";
 import {splitText} from "./chat";
 import {ReplyRoutes, stripTelegramMarkers} from "./reply-routing";
-import {refersToExamples, promisesExamples, canInvokeGroup, type GroupTopicPolicy, type Ingress} from "./ingress";
+import {refersToExamples, promisesExamples, canInvokeGroup, contextMediaPrefix, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
@@ -22,6 +24,7 @@ type Job = {
   taskId?:string; progressId?:number|null;
   executionToken?:string; executorRetryAt?:number;
   pdfIndex?:number; failedPdfs?:string[];
+  imageIndex?:number; failedImages?:string[];
   cursor?:number; turnId?:string; answer?:string; part?:number;
 };
 
@@ -37,21 +40,39 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     // A personal assistant keeps the owner's private project out of groups. An employee is one
     // zone of trust: its private chat and groups share one folder, one memory and one set of rules.
     const employee=store.get<string>("rights:install-kind")==="employee";
+    const previous=store.get<GroupTopicPolicy>(key);
+    if (policy.ownerSharedProject) {
+      if (!isSharedOwnerPolicy(policy) || employee || store.get("group:project:"+projectId) ||
+          (previous && !previous.ownerSharedProject) ||
+          (store.get("group:thread:"+threadId) && !store.get(sharedGroupThreadKey(threadId))))
+        throw Error("private_owner_forum_binding_required");
+    } else if (previous?.ownerSharedProject || store.get(sharedGroupThreadKey(threadId)) ||
+        store.get(sharedGroupScopeKey(chatId,topicId)) || store.get("group:shared-project:"+projectId)) {
+      throw Error("shared_owner_thread_cannot_change_audience");
+    }
     if (privateBindings.some(({value})=>value.threadId===threadId) || store.get("chat:thread-project:"+threadId) ||
-        (!employee && (privateBindings.some(({value})=>value.projectId===projectId) ||
+        store.list<{threadId?:string}>("reply:watch:").some(({value})=>value.threadId===threadId) ||
+        (!policy.ownerSharedProject && !employee && (privateBindings.some(({value})=>value.projectId===projectId) ||
           store.list<string>("chat:thread-project:").some(row=>row.value===projectId) || store.get("private:project:"+projectId))))
       throw Error("private_thread_or_project");
     const claim=store.get<string>("group:thread:"+threadId);
     if (claim && claim!==key) throw Error("thread_belongs_to_other_topic");
-    store.put("group:project:"+projectId,true);
-    const prev=store.get<GroupTopicPolicy>(key);
-    if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly && prev.ownerTopic===policy.ownerTopic &&
+    if (policy.ownerSharedProject) {
+      store.put(sharedGroupThreadKey(threadId),true);
+      store.put(sharedGroupScopeKey(chatId,topicId),true);
+      store.put("group:shared-project:"+projectId,true);
+    } else store.put("group:project:"+projectId,true);
+    const prev=previous;
+    if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly && prev.ownerTopic===policy.ownerTopic && prev.ownerSharedProject===policy.ownerSharedProject &&
         JSON.stringify(prev.deliverySources??[])===JSON.stringify(policy.deliverySources??[]) &&
-        prev.requireMention===policy.requireMention && prev.botId===policy.botId &&
+        prev.requireMention===policy.requireMention && prev.addressName===policy.addressName && prev.botId===policy.botId &&
         !!prev.retainFullHistory===!!policy.retainFullHistory && !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
         JSON.stringify(prev.allowedSenderIds??[])===JSON.stringify(policy.allowedSenderIds??[]) &&
         prev.ownerId===policy.ownerId && prev.botUsername===policy.botUsername) return;
-    if (prev) for (const row of store.list(`group:recent-files:${prev.botId}:${chatId}:${topicId}:`)) store.del(row.key);
+    if (prev) {
+      for (const row of store.list(`group:recent-files:${prev.botId}:${chatId}:${topicId}:`)) store.del(row.key);
+      for (const row of store.list(contextMediaPrefix(prev.botId,chatId,topicId))) store.del(row.key);
+    }
     const sameAudience = prev && prev.threadId===threadId && prev.ownerId===policy.ownerId &&
       prev.botId===policy.botId && prev.ownerOnly===policy.ownerOnly &&
       JSON.stringify(prev.allowedSenderIds??[])===JSON.stringify(policy.allowedSenderIds??[]);
@@ -116,7 +137,8 @@ export function groupTyping(store:Store, owner:()=>number|undefined, bot:()=>num
 export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   owner:number, botId:number, transport:(chatId:number)=>Telegram, signal:AbortSignal,
   transcribe?:(voice:NonNullable<GroupInput["voice"]>)=>Promise<string>, fileHostId?:string,
-  receiveExample?:(example:GroupExample,route:GroupInput)=>Promise<SavedTelegramFile>, visibleProgress=false) {
+  receiveExample?:(example:GroupExample,route:GroupInput)=>Promise<SavedTelegramFile|ImageAttachment>, visibleProgress=false,
+  verifyOwnerForum?:(policy:GroupTopicPolicy)=>Promise<boolean>) {
   const routes=new ReplyRoutes(store);
   type Cleanup={chatId:number;messageId:number;retryAt?:number};
   for (const {key,value} of store.list<Cleanup>(`group:cleanup:${botId}:`)) {
@@ -155,11 +177,12 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const p=store.get<GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`);
       sourceDenied=!sourcesVisible(p?.deliverySources,botId,r.chatId,r.topicId);
       return !sourceDenied && p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && p.threadId===r.threadId &&
-        owner===job.ownerId && (p.isolated===true || p.ownerTopic ? canInvokeGroup(p,owner,r.senderId) : senderRole(store,botId,owner,r.chatId,r.senderId)!=="none");
+        owner===job.ownerId && (p.isolated===true || p.ownerTopic || p.ownerSharedProject ? canInvokeGroup(p,owner,r.senderId) : senderRole(store,botId,owner,r.chatId,r.senderId)!=="none");
     };
     if (!allowed()) {finish("revoked");continue;}
     const topicKey = `group:policy:${r.chatId}:${r.topicId}`;
     const policy=store.get<GroupTopicPolicy>(topicKey)!;
+    const safeToSend=async()=>!policy.ownerSharedProject || !!await verifyOwnerForum?.(policy) && allowed();
     const executor=policy.isolated ? groupExecutor(r.chatId,r.topicId) : undefined;
     if (policy.isolated && (!executor || executor.projectId!==policy.projectId || executor.threadId!==r.threadId)) {
       finish("revoked");continue;
@@ -168,9 +191,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const binding = store.get<GroupTopicPolicy>(topicKey);
       return allowed() && thread.id === r.threadId && !thread.archivedAt && !thread.deletedAt &&
         thread.visibility === "visible" && !!thread.projectId &&
-        store.get("group:thread:" + r.threadId) === topicKey &&
-        store.get("group:project:" + thread.projectId) === true &&
-        (binding?.projectId ? binding.projectId === thread.projectId : store.list("group:project:").length === 1);
+        !!binding && (!binding.ownerSharedProject || !thread.parentThreadId) &&
+        groupThreadMatches(store,binding,thread.projectId);
     };
     const dest={kind:"telegram" as const,chatId:r.chatId,topicId:r.topicId,updateId:r.updateId};
     if (job.state==="pending" && r.voice) {
@@ -201,6 +223,10 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       store.put(key,job);
       if (!allowed()) {finish("revoked");continue;}
     }
+    if (job.state==="pending" && r.ambiguousMedia) {
+      job.answer="В этой теме несколько подходящих сообщений с вложениями. Ответьте на нужное фото или файл и отметьте бота.";
+      job.state="ready";
+    }
     if (job.state==="pending") {
       if (r.precedingExamples && r.waitUntil===undefined) {
         const sets=new Set(r.precedingExamples.map(f=>f.album ? "album:"+f.album : "file:"+f.messageId));
@@ -222,7 +248,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       }
       if (r.waitUntil!==undefined) {delete r.waitUntil;store.put(key,job);}
     }
-    if (visibleProgress && r.updateId>0 && job.state==="pending" && job.progressId===undefined) {
+    if (visibleProgress && !policy.ownerSharedProject && r.updateId>0 && job.state==="pending" && job.progressId===undefined) {
       // A lost Telegram acknowledgement must not create a second status on restart.
       job.progressId=null;
       store.put(key,job);
@@ -234,25 +260,57 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       } catch { /* A status failure must not stop the actual reply. */ }
       if (!allowed()) {finish("revoked");continue;}
     }
+    let isolatedResult:Awaited<ReturnType<NonNullable<typeof executor>["read"]>>|undefined;
+    if (executor && (job.state==="pending" || job.state==="submitted") && job.executorRetryAt!==undefined) {
+      if (job.executorRetryAt>Date.now()) continue;
+      if (job.state==="pending" && job.executionToken) {
+        try {
+          isolatedResult=await executor.read(job.executionToken,signal);
+          if (isolatedResult.state!=="missing") {
+            if (!allowed()) {finish("revoked");continue;}
+            delete r.examples;
+            job.state="submitted";
+            store.put(key,job);
+          } else isolatedResult=undefined;
+        } catch {
+          if (signal.aborted) return;
+          job.executorRetryAt=Date.now()+15000;
+          store.put(key,job);
+          continue;
+        }
+      }
+    }
+    const localInputs:(ImageAttachment|ReturnType<typeof localFileInput>)[]=[];
+    const remoteInputs:IsolatedAttachment[]=[];
     if (job.state==="pending" && r.examples?.length) {
       try {
         if (!receiveExample) throw Error("missing_receiver");
-        const files=[];
+        if (r.examples.length>maxGroupAttachments) throw Error("attachment_too_large");
+        let imageSize=0;
         for (const example of r.examples) {
           if (!allowed()) break;
-          const cached=await receiveExample(example,r);
+          const received=await receiveExample(example,r);
           if (!allowed()) break;
-          files.push(executor ? await executor.upload(cached,signal) : cached);
+          if ("type" in received || example.image) {
+            const image="type" in received ? received : await readSavedImage(received,signal);
+            imageSize+=image.url.length;
+            if (imageSize>maxEncodedImages) throw Error("attachment_too_large");
+            if (executor) remoteInputs.push(image);
+            else localInputs.push(image);
+          } else if (executor) {
+            remoteInputs.push(isolatedFile(await executor.upload(received,signal)));
+          } else {
+            localInputs.push(localFileInput(received,fileHostId));
+          }
         }
         if (!allowed()) {finish("revoked");continue;}
-        r.text += "\nМатериалы к этому поручению. Прочитай файлы по указанным путям:\n"+JSON.stringify(files);
-        delete r.examples;
       } catch {
         if (signal.aborted) return;
-        job.answer="Не удалось получить все файлы с примерами. Ответьте на исходное сообщение и приложите материалы ещё раз.";
+        if (!allowed()) {finish("revoked");continue;}
+        job.answer="Не удалось получить все файлы. Ответьте на исходное сообщение и приложите материалы ещё раз.";
         job.state="ready";
+        store.put(key,job);
       }
-      store.put(key,job);
     }
     if (job.state==="pending" && !job.taskId && !job.executionToken && policy.revision && policy.projectId) {
       job.taskId=randomUUID();
@@ -268,17 +326,17 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     }
     const taskNote=job.taskId ? groupTaskNote(job.taskId) : "";
     if (executor && (job.state==="pending" || job.state==="submitted")) {
-      if ((job.executorRetryAt??0)>Date.now()) continue;
       try {
         if (job.state==="pending") {
           job.executionToken ??= randomUUID();
           store.put(key,job);
-          await executor.submit(job.executionToken,[r.text,taskNote].filter(Boolean).join("\n"),signal);
+          await executor.submit(job.executionToken,[r.text,taskNote].filter(Boolean).join("\n"),signal,remoteInputs);
+          delete r.examples;
           job.state="submitted";
           store.put(key,job);
         }
         if (!job.executionToken) {finish("revoked");continue;}
-        const result=await executor.read(job.executionToken,signal);
+        const result=isolatedResult ?? await executor.read(job.executionToken,signal);
         if (result.state==="waiting") continue;
         job.answer=result.state==="finished" ? result.text : "Исполнитель потерял квитанцию. Проверьте задачу перед повтором.";
         job.state="ready";
@@ -302,14 +360,15 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const rules=rulesNote({title,settings,role,senderName});
       const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
-      if (!allowed()) continue;
+      if (!allowed() || !await safeToSend()) {finish("revoked");continue;}
       const marker=routes.ingress(r.threadId,dest);
       job.cursor=latest[0]?.seq ?? 0;
+      delete r.examples;
       job.state="submitted";
       store.put(key,job);
       // The mode persists for later messages of the thread, so every group message sets it.
       await sdk.threads.send({threadId:r.threadId,mode:"queue-if-active",permissionMode,
-        input:[{type:"text",text:r.text,mentions:[]},marker,{type:"text" as const,visibility:"agent-only" as const,text:rules,mentions:[]},
+        input:[{type:"text",text:r.text,mentions:[]},...localInputs,marker,{type:"text" as const,visibility:"agent-only" as const,text:rules,mentions:[]},
           ...(taskNote ? [{type:"text" as const,visibility:"agent-only" as const,text:taskNote,mentions:[]}] : [])]});
     }
     if (job.state==="submitted") {
@@ -342,8 +401,16 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       // Ready jobs may be resumed long after submission, including between reply parts.
       if (!allowed()) {finish("revoked");continue;}
       if (!executor && !belongsToGroup(await sdk.threads.get({threadId:r.threadId,signal}))) {finish("revoked");continue;}
+      const outputRoot=async()=>{
+        const thread=await sdk.threads.get({threadId:r.threadId,signal});
+        if (!belongsToGroup(thread) || !fileHostId || !thread.environmentId) throw Error("missing_environment");
+        const env=await sdk.environments.get({environmentId:thread.environmentId,signal});
+        if (!env.path || env.hostId!==fileHostId) throw Error("group_export_host_mismatch");
+        return env.path;
+      };
       let text=stripTelegramMarkers(job.answer!);
-      const links=localArtifacts(text).filter(link=>/\.pdf$/i.test(link.path));
+      const artifacts=localArtifacts(text);
+      const links=artifacts.filter(link=>/\.pdf$/i.test(link.path));
       const paths=[...new Set(links.map(link=>link.path))];
       for (let i=job.pdfIndex??0;i<paths.length;i++) {
         let pdf;
@@ -352,11 +419,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
             if (!job.executionToken) throw Error("missing_isolated_receipt");
             pdf=await executor.pdf(job.executionToken,paths[i],signal);
           } else {
-            const thread=await sdk.threads.get({threadId:r.threadId,signal});
-            if (!belongsToGroup(thread) || !fileHostId || !thread.environmentId) throw Error("missing_environment");
-            const env=await sdk.environments.get({environmentId:thread.environmentId,signal});
-            if (!env.path || env.hostId!==fileHostId) throw Error("group_export_host_mismatch");
-            pdf=await readGroupPdf(env.path,paths[i]);
+            pdf=await readGroupPdf(await outputRoot(),paths[i]);
           }
         } catch {
           if (signal.aborted) return;
@@ -365,7 +428,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           store.put(key,job);
           continue;
         }
-        if (!allowed()) {finish("revoked");break;}
+        if (!allowed() || !await safeToSend()) {finish("revoked");break;}
         store.put(key,{...job,state:"sending"});
         const sent=await transport(r.chatId)("sendDocument",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
           reply_parameters:{message_id:r.messageId},document:pdf.document,document_filename:pdf.name,caption:pdf.name.slice(0,900)});
@@ -378,13 +441,44 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           store.put(key,job);
         });
       }
+      if (!store.get(key)) continue;
       if (!allowed()) {finish("revoked");continue;}
       for (const link of links) text=text.replace(link.markdown,
         job.failedPdfs?.includes(link.path) ? "PDF недоступен для отправки." : "");
+      const imageLinks=artifacts.filter(link=>groupImagePath.test(link.path));
+      const images=[...new Set(imageLinks.map(link=>link.path))];
+      for (let i=job.imageIndex??0;i<images.length;i++) {
+        let image;
+        try {
+          if (executor) {
+            if (!job.executionToken) throw Error("missing_isolated_receipt");
+            image=await executor.image(job.executionToken,images[i],signal);
+          } else {
+            image=await readGroupImage(await outputRoot(),images[i]);
+          }
+        } catch {
+          if (signal.aborted) return;
+          job.failedImages=[...(job.failedImages??[]),images[i]];
+          job.imageIndex=i+1;
+          store.put(key,job);
+          continue;
+        }
+        if (!allowed() || !await safeToSend()) {finish("revoked");break;}
+        store.put(key,{...job,state:"sending"});
+        const sent=await transport(r.chatId)("sendPhoto",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
+          reply_parameters:{message_id:r.messageId},photo:image.photo,photo_filename:image.name});
+        if (!Number.isSafeInteger(sent?.message_id) || !sent.photo?.length) throw Error("missing_photo_receipt");
+        job.imageIndex=i+1;
+        store.put(key,job);
+      }
+      if (!store.get(key)) continue;
+      if (!allowed()) {finish("revoked");continue;}
+      for (const link of imageLinks) text=text.replace(link.markdown,
+        job.failedImages?.includes(link.path) ? "Изображение недоступно для отправки." : "");
       if (!text.trim()) {finish("done");continue;}
       const parts=splitText(text.trim());
       for (let i=job.part??0;i<parts.length;i++) {
-        if (!allowed()) {finish("revoked");break;}
+        if (!allowed() || !await safeToSend()) {finish("revoked");break;}
         store.put(key,{...job,state:"sending",part:i});
         const sent=await transport(r.chatId)("sendMessage",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
           reply_parameters:{message_id:r.messageId},text:parts[i]});

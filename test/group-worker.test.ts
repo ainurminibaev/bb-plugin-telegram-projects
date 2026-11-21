@@ -1,4 +1,4 @@
-import {mkdtemp, mkdir, readFile, rm, writeFile} from "node:fs/promises";
+import {mkdtemp, mkdir, rm, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {saveLocalTelegramFile} from "../telegram-files";
@@ -6,6 +6,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {acceptGroupUpdate} from "../ingress";
 import {bindGroupTopic,groupCliRestricted,processGroupInputs} from "../group-worker";
+
+const pixel=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=","base64");
+const image={type:"image" as const,url:"data:image/png;base64,"+pixel.toString("base64")};
 
 test("worker delivers only its completed turn into the bound forum topic",async()=>{
  const rows=new Map<string,any>();
@@ -154,11 +157,11 @@ for (const transcript of ["Сейчас скину примеры","Возьми
  function post(id:number,user:number,m:object,topic=3){
   return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:topic,from:{id:user},...m}},8,5);
  }
- const calls:string[]=[];const sent:string[]=[];
- const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{sent.push(q.input[0].text);}}};
+ const calls:string[]=[];const sent:any[]=[];
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{sent.push(q.input);}}};
  const tick=()=>processGroupInputs(store,sdk as any,8,5,()=>async()=>{throw Error("unexpected delivery");},
   new AbortController().signal,async()=>transcript,"host",async(f)=>{
-   calls.push(f.fileId);return {path:"/inbox/"+f.name,name:f.name,bytes:12,sha256:"hash"};
+   calls.push(f.fileId);return image;
   });
  post(10,8,{voice:{file_id:"voice"},reply_to_message:{message_id:9,chat,message_thread_id:3,from:{id:5}}});
  const photo=(id:string)=>({photo:[{file_id:id}],media_group_id:"sample"});
@@ -166,7 +169,7 @@ for (const transcript of ["Сейчас скину примеры","Возьми
  await tick();assert.deepEqual(sent,[]);
  post(14,8,photo("two"));post(15,8,{text:"Всё, делай!"});await tick();await tick();
  assert.deepEqual(calls,["one","two"]);assert.equal(sent.length,1);
- assert.ok(sent[0].includes(transcript));assert.match(sent[0],/photo-14.jpg/);
+ assert.ok(sent[0][0].text.includes(transcript));assert.deepEqual(sent[0].filter((x:any)=>x.type==="image"),[image,image]);
 });
 
 for (const requireMention of [true,false]) test(`voice correction selects its sender’s earlier album (requireMention=${requireMention})`,async()=>{
@@ -191,12 +194,11 @@ for (const requireMention of [true,false]) test(`voice correction selects its se
  try {
   const source=join(directory,"api");
   await mkdir(source);
-  await writeFile(join(source,"p1"),"first example");
-  await writeFile(join(source,"p2"),"second example");
+  await writeFile(join(source,"p1"),pixel);
+  await writeFile(join(source,"p2"),pixel);
   const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async(q:any)=>{
    const text=q.input[0].text;
-   const saved=JSON.parse(text.split("\n").at(-1)) as {path:string}[];
-   assert.deepEqual(await Promise.all(saved.map(f=>readFile(f.path,"utf8"))),["first example","second example"]);
+   assert.deepEqual(q.input.filter((x:any)=>x.type==="image"),[image,image]);
    turns.push(text);
   }}};
   const signal=new AbortController().signal;
@@ -325,7 +327,7 @@ test("an ordinary group turn that answers NO_REPLY stays silent",async()=>{
  assert.equal(sent.filter(([,p])=>typeof p.text==="string").length,0);
 });
 
-test("group delivery keeps the PDF and strips marker lines from its accompanying text", async () => {
+test("group delivery replies with verified PDF and image bytes plus clean text exactly once", async () => {
   const rows = new Map<string, unknown>();
   const store = {
     get:<T>(key:string)=>rows.get(key) as T|undefined,
@@ -341,20 +343,27 @@ test("group delivery keeps the PDF and strips marker lines from its accompanying
     await mkdir(join(directory,"outputs"));
     const path = join(directory,"outputs","report.pdf");
     await writeFile(path,"%PDF-1.4\nfixture");
+    const photo=join(directory,"outputs","fixture.png");
+    await writeFile(photo,pixel);
     const route={kind:"group",chatId:-1001,topicId:3,threadId:"t",senderId:7,updateId:43,messageId:9};
     store.put("group:in:5:43",{route,ownerId:7,revision:"original",state:"ready",
-      answer:`Отчёт готов.\n  <!-- bb-telegram-child-result:thr_worker:turn-1 -->\n[PDF](${path})\nbb-telegram-child-result:thr_other:turn-2`});
+      answer:`Отчёт готов.\n  <!-- bb-telegram-child-result:thr_worker:turn-1 -->\n[PDF](${path})\n[Фото](${photo})\nbb-telegram-child-result:thr_other:turn-2`});
     const sdk={threads:{get:async()=>({id:"t",projectId:"group-project",visibility:"visible",environmentId:"env"})},
       environments:{get:async()=>({hostId:"host",path:directory})}};
     const sent: {method:string;payload:Record<string,unknown>}[]=[];
-    await processGroupInputs(store,sdk as never,7,5,()=>async <T>(method:string,payload:Record<string,unknown>)=>{
+    const tick=()=>processGroupInputs(store,sdk as never,7,5,()=>async <T>(method:string,payload:Record<string,unknown>)=>{
       sent.push({method,payload});
-      return {message_id:sent.length,document:{file_id:"fixture"}} as T;
+      return {message_id:sent.length,document:{file_id:"fixture"},photo:[{file_id:"image"}]} as T;
     },new AbortController().signal,undefined,"host");
-    assert.deepEqual(sent.map(row=>row.method),["sendDocument","sendMessage"]);
+    await tick();await tick();
+    assert.deepEqual(sent.map(row=>row.method),["sendDocument","sendPhoto","sendMessage"]);
     assert.equal(sent[0].payload.caption,"report.pdf");
-    assert.equal(sent[1].payload.text,"Отчёт готов.");
-    assert.equal(sent[1].payload.message_thread_id,3);
+    assert.deepEqual(Buffer.from(await (sent[1].payload.photo as Blob).arrayBuffer()),pixel);
+    assert.equal(sent[2].payload.text,"Отчёт готов.");
+    for (const row of sent) {
+      assert.equal(row.payload.message_thread_id,3);
+      assert.deepEqual(row.payload.reply_parameters,{message_id:9});
+    }
     assert.equal(store.get<{state:string}>("group:receipt:5:43")?.state,"done");
   } finally { await rm(directory,{recursive:true,force:true}); }
 });

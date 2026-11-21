@@ -1,3 +1,4 @@
+import {groupThreadMatches,isSharedOwnerPolicy,sharedOwnerForum} from "./group-binding";
 import { createHash, randomUUID } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -14,9 +15,11 @@ export const ownerTopicInput = z.object({
   text: z.string().trim().min(1).max(4096).optional(),
 }).strict();
 
+export const ownerPrivateTopicInput=ownerTopicInput.extend({routeToken:z.string().uuid(),forum:z.string().trim().min(1).max(200).optional()});
+
 const defaultFirstMessage = "Тема создана. Продолжим здесь.";
 
-type Args = z.infer<typeof ownerTopicInput>;
+type Args = z.infer<typeof ownerTopicInput> & {routeToken?:string;forum?:string};
 type Scope = {threadId:string; projectId:string; signal:AbortSignal};
 type Origin = GroupOrigin;
 type SubmittedJob = { state:string; ownerId:number; revision?:string; taskId?:string;
@@ -31,7 +34,115 @@ type Dependencies = {
   store:Store; sdk:BbPluginApi["sdk"];
   identity:()=>Promise<{owner:number; bot:number}>;
   transport:(chatId:number, signal:AbortSignal)=>Telegram;
+  provePrivate?:(threadId:string,routeToken:string,owner:number)=>Promise<{key:string;text:string}>;
 };
+type TopicSource={chatId:number;topicId:number;key:string;text?:string;shared?:true;
+  current:()=>Promise<void>;prove:()=>Promise<void>};
+
+async function groupSource(d:Dependencies,scope:Scope,owner:number,bot:number):Promise<TopicSource> {
+  const {store,sdk}=d;
+  const {threadId,projectId,signal}=scope;
+  const candidates = store.list<SubmittedJob>(`group:in:${bot}:`).map(row=>row.value)
+    .filter(job => job.state==="submitted" && job.ownerId===owner &&
+      job.route.senderId===owner && job.route.threadId===threadId && job.route.updateId>0 && job.taskId);
+  if (candidates.length !== 1) throw Error("current_owner_group_request_required");
+  const [job] = candidates;
+  const {route} = job;
+  const origin = store.get<Origin>("group:origin:"+job.taskId);
+  if (!origin || origin.owner!==owner || origin.sender!==owner || origin.bot!==bot || origin.threadId!==threadId ||
+      origin.projectId!==projectId || origin.chatId!==route.chatId || origin.topicId!==route.topicId ||
+      origin.messageId!==route.messageId || origin.revision!==job.revision || origin.executionToken)
+    throw Error("current_owner_group_request_required");
+  const {chatId} = origin;
+  const sourceKey = `group:policy:${chatId}:${origin.topicId}`;
+  const sourceIsShared=store.get<GroupTopicPolicy>(sourceKey)?.ownerSharedProject;
+  const currentSource = async () => {
+    signal.throwIfAborted();
+    const live = await d.identity();
+    if (live.owner !== owner || live.bot !== bot) throw Error("bot_changed");
+    const persisted = store.get<SubmittedJob>(`group:in:${bot}:${route.updateId}`);
+    const source = store.get<GroupTopicPolicy>(sourceKey);
+    if (persisted?.state!=="submitted" || persisted.taskId!==job.taskId ||
+        source?.revision!==origin.revision || source?.ownerId!==owner || source.botId!==bot ||
+        source.threadId!==threadId || source.projectId!==projectId || source.isolated ||
+        source.ownerSharedProject!==sourceIsShared || !groupThreadMatches(store,source,projectId) ||
+        !sourcesVisible(source.deliverySources,bot,chatId,origin.topicId))
+      throw Error("current_owner_group_request_required");
+    signal.throwIfAborted();
+  };
+  const proveTurn = async () => {
+    // The native tool context has a thread ID. The native input log proves
+    // that the submitted job is the accepted input still running there.
+    const events = await sdk.threads.events.list({threadId,signal,order:"desc",limit:"30",
+      types:["client/turn/requested","turn/input/accepted","turn/completed"]});
+    const accepted = events.find(e=>e.type==="turn/input/accepted");
+    if (accepted?.scope.kind!=="turn") throw Error("current_owner_group_request_required");
+    const request = events.find(e => e.type==="client/turn/requested" && e.data.requestId===accepted.data.clientRequestId);
+    if (request?.type!=="client/turn/requested" || request.data.originPluginId!=="telegram-projects" ||
+        !request.data.input?.some(item=>item.type==="text" && item.visibility==="agent-only" &&
+          item.text===groupTaskNote(job.taskId!)))
+      throw Error("current_owner_group_request_required");
+    const turnId = accepted.scope.turnId;
+    if (events.some(e=>e.type==="turn/completed" && e.scope.kind==="turn" && e.scope.turnId===turnId && e.seq>accepted.seq))
+      throw Error("current_owner_group_request_required");
+  };
+  return {chatId,topicId:origin.topicId,key:job.taskId!,text:route.ownerTopicText,
+    shared:sourceIsShared,current:currentSource,prove:proveTurn};
+}
+
+async function privateSource(d:Dependencies,scope:Scope,owner:number,bot:number,token:string,forum?:string):Promise<TopicSource> {
+  if (!d.provePrivate) throw Error("current_owner_request_required");
+  const {threadId,projectId,signal}=scope;
+  const proof=()=>d.provePrivate!(threadId,token,owner);
+  const originals=()=>{
+    const policies=d.store.list<GroupTopicPolicy>("group:policy:").map(row=>row.value)
+      .filter(p=>isSharedOwnerPolicy(p) && p.ownerId===owner && p.botId===bot && p.projectId===projectId &&
+        groupThreadMatches(d.store,p,projectId));
+    return new Set(policies.map(p=>p.chatId));
+  };
+  const original=await proof();
+  const normalized=(text:string)=>text.normalize("NFC").toLowerCase();
+  const choose=async()=>{
+    const chatIds=originals();
+    if (!forum) {
+      if (chatIds.size!==1) throw Error("explicit_private_forum_selection_required");
+      return [...chatIds][0];
+    }
+    const supplied=normalized(forum);
+    if (!normalized(original.text).includes(supplied)) throw Error("explicit_private_forum_selection_required");
+    const ref=/^https:\/\/t\.me\/c\/([1-9]\d*)(?:\/[1-9]\d*){0,2}\/?$/.exec(forum);
+    if (ref) {
+      const selected=Number("-100"+ref[1]);
+      if (chatIds.has(selected)) return selected;
+      throw Error("private_forum_selection_unavailable");
+    }
+    const chats=await Promise.all([...chatIds].map(async id=>{
+      const tg=d.transport(id,signal);
+      const chat=await tg<{id:number;title?:string}>("getChat",{chat_id:id});
+      return chat.id===id && chat.title ? {id,title:normalized(chat.title)} : undefined;
+    }));
+    const matches=chats.filter(chat=>chat?.title===supplied);
+    const cited=normalized(original.text);
+    const quoted=cited.includes("«"+supplied+"»") || cited.includes('"'+supplied+'"');
+    if (matches.length!==1 || (!quoted && chats.some(chat=>chat && chat.title!==supplied &&
+        chat.title.includes(supplied) && cited.includes(chat.title))))
+      throw Error("private_forum_selection_unavailable");
+    return matches[0]!.id;
+  };
+  const chatId=await choose();
+  return {chatId,topicId:0,key:original.key,text:original.text,shared:true,
+    current:async()=>{
+      signal.throwIfAborted();
+      const identity=await d.identity();
+      if (identity.owner!==owner || identity.bot!==bot || await choose()!==chatId)
+        throw Error("private_owner_forum_changed");
+    },
+    prove:async()=>{
+      const live=await proof();
+      if (live.key!==original.key || live.text!==original.text) throw Error("current_owner_request_required");
+    },
+  };
+}
 
 export function ownerTopicTool(d: Dependencies) {
   const inFlight = new Set<string>();
@@ -39,56 +150,14 @@ export function ownerTopicTool(d: Dependencies) {
     const {store, sdk} = d;
     const {owner,bot} = await d.identity();
     const {threadId, projectId, signal} = scope;
-    const candidates = store.list<SubmittedJob>(`group:in:${bot}:`).map(row=>row.value)
-      .filter(job => job.state==="submitted" && job.ownerId===owner &&
-        job.route.senderId===owner && job.route.threadId===threadId && job.route.updateId>0 && job.taskId);
-    if (candidates.length !== 1) throw Error("current_owner_group_request_required");
-    const [job] = candidates;
-    const {route} = job;
-    const origin = store.get<Origin>("group:origin:"+job.taskId);
-    if (!origin || origin.owner!==owner || origin.sender!==owner || origin.bot!==bot || origin.threadId!==threadId ||
-        origin.projectId!==projectId || origin.chatId!==route.chatId || origin.topicId!==route.topicId ||
-        origin.messageId!==route.messageId || origin.revision!==job.revision || origin.executionToken)
-      throw Error("current_owner_group_request_required");
-    const {chatId} = origin;
+    const source=args.routeToken ? await privateSource(d,scope,owner,bot,args.routeToken,args.forum) : await groupSource(d,scope,owner,bot);
+    const {chatId,shared:sourceIsShared,current:currentSource,prove:proveTurn,text:ownerMessage}=source;
     const privateChat = /^-100([1-9]\d*)$/.exec(String(chatId))?.[1];
-    const ownerMessage = route.ownerTopicText;
     if (!privateChat || !ownerMessage?.includes(args.title) || stripTelegramMarkers(args.title)!==args.title)
       throw Error("explicit_owner_title_required");
     if (args.text!==undefined && (!ownerMessage.includes(args.text) || stripTelegramMarkers(args.text)!==args.text))
       throw Error("explicit_owner_message_required");
     const text = args.text ?? defaultFirstMessage;
-    const sourceKey = `group:policy:${chatId}:${origin.topicId}`;
-    const currentSource = async () => {
-      signal.throwIfAborted();
-      const live = await d.identity();
-      if (live.owner !== owner || live.bot !== bot) throw Error("bot_changed");
-      const persisted = store.get<SubmittedJob>(`group:in:${bot}:${route.updateId}`);
-      const source = store.get<GroupTopicPolicy>(sourceKey);
-      if (persisted?.state!=="submitted" || persisted.taskId!==job.taskId ||
-          source?.revision!==origin.revision || source?.ownerId!==owner || source.botId!==bot ||
-          source.threadId!==threadId || source.projectId!==projectId || source.isolated ||
-          store.get("group:thread:"+threadId)!==sourceKey || store.get("group:project:"+projectId)!==true ||
-          !sourcesVisible(source.deliverySources,bot,chatId,origin.topicId))
-        throw Error("current_owner_group_request_required");
-      signal.throwIfAborted();
-    };
-    const proveTurn = async () => {
-      // The native tool context has a thread ID. The native input log proves
-      // that the submitted job is the accepted input still running there.
-      const events = await sdk.threads.events.list({threadId,signal,order:"desc",limit:"30",
-        types:["client/turn/requested","turn/input/accepted","turn/completed"]});
-      const accepted = events.find(e=>e.type==="turn/input/accepted");
-      if (accepted?.scope.kind!=="turn") throw Error("current_owner_group_request_required");
-      const request = events.find(e => e.type==="client/turn/requested" && e.data.requestId===accepted.data.clientRequestId);
-      if (request?.type!=="client/turn/requested" || request.data.originPluginId!=="telegram-projects" ||
-          !request.data.input?.some(item=>item.type==="text" && item.visibility==="agent-only" &&
-            item.text===groupTaskNote(job.taskId!)))
-        throw Error("current_owner_group_request_required");
-      const turnId = accepted.scope.turnId;
-      if (events.some(e=>e.type==="turn/completed" && e.scope.kind==="turn" && e.scope.turnId===turnId && e.seq>accepted.seq))
-        throw Error("current_owner_group_request_required");
-    };
     const key = "group:owner-topic:"+JSON.stringify([bot,chatId,args.title.normalize("NFC").toLowerCase()]);
     const digest = createHash("sha256").update(JSON.stringify([args.title,text])).digest("hex");
     if (inFlight.has(key)) throw Error("owner_topic_in_progress");
@@ -98,10 +167,13 @@ export function ownerTopicTool(d: Dependencies) {
       await proveTurn();
       const thread = await sdk.threads.get({threadId,signal});
       if (thread.id!==threadId || thread.projectId!==projectId || !thread.environmentId ||
-          thread.archivedAt || thread.deletedAt || thread.visibility!=="visible")
+          thread.archivedAt || thread.deletedAt || thread.visibility!=="visible" ||
+          (sourceIsShared && thread.parentThreadId))
         throw Error("group_source_thread_unavailable");
       const tg = d.transport(chatId,signal);
       const checkForum = async () => {
+        if (sourceIsShared && !await sharedOwnerForum(tg,chatId,owner,bot))
+          throw Error("private_owner_forum_required");
         const chat = await tg("getChat",{chat_id:chatId});
         if (chat.id!==chatId || chat.type!=="supergroup" || chat.is_forum!==true || chat.username ||
             chat.active_usernames?.length)
@@ -119,7 +191,7 @@ export function ownerTopicTool(d: Dependencies) {
       };
       const username = await checkForum();
 
-      const taskKey = "group:owner-topic-task:"+job.taskId;
+      const taskKey = "group:owner-topic-task:"+source.key;
       const claimTask = () => {
         const existing = store.get<string>(taskKey);
         if (existing && existing!==key) throw Error("owner_topic_request_conflict");
@@ -150,7 +222,7 @@ export function ownerTopicTool(d: Dependencies) {
           throw error;
         }
         if (!Number.isSafeInteger(result?.message_thread_id) || result.message_thread_id<2 ||
-            result.message_thread_id===origin.topicId)
+            result.message_thread_id===source.topicId)
           throw Error("owner_topic_creation_unconfirmed");
         save({phase:"topic",topicId:result.message_thread_id});
       }
@@ -198,6 +270,7 @@ export function ownerTopicTool(d: Dependencies) {
           chatId, topicId:stage.topicId, threadId:stage.threadId, projectId,
           revision:stage.revision, botId:bot, botUsername:username,
           ownerId:owner, ownerOnly:true, ownerTopic:true, requireMention:false,
+          ...(sourceIsShared && {ownerSharedProject:true}),
         },projectId);
         await checkForum();
         await currentSource();
@@ -206,7 +279,7 @@ export function ownerTopicTool(d: Dependencies) {
         const bound = store.get<GroupTopicPolicy>(targetKey);
         if (bound?.revision!==stage.revision || bound.threadId!==stage.threadId ||
             bound.ownerId!==owner || bound.botId!==bot || bound.ownerTopic!==true ||
-            !bound.ownerOnly || bound.requireMention || bound.allowedSenderIds?.length || bound.projectId!==projectId ||
+            bound.ownerSharedProject!==sourceIsShared || !bound.ownerOnly || bound.requireMention || bound.allowedSenderIds?.length || bound.projectId!==projectId ||
             bound.chatId!==chatId || bound.topicId!==stage.topicId || store.get("group:thread:"+stage.threadId)!==targetKey)
           throw Error("owner_topic_binding_conflict");
         save({...stage,phase:"posting"});

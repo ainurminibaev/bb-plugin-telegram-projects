@@ -1,5 +1,6 @@
 import {historyCutoff,historyPrefix,topicPassages} from "./topic-search";
 import type { Store } from "./model";
+import {isSharedOwnerPolicy} from "./group-binding";
 import { effectiveGroupPolicy } from "./rights";
 import type { ChatInput } from "./chat";
 
@@ -12,7 +13,9 @@ export type GroupTopicPolicy = {
   threadId: string;
   ownerOnly: boolean;
   ownerTopic?: true;
+  ownerSharedProject?: true;
   requireMention: boolean;
+  addressName?: string;
   allowedSenderIds?: number[];
   includeTopicContext?: boolean;
   searchableHistory?: boolean;
@@ -25,6 +28,7 @@ export type GroupTopicPolicy = {
 };
 
 export function canInvokeGroup(policy: GroupTopicPolicy, owner: number, sender: number) {
+  if (policy.ownerSharedProject) return policy.ownerId===owner && sender===owner && isSharedOwnerPolicy(policy);
   return sender === owner || !policy.ownerOnly || policy.allowedSenderIds?.includes(sender) === true;
 }
 
@@ -38,18 +42,73 @@ export function refersToExamples(text:string) {
   return /(?:^|[^\p{L}])(?:использу[йе]|возьми|прочита[йе]|посмотри|учти|на основе|из|по|как|эти|этом|этой|мо[ий]|присланн|скинул|отправил).{0,40}(?:пример|образц|фото|файл|картин|скрин|референс)|(?:пример|образц|фото|файл|картин|скрин|референс).{0,25}(?:выше|прислал|скинул|отправил)/iu.test(text);
 }
 
-export type GroupExample = {fileId:string; name:string; size:number; messageId:number; album?:string};
+export type GroupExample = {fileId:string; name:string; size:number; messageId:number; album?:string; image?:true};
 
 function groupExample(message:any):GroupExample|undefined {
   const photo=Array.isArray(message?.photo) ? message.photo.at(-1) : undefined;
   const file=message?.document ?? photo;
   if (!file?.file_id || !Number.isSafeInteger(message.message_id)) return;
   return {fileId:file.file_id, name:file.file_name ?? `photo-${message.message_id}.jpg`,
-    size:file.file_size ?? 0, messageId:message.message_id, ...(message.media_group_id && {album:String(message.media_group_id)})};
+    size:file.file_size ?? 0, messageId:message.message_id,
+    ...((file===photo || /^image\/(jpeg|png|webp|gif)$/.test(file.mime_type ?? "")) && {image:true as const}),
+    ...(message.media_group_id && {album:String(message.media_group_id)})};
+}
+
+type ContextMedia = {revision?:string; expiresAt:number; file:GroupExample};
+const mediaLifetime = 10 * 60_000;
+export const contextMediaPrefix = (bot:number,chat:number,topic:number) => `group:context-media:${bot}:${chat}:${topic}:`;
+
+function originalPerson(message:any) {
+  return Number.isSafeInteger(message?.from?.id) && message.from.id>0 && !message.from.is_bot &&
+    !message.sender_chat && !message.forward_origin && !message.forward_date &&
+    !message.is_automatic_forward && !message.via_bot;
+}
+
+function sameTopicReply(message:any, policy:GroupTopicPolicy) {
+  const reply=message.reply_to_message;
+  return reply?.chat?.id===policy.chatId && (reply.message_thread_id??0)===policy.topicId &&
+    Number.isSafeInteger(reply.message_id) && reply.message_id>0 && reply.message_id<message.message_id &&
+    reply.message_id!==policy.topicId;
+}
+
+function words(text:string) {
+  return text.toLowerCase().replaceAll("ё","е").match(/[\p{L}]+/gu) ?? [];
+}
+
+function addressForms(name:string) {
+  return [name,name.replace(/([иы])й$/u,"$1ю").replace(/й$/u,"ю").replace(/а$/u,"е").replace(/я$/u,"е"),
+    name.replace(/([^аеёиоуыэюяйь])$/u,"$1у"),name.replace(/ь$/u,"ю")];
+}
+
+function directNameAddress(text:string,name?:string) {
+  if (!name) return false;
+  const match=text.trimStart().match(/^([\p{L}][\p{L}\p{M} -]{0,39})[,:]\s*(\S)/u);
+  return match?.[1].trim().normalize("NFC").toLowerCase()===name.normalize("NFC").toLowerCase();
+}
+
+function contextMediaForReply(store:Store, policy:GroupTopicPolicy, lines:TopicLine[], body:string) {
+  // Require an explicit request to address a participant. Match the addressee
+  // against this topic's recent authors, including authors without attachments.
+  const target=body.replace(/^\s*@[\w]+[\s,.:!—-]*/u,"")
+    .match(/^\s*(?:пожалуйста[, ]+)?(?:ответь(?:те)?|reply\s+to|answer)\s+(?:пожалуйста[, ]+)?([^\n,!?;.]+)/iu)?.[1];
+  if (!target) return;
+  const name=words(target);
+  if (!name.length) return;
+  const people=new Set(lines.filter(line=>{
+    const author=words(line.name);
+    return name.length<=author.length && name.every((part,i)=>addressForms(author[i]).includes(part));
+  }).map(line=>line.sender));
+  const prefix=contextMediaPrefix(policy.botId,policy.chatId,policy.topicId);
+  const files=lines.filter(line=>people.has(line.sender)).flatMap(line=>{
+    const saved=store.get<ContextMedia>(prefix+line.id);
+    return saved && saved.revision===policy.revision && saved.expiresAt>Date.now() ? [saved.file] : [];
+  });
+  if (files.length===0) return;
+  return people.size===1 && files.length===1 ? {file:files[0]} : {ambiguous:true};
 }
 
 export type Ingress =
-  | {kind: "group"; ownerTopicText?: string; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]}
+  | {kind: "group"; ownerTopicText?: string; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]; ambiguousMedia?:true}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
   | { kind: "tasks"; topicId: number }
   | { kind: "pair"; userId: number }
@@ -74,13 +133,16 @@ export function routeUpdate(
         !group.threadId || !Number.isSafeInteger(from?.id) || from.id <= 0 ||
         from.is_bot || m.sender_chat || !canInvokeGroup(group, owner, from.id))
       return {kind: "ignore"};
+    if (group.ownerSharedProject && (m.is_topic_message!==true || !originalPerson(m))) return {kind:"ignore"};
     const text = m.text ?? m.caption ?? "";
     const v = m.voice;
     const voice = v?.file_id ? {fileId:v.file_id, mime:v.mime_type ?? "audio/ogg", size:v.file_size ?? 0, duration:v.duration ?? 0} : undefined;
     if (typeof text !== "string" || (!text.trim() && !voice && !groupExample(m))) return {kind: "ignore"};
     const entities = m.entities ?? m.caption_entities ?? [];
     const username = "@" + group.botUsername.toLowerCase();
-    const addressed = (m.reply_to_message?.from?.id === group.botId && (!topicId || m.reply_to_message.message_id!==topicId)) || entities.some((e: any) => {
+    const addressed = (originalPerson(m) && directNameAddress(text,group.addressName)) ||
+      (m.reply_to_message?.from?.id === group.botId &&
+      (group.ownerSharedProject ? sameTopicReply(m,group) : (!topicId || m.reply_to_message.message_id!==topicId))) || entities.some((e: any) => {
       const value = text.slice(e.offset, e.offset + e.length).toLowerCase();
       return (e.type === "mention" && value === username) ||
         (e.type === "text_mention" && e.user?.id === group.botId) ||
@@ -94,7 +156,10 @@ export function routeUpdate(
       messageId:reply.message_id, fileName:reply.document?.file_name,
       excerpt:String(reply.text ?? reply.caption ?? "").slice(0,600)
     } : undefined;
-    const examples=[groupExample(m), repliedToMessage && reply?.from?.id===from.id ? groupExample(reply) : undefined]
+    const canUseReply=sameTopicReply(m,group) && originalPerson(reply) &&
+      (reply.from.id===from.id || (from.id===owner && group.includeTopicContext && !group.ownerSharedProject && originalPerson(m))) &&
+      (group.acceptAfterSecond===undefined || (Number.isSafeInteger(reply.date) && reply.date>group.acceptAfterSecond));
+    const examples=[groupExample(m), canUseReply ? groupExample(reply) : undefined]
       .filter((file):file is GroupExample=>!!file);
     const prompt = target ? "Ответ на сообщение в этой теме: " + JSON.stringify(target) + "\n" + text : text;
     const senderName = [from.first_name, from.last_name].filter(Boolean).join(" ").slice(0, 64) || undefined;
@@ -152,6 +217,7 @@ export function routeUpdate(
       text: callback ? undefined : text?.slice(0, 16000),
       ...(Number.isInteger(m.date) && {sentAt:m.date}),
       ...((m.forward_origin || m.forward_date) && {forwarded:true}),
+      ...(!callback && typeof m.text==="string" && !m.reply_to_message && originalPerson(m) && {originalText:true as const}),
       callback,
       attachment: !callback && attached ? {
         fileId: attached.file_id,
@@ -226,6 +292,8 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     const bound = store.get<GroupTopicPolicy>(`group:policy:${chatId}:${topicId}`);
     if (!bound || (bound.ownerId !== undefined && owner !== bound.ownerId) || bound.botId !== botId || typeof bound.ownerOnly !== "boolean" ||
         typeof bound.requireMention !== "boolean" || !bound.botUsername) return;
+    if (bound.ownerSharedProject && (!isSharedOwnerPolicy(bound) || guest || message.is_topic_message!==true ||
+        !originalPerson(message) || message.from.id!==owner)) return;
     // Who may call the bot here follows the access list and the group settings.
     const policy = effectiveGroupPolicy(store, bound, owner);
     // Telegram dates have second precision. The binding second is ambiguous.
@@ -281,7 +349,8 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
         !store.get<{closed?:boolean}>(`group:examples:${botId}:${j.route.updateId}`)?.closed &&
         (replyId===undefined || replyId===j.route.messageId));
       const explicitlyAddressed=replyId!==undefined || !!(message.caption_entities??[]).some((e:any)=>
-        ["mention","text_mention","bot_command"].includes(e.type));
+        ["mention","text_mention","bot_command"].includes(e.type)) ||
+        (originalPerson(message) && directNameAddress(message.caption ?? "",policy.addressName));
       if (candidates.length===1 && (!explicitlyAddressed || replyId===candidates[0].value.route.messageId)) {
         const anchor=candidates[0].value.route;
         const key=`group:examples:${botId}:${anchor.updateId}`;
@@ -306,7 +375,10 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     }
     if (policy.includeTopicContext) {
       const sender = message.from;
-      const body = message.text ?? message.caption ?? (route.kind === "group" ? (route.voice ? "[Голосовое обращение]" : route.examples?.[0]?.name) : undefined);
+      const contextFile = file && originalPerson(message) && sameTopicReply(message,policy) &&
+        message.reply_to_message.from?.id===botId ? file : undefined;
+      const body = message.text ?? message.caption ?? (contextFile ? "[Вложение]" : undefined) ??
+        (route.kind === "group" ? (route.voice ? "[Голосовое обращение]" : route.examples?.[0]?.name) : undefined);
       if (!sender || sender.is_bot || message.sender_chat || !Number.isSafeInteger(sender.id) ||
           sender.id <= 0 || typeof body !== "string" || !Number.isSafeInteger(message.date)) return;
       const key = `group:context:${chatId}:${topicId}`;
@@ -321,10 +393,29 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
         date:message.date, replyTo:message.reply_to_message?.message_id, text:body.slice(0,600)};
       if (policy.searchableHistory && (policy.retainFullHistory || line.date>=historyCutoff()))
         store.put(archiveKey,{...line,text:body.slice(0,4096),permanent:policy.retainFullHistory===true});
-      if (!edit || recentEdit)
-        store.put(key,[...previous,line].sort((a,b)=>a.id-b.id).slice(-24));
+      if (!edit || recentEdit) {
+        const ordered=[...previous,line].sort((a,b)=>a.id-b.id);
+        store.put(key,ordered.slice(-24));
+        const prefix=contextMediaPrefix(botId,chatId,topicId);
+        const now=Date.now();
+        const expiresAt=message.date*1000+mediaLifetime;
+        // Only a fresh, original reply to this bot can become a passive candidate.
+        if (edit) store.del(prefix+line.id);
+        if (contextFile && expiresAt>now && expiresAt<=now+mediaLifetime+60_000)
+          store.put(prefix+line.id,{revision:policy.revision,file:contextFile,expiresAt} satisfies ContextMedia);
+        for (const {id} of ordered.slice(0,-24)) {
+          if (store.get(prefix+id)) store.del(prefix+id);
+        }
+      }
       if (route.kind === "group") {
         const recent = previous.filter(line => line.id < message.message_id);
+        if (!edit && sender.id===owner && originalPerson(message) && !route.examples?.length && !route.precedingExamples?.length &&
+            !route.voice && route.waitUntil===undefined &&
+            (!message.reply_to_message || message.reply_to_message.message_id===topicId)) {
+          const media=contextMediaForReply(store,policy,recent,body);
+          if (media?.file) route.examples=[media.file];
+          if (media?.ambiguous) route.ambiguousMedia=true;
+        }
         if (policy.searchableHistory) {
           const before=recent[0]?.id ?? message.message_id;
           if (route.voice) route.searchBefore=before;
