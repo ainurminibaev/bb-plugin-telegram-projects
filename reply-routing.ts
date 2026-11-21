@@ -4,11 +4,35 @@ import type { Store } from "./model";
 export type ReplyRoute = { kind: "bb" } | {
   kind: "telegram"; chatId: number; topicId: number; updateId: number; messageId?: number;
 };
-export function routeMarker(id:string) {
+const ownerResultInstructions = "\nIf your final answer includes the completed result of a delegated BB turn, append " +
+  "one Markdown comment on its own line for each such result: <!-- bb-telegram-child-result:CHILD_THREAD_ID:CHILD_TURN_ID -->. " +
+  "Use the exact turn ID from the child's BB event log. Omit this comment for launch acknowledgements, " +
+  "progress updates, or results you did not include. The bridge removes the comment from Telegram.";
+
+export type ChildResult = {threadId: string; turnId: string};
+
+export function splitChildResultClaims(text: string) {
+  const claims: ChildResult[] = [];
+  const body = text.replace(/^<!-- bb-telegram-child-result:([a-zA-Z0-9_-]+):([a-zA-Z0-9_-]+) -->[ \t]*\r?$/gm,
+    (_, threadId: string, turnId: string) => {
+      claims.push({threadId, turnId});
+      return "";
+    });
+  return {body: body.trim(), claims};
+}
+
+export function routeMarker(id:string, owner = false) {
     return {type: "text" as const, visibility: "agent-only" as const, mentions: [],
-      text: "[bb-telegram-reply-route:" + id + "]\nTransport metadata only; do not quote this marker in the answer."};
+      text: "[bb-telegram-reply-route:" + id + "]\nTransport metadata only; do not quote this marker in the answer." +
+        (owner ? ownerResultInstructions : "")};
 }
 type TurnRoutes = { requestIds: string[]; ambiguous: boolean };
+type FinalClaim = { route: ReplyRoute; outboxKey: string; writtenAt?: number; native?: boolean };
+type Outcome = {status: string; route?: ReplyRoute; consumedBy: string | null; completedAt?: number; parent?: string};
+type Report = ChildResult & {
+  parent: string; status: string; route: Extract<ReplyRoute, {kind:"telegram"}>; mixed?: boolean;
+};
+type Disposition = "wait" | "delivered" | undefined;
 
 // This ledger requires a proven native request ID. It never guesses from the
 // most recent message, text equality, a binding, or the currently active UI.
@@ -36,7 +60,7 @@ export class ReplyRoutes {
   ingress(threadId: string | null, route: Extract<ReplyRoute, {kind: "telegram"}>, delegatedBy?: string, reportKey?: string) {
     const id = randomUUID();
     this.store.put("reply:ingress:" + id, {threadId, route, delegatedBy, reportKey});
-    return routeMarker(id);
+    return routeMarker(id, !delegatedBy && !reportKey);
   }
   delegatedIngress(parentThreadId: string, token: string, childThreadId: string | null) {
     if (!/^[a-f0-9-]{36}$/.test(token)) throw Error("invalid_parent_route_token");
@@ -53,7 +77,7 @@ export class ReplyRoutes {
     if (!parent || parent.threadId !== parentThreadId || !this.sameTask(parent.route,current))
       throw Error("route_token_does_not_match_current_request");
   }
-  complete(threadId: string, turnId: string, status: string) {
+  complete(threadId: string, turnId: string, status: string, completedAt?: number) {
     const route = this.destination(threadId, turnId);
     // Retain BB outcomes too: an ambiguous reused worker must never inherit
     // an older Telegram task just because only that task has a destination.
@@ -74,7 +98,7 @@ export class ReplyRoutes {
         return r?.kind !== "telegram" || (r.chatId === first.chatId && r.topicId === first.topicId);
       }) ? first : undefined;
     this.store.atomic(() => {
-      this.store.put(key, {threadId, turnId, status, route, consumedBy: null});
+      this.store.put(key, {threadId, turnId, status, route, consumedBy: null, completedAt, parent: delegatedBy ?? mixedParent});
       if (route?.kind === "telegram" && delegatedBy)
         this.store.put("reply:pending-child:" + JSON.stringify([delegatedBy,threadId,turnId]),
           {parent:delegatedBy, threadId, turnId, status, route});
@@ -83,18 +107,50 @@ export class ReplyRoutes {
           {parent:mixedParent, threadId, turnId, status, route:mixed, mixed:true});
     });
   }
-  reserveChildReports(parent: string, chatId: number, topicId: number) {
-    type Report = {parent:string; threadId:string; turnId:string; status:string; route:Extract<ReplyRoute,{kind:"telegram"}>; mixed?:boolean};
+  private claimPrefix(parent: string, child: ChildResult) {
+    return "reply:final-claim:" + JSON.stringify([parent, child.threadId, child.turnId]).slice(0, -1) + ",";
+  }
+  claimFinal(parent: string, turnId: string, claims: readonly ChildResult[], final: FinalClaim) {
+    for (const child of claims)
+      this.store.put(this.claimPrefix(parent, child) + JSON.stringify(turnId) + "]", final);
+  }
+  finalDelivered(outboxKey: string) {
+    this.store.put("reply:final-delivered:" + outboxKey, true);
+  }
+  private disposition(report: Report, activeRoute?: ReplyRoute): Disposition {
+    if (report.mixed) return;
+    const outcome = this.store.get<Outcome>("reply:outcome:" + JSON.stringify([report.threadId, report.turnId]));
+    let waiting = this.sameTask(activeRoute, report.route);
+    for (const {value} of this.store.list<FinalClaim>(this.claimPrefix(report.parent, report))) {
+      if (!this.sameTask(value.route, report.route)) continue;
+      if (!value.native && (outcome?.status !== "completed" || outcome.completedAt === undefined ||
+          value.writtenAt === undefined || value.writtenAt < outcome.completedAt)) continue;
+      if (this.store.get("reply:final-delivered:" + value.outboxKey)) return "delivered";
+      const outbox = this.store.get<{sentId?: number}>(value.outboxKey);
+      if (outbox && !outbox.sentId) waiting = true;
+    }
+    return waiting ? "wait" : undefined;
+  }
+  reserveChildReports(parent: string, chatId: number, topicId: number, activeRoute?: ReplyRoute) {
     const parentPrefix = JSON.stringify([parent]).slice(0,-1) + ",";
     for (const {key,value} of this.store.list<Report>("reply:pending-child:" + parentPrefix)) {
       if (value.route.chatId !== chatId || value.route.topicId !== topicId) continue;
       const outcomeKey = "reply:outcome:" + JSON.stringify([value.threadId,value.turnId]);
-      const row = this.store.get<{consumedBy:string|null}>(outcomeKey);
+      const row = this.store.get<Outcome>(outcomeKey);
       if (this.cancelled(value.route)) {
         this.store.del(key);
         continue;
       }
       if (!row || row.consumedBy !== null) continue;
+      const disposition = this.disposition(value, activeRoute);
+      if (disposition === "wait") continue;
+      if (disposition === "delivered") {
+        this.store.atomic(() => {
+          this.store.put(outcomeKey, {...row, consumedBy: "parent-final"});
+          this.store.del(key);
+        });
+        continue;
+      }
       this.store.atomic(() => {
         const reportKey = "reply:child-report:" + JSON.stringify([parent,value.threadId,value.turnId]);
         const marker = this.ingress(parent,value.route,undefined,reportKey);
@@ -106,7 +162,13 @@ export class ReplyRoutes {
     return this.store.list<Report & {marker:ReturnType<ReplyRoutes["ingress"]>;state:string; startedAt?:number}>("reply:child-report:" + parentPrefix)
       .filter(({value}) => !this.cancelled(value.route) && value.route.chatId === chatId && value.route.topicId === topicId &&
         (value.state === "reserved" || (["submitting","submitted","uncertain"].includes(value.state) &&
-          value.startedAt !== undefined && Date.now() - value.startedAt > 60_000)));
+          value.startedAt !== undefined && Date.now() - value.startedAt > 60_000)))
+      .filter(({key,value}) => {
+        if (value.state !== "reserved") return true;
+        const disposition = this.disposition(value, activeRoute);
+        if (disposition === "delivered") this.store.del(key);
+        return disposition === undefined;
+      });
   }
   retryBelongsToTurn(threadId: string, turnId: string, originalRequestId: string) {
     return this.sameTask(this.destination(threadId, turnId),
@@ -118,7 +180,6 @@ export class ReplyRoutes {
     // A single unconsumed ledger row does not identify that notice.
     if (outcomes.some(outcome => !outcome.turnId)) return false;
     const consumer = threadId + ":" + requestId;
-    type Outcome = {status: string; route?: ReplyRoute; consumedBy: string | null};
     const rows: {key: string; value: Outcome}[] = [];
     for (const outcome of outcomes) {
       const key = "reply:outcome:" + JSON.stringify([outcome.threadId, outcome.turnId]);
@@ -129,14 +190,41 @@ export class ReplyRoutes {
     }
     const route = rows[0].value.route;
     if (!route || rows.some(row => route.kind === "bb" ? row.value.route?.kind !== "bb" : !this.sameTask(route, row.value.route))) return false;
+    const children = outcomes.map(o => ({threadId: o.threadId, turnId: o.turnId!}));
+    const pendingKeys = children.map(child => "reply:pending-child:" +
+      JSON.stringify([threadId, child.threadId, child.turnId]));
+    const reports = pendingKeys.map(key => this.store.get<Report>(key));
+    const delegated = route.kind === "telegram" && (reports.some(Boolean) || rows.some(row => row.value.parent));
+    const nativeOwnerKeys = rows.map(row => "reply:native-owner:" + row.key);
+    if (delegated && children.some((_, i) => {
+      const report = reports[i];
+      const owner = this.store.get<string>(nativeOwnerKeys[i]);
+      return !report || rows[i].value.consumedBy !== null || (owner && owner !== consumer) ||
+        this.disposition(report) !== undefined;
+    })) return false;
     this.store.atomic(() => {
       this.record(threadId, requestId, route);
+      // Keep a Telegram outcome pending until this notification's final reaches
+      // Telegram. A notification steered into the owner's turn is not consent
+      // to cover that outcome in the owner's answer.
+      if (delegated) {
+        for (const key of nativeOwnerKeys) this.store.put(key, consumer);
+        this.store.put(this.nativeOutcomesKey(threadId, requestId), children);
+        return;
+      }
       for (const [i,row] of rows.entries()) {
         this.store.put(row.key, {...row.value, consumedBy: consumer});
         this.store.del("reply:pending-child:" + JSON.stringify([threadId,outcomes[i].threadId,outcomes[i].turnId]));
       }
     });
     return true;
+  }
+  private nativeOutcomesKey(threadId: string, requestId: string) {
+    return "reply:native-outcomes:" + JSON.stringify([threadId, requestId]);
+  }
+  nativeOutcomes(threadId: string, turnId: string) {
+    const requestId = this.store.get<TurnRoutes>(this.turnKey(threadId, turnId))?.requestIds[0];
+    return requestId ? this.store.get<ChildResult[]>(this.nativeOutcomesKey(threadId, requestId)) ?? [] : [];
   }
   bindIngress(marker: {text: string}, threadId: string) {
     const id = /^\[bb-telegram-reply-route:([a-f0-9-]{36})\]/.exec(marker.text)?.[1];
@@ -162,8 +250,8 @@ export class ReplyRoutes {
     }
     const ids = (data.input ?? []).flatMap(block => {
       if (block.type !== "text" || block.visibility !== "agent-only") return [];
-      const id = /^\[bb-telegram-reply-route:([a-f0-9-]{36})\]\nTransport metadata only; do not quote this marker in the answer\.$/.exec(block.text ?? "")?.[1];
-      return id ? [id] : [];
+      const id = /^\[bb-telegram-reply-route:([a-f0-9-]{36})\]/.exec(block.text ?? "")?.[1];
+      return id && (block.text === routeMarker(id).text || block.text === routeMarker(id, true).text) ? [id] : [];
     });
     if (ids.length !== 1) return false;
     const ingress = this.store.get<{threadId: string; route: ReplyRoute; requestId?: string; delegatedBy?: string; reportKey?: string}>("reply:ingress:" + ids[0]);

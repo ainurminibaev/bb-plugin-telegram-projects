@@ -1,4 +1,4 @@
-import { ReplyRoutes, type ReplyRoute } from "./reply-routing";
+import { splitChildResultClaims, ReplyRoutes, type ReplyRoute } from "./reply-routing";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
 import { TelegramHandoff, type HandoffJob } from "./handoff";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -7,7 +7,7 @@ import { markdownExcerpt } from "./events";
 import { localArtifacts, renderTelegramParts, cleanAssistantText, publicActivity, ARTIFACT_EXTENSIONS } from "./telegram-ux";
 import type { BbPluginApi, MessageDispatchHookContext, MessageDispatchHookDecision } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
   mkdirSync,
   readdirSync,
@@ -119,6 +119,7 @@ type Inbox = {
 };
 type Outbox = {
   taskRoute?: ReplyRoute;
+  coversChildResults?: boolean;
   ownerId?: number;
   sourceThreadId?: string;
   revision?: string;
@@ -396,10 +397,10 @@ export class ChatBridge {
       this.routes.requested(threadId,latest.data);
     this.routes.assertCurrentDelegation(threadId,token,latest.data.requestId);
   }
-  private async submitChildReports(binding: Binding) {
+  private async submitChildReports(binding: Binding, activeRoute?: ReplyRoute) {
     const owner = this.d.owner();
     if (owner === undefined || !binding.threadId) return;
-    const reports = this.routes.reserveChildReports(binding.threadId,owner,binding.topicId);
+    const reports = this.routes.reserveChildReports(binding.threadId,owner,binding.topicId,activeRoute);
     for (const {key,value} of reports) {
       if (this.s.get<{state:string}>(key)?.state !== value.state) continue;
       if (value.state !== "reserved") {
@@ -452,7 +453,7 @@ export class ChatBridge {
         else if (event.type === "turn/input/accepted" && event.scope.kind === "turn")
           this.routes.accept(child.id,event.scope.turnId,event.data.clientRequestId);
         else if (event.type === "turn/completed" && event.scope.kind === "turn")
-          this.routes.complete(child.id,event.scope.turnId,event.data.status);
+          this.routes.complete(child.id,event.scope.turnId,event.data.status,event.createdAt);
         this.s.put(key,event.seq);
       }
       const questions = await this.d.sdk.threads.interactions.list({threadId:child.id,signal:this.d.signal});
@@ -610,6 +611,7 @@ export class ChatBridge {
     rich = false,
     editId?: number,
     taskRoute?: ReplyRoute,
+    coversChildResults?: boolean,
   ) {
     const context = this.navigation.getStore();
     if (
@@ -632,6 +634,7 @@ export class ChatBridge {
         ? id.split(":")[1]
         : undefined,
       taskRoute,
+      coversChildResults,
       retryAt: 0,
       at: Date.now(),
     } satisfies Outbox);
@@ -2422,6 +2425,7 @@ export class ChatBridge {
         const current = this.deliveryBinding(b.topicId, b.revision);
         if (current?.revision !== b.revision || current.threadId !== b.threadId)
           continue;
+        const observingKey = "reply:observing-turn:" + b.threadId;
         for (const event of events) {
           if (event.type === "client/turn/requested") {
             const subject = event.data.systemMessageSubject;
@@ -2444,6 +2448,7 @@ export class ChatBridge {
             if (this.s.get("reply:notification-request:" + b.threadId + ":" + event.data.clientRequestId))
               this.s.put("reply:notification-turn:" + b.threadId + ":" + event.scope.turnId, true);
             this.s.put("reply:active-turn:" + b.threadId, event.scope.turnId);
+            this.s.put(observingKey, event.scope.turnId);
             b.cursor = event.seq;
             continue;
           }
@@ -2451,6 +2456,8 @@ export class ChatBridge {
             this.s.put("reply:active-turn:" + b.threadId, event.scope.turnId);
             b.activity = undefined; b.toolActivity = undefined;
           }
+          if (event.type === "turn/completed" && event.scope.kind === "turn" &&
+              this.s.get(observingKey) === event.scope.turnId) this.s.del(observingKey);
           if (event.scope.kind !== "turn" || !this.canDeliver(b, event.scope.turnId)) {
             b.cursor = event.seq;
             continue;
@@ -2482,13 +2489,11 @@ export class ChatBridge {
           if (event.type === "turn/completed") {
             b.activity = undefined;
             b.toolActivity = undefined;
-            if (
-              event.data.status !== "completed" &&
-              event.scope.kind === "turn"
-            )
-              this.s.del(
-                "chat:candidate:" + b.revision + ":" + event.scope.turnId,
-              );
+            if (event.data.status !== "completed") {
+              const candidate = b.revision + ":" + event.scope.turnId;
+              this.s.del("chat:candidate:" + candidate);
+              this.s.del("chat:candidate-time:" + candidate);
+            }
           }
           if (
             event.type === "item/completed" &&
@@ -2497,30 +2502,43 @@ export class ChatBridge {
             event.scope.kind === "turn"
           ) {
             // agentMessage is public assistant output, never a reasoning item.
-            b.activity = cleanAssistantText(event.data.item.text).slice(0, 600);
-            this.s.put(
-              "chat:candidate:" + b.revision + ":" + event.scope.turnId,
-              event.data.item.text,
-            );
+            const text = event.data.item.text;
+            b.activity = cleanAssistantText(splitChildResultClaims(text).body).slice(0, 600);
+            const candidate = b.revision + ":" + event.scope.turnId;
+            this.s.atomic(() => {
+              this.s.put("chat:candidate:" + candidate, text);
+              if (event.createdAt !== undefined)
+                this.s.put("chat:candidate-time:" + candidate, event.createdAt);
+            });
           }
           if (
             event.type === "turn/completed" &&
             event.data.status === "completed" &&
             event.scope.kind === "turn"
           ) {
-            const k = "chat:candidate:" + b.revision + ":" + event.scope.turnId;
+            const candidate = b.revision + ":" + event.scope.turnId;
+            const k = "chat:candidate:" + candidate;
+            const timeKey = "chat:candidate-time:" + candidate;
             const text = this.s.get<string>(k);
+            const writtenAt = this.s.get<number>(timeKey);
             const route = this.routes.destination(b.threadId,event.scope.turnId);
             const legacyKey = "chat:out:event:" + b.revision + ":" + event.seq;
             if (text?.trim() && route?.kind === "telegram" && !this.s.get(legacyKey)) {
-              // The coordinator can finish the same task by reading its worker before
-              // the child receipt arrives. Keep one outbox row across both BB turns.
-              const digest = createHash("sha256").update(JSON.stringify([
-                b.threadId,route.chatId,route.topicId,route.updateId,text.trim(),
-              ])).digest("hex");
-              this.enqueue(b.topicId,text,undefined,"event:" + b.revision + ":result-" + digest, false, undefined, route);
+              const {body, claims} = splitChildResultClaims(text);
+              const turnId = event.scope.turnId;
+              const native = this.routes.nativeOutcomes(b.threadId, turnId);
+              const id = "event:" + b.revision + ":turn-" + turnId;
+              const outboxKey = "chat:out:" + id;
+              if (body) {
+                this.s.atomic(() => {
+                  this.routes.claimFinal(b.threadId!, turnId, claims, {route, outboxKey, writtenAt});
+                  this.routes.claimFinal(b.threadId!, turnId, native, {route, outboxKey, native:true});
+                  this.enqueue(b.topicId,body,undefined,id,false,undefined,route,Boolean(claims.length || native.length));
+                });
+              }
             }
             this.s.del(k);
+            this.s.del(timeKey);
           }
           if (
             event.type === "turn/completed" &&
@@ -2536,7 +2554,11 @@ export class ChatBridge {
         }
         // Give already visible native notifications the first claim. On stock BB
         // the child completion itself can wake the parent even without a notice.
-        if (events.length < 100) await this.submitChildReports(b);
+        if (events.length < 100) {
+          const observing = this.s.get<string>(observingKey);
+          const activeRoute = observing ? this.routes.destination(b.threadId, observing) : undefined;
+          await this.submitChildReports(b, activeRoute);
+        }
         const pending = await this.d.sdk.threads.interactions.list({
           threadId: b.threadId,
           signal: this.d.signal,
@@ -2849,7 +2871,10 @@ export class ChatBridge {
           last = edited ? editId! : result.message_id;
           this.s.put(partKey, last);
         }
-        this.s.put(key, { ...o, sentId: last || -1, text: "", keys: undefined });
+        this.s.atomic(() => {
+          this.s.put(key, { ...o, sentId: last || -1, text: "", keys: undefined });
+          if (last > 0 && o.coversChildResults) this.routes.finalDelivered(key);
+        });
         if (key.startsWith("chat:out:progress:") && o.revision)
           this.s.put("chat:progress:" + o.topicId + ":" + o.revision, last);
         if ((key.startsWith("chat:out:event:") || key.startsWith("chat:out:end:")) && o.revision)
@@ -2860,6 +2885,12 @@ export class ChatBridge {
         if (question)
           this.s.put("chat:question:" + o.topicId + ":" + last, question);
       } catch (e) {
+        if (o.coversChildResults && e instanceof TelegramFailure && !e.ambiguous && e.code === "telegram_400") {
+          // Telegram explicitly rejected even the plain-text fallback. Release
+          // these child results to the report path instead of retrying forever.
+          this.s.put(key, {...o, sentId:-1, text:"", keys:undefined, error:e.code});
+          continue;
+        }
         this.s.put(key, {
           ...o,
           error: e instanceof TelegramFailure ? e.code : "delivery_failed",

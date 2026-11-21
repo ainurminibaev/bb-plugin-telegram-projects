@@ -13,7 +13,8 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
   const calls: any[] = [];
   const sent: any[] = [];
   let message = 10;
-  let failDelivery = false;
+  let deliveryFailure: TelegramFailure | undefined;
+  let failedAttempts = 0;
   let albumFailure: TelegramFailure | undefined;
   let malformedAlbum = false;
   let events: any[] = [];
@@ -110,13 +111,13 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
   };
   const controller = new AbortController();
   const dir = mkdtempSync(join(tmpdir(), "bb-chat-test-"));
-  const bridge = new ChatBridge({
+  const makeBridge = () => new ChatBridge({
     store,
     sdk,
     tg: async (method, payload) => {
-      if (failDelivery) {
-        failDelivery = false;
-        throw new TelegramFailure("telegram_429", 20, false);
+      if (deliveryFailure && failedAttempts > 0) {
+        failedAttempts--;
+        throw deliveryFailure;
       }
       sent.push({ method, ...payload });
       if (method === "sendMediaGroup") {
@@ -135,6 +136,7 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
     receiveAttachment,
     transcribe,
   });
+  const bridge = makeBridge();
   let update = 0;
   const input = (text: string, topicId = 100): ChatInput => ({
     ownerId: OWNER_ID,
@@ -163,12 +165,14 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
     sdk,
     thread,
     bridge,
+    restart: makeBridge,
     input,
     press,
     malformedAlbum: () => { malformedAlbum = true; },
     failNextAlbum: (error: TelegramFailure) => { albumFailure = error; },
-    failNextDelivery: () => {
-      failDelivery = true;
+    failNextDelivery: (error = new TelegramFailure("telegram_429", 20, false), attempts = 1) => {
+      deliveryFailure = error;
+      failedAttempts = attempts;
     },
     acceptTelegramTurn: (turnId: string, threadId = "thr_one") => {
       const routes = new ReplyRoutes(store);
@@ -1726,7 +1730,7 @@ test("child report follows BB queue retries and announces exhaustion once in the
   } finally {f.cleanup();}
 });
 
-test("coordinator and child receipt share one final delivery but the next Telegram request can repeat it", async () => {
+test("distinct completed turns may send identical text even under the same Telegram request", async () => {
   const f=fixture();
   try {
     await f.bridge.handle(f.input("Ask the worker"));
@@ -1740,10 +1744,145 @@ test("coordinator and child receipt share one final delivery but the next Telegr
       events.push({seq:events.length+1,type:"turn/completed",scope,data:{status:"completed"}});
       f.setEvents(events);
       await f.bridge.observe();await f.bridge.flush();
-      assert.equal(f.sent.filter(m=>m.text==="Worker result").length,turnId==="next"?2:1);
+      assert.equal(f.sent.filter(m=>m.text==="Worker result").length,events.length / 2);
     }
   } finally {f.cleanup();}
 });
+
+for (const scenario of ["parent wait", "early acknowledgement", "another update", "reordered recovery",
+    "cancelled delivery", "rejected delivery", "empty final", "interrupted turn", "premature claim", "no claim",
+    "another child turn", "part receipt recovery"]) {
+  test("delegated Telegram result: " + scenario, async () => {
+    const f = fixture();
+    try {
+      const input = f.input("Delegate this request");
+      await f.bridge.handle(input);
+      const original = f.calls.find(c => c[0] === "spawn")[1].input[1];
+      assert.match(original.text, /If your final answer includes the completed result/);
+      const routes = new ReplyRoutes(f.store);
+      const child = {...f.thread, id:"thr_worker", parentThreadId:f.thread.id};
+      const threadScope = {kind:"thread"};
+      const turnScope = (turnId: string) => ({kind:"turn", turnId});
+      const parentScope = turnScope("parent-turn");
+      const request = (seq: number, requestId: string, marker: object) => ({
+        seq, type:"client/turn/requested", scope:threadScope,
+        data:{requestId, originPluginId:"telegram-projects", input:[marker]},
+      });
+      const accept = (seq: number, requestId: string, scope: object) => ({
+        seq, type:"turn/input/accepted", scope, data:{clientRequestId:requestId},
+      });
+      const answer = (seq: number, scope: object, text: string, createdAt = 250) => ({
+        seq, createdAt, type:"item/completed", scope, data:{item:{type:"agentMessage", text}},
+      });
+      const complete = (seq: number, scope: object, createdAt: number, status = "completed") => ({
+        seq, createdAt, type:"turn/completed", scope, data:{status},
+      });
+      const ownerEvents: any[] = [request(1,"owner",original), accept(2,"owner",parentScope)];
+      const childEvents: any[] = [];
+      f.sdk.threads.get = async ({threadId}: any) => threadId === child.id ? child : f.thread;
+      f.sdk.threads.list = async () => [child];
+      f.sdk.threads.events.list = async (q: any) => {
+        const events = q.threadId === child.id ? childEvents : ownerEvents;
+        const filtered = events.filter(e => (!q.types || q.types.includes(e.type)) && e.seq > Number(q.afterSeq ?? 0));
+        return q.order === "desc" ? filtered.reverse().slice(0, Number(q.limit)) : filtered;
+      };
+
+      await f.bridge.observe();
+      await f.bridge.sendDelegated({parentThreadId:f.thread.id, threadId:child.id,
+        routeToken:original.text.match(/route:([^\]]+)/)[1], text:"Do the work", deliveryId:"delegation"});
+      const delegated = f.calls.find(c => c[0] === "send" && c[1].threadId === child.id)[1].input[1];
+      const workerTurn = turnScope("worker-turn");
+      childEvents.push(request(1,"worker",delegated), accept(2,"worker",workerTurn));
+
+      const reports = () => f.calls.filter(c => c[0] === "send" && c[1].threadId === f.thread.id &&
+        c[1].input[0].text.includes("конкретный ход"));
+      let bridge = f.bridge;
+      const childCompletes = () => childEvents.push(complete(3,workerTurn,200));
+      if (scenario === "parent wait" || scenario === "another child turn") {
+        childCompletes();
+        if (scenario === "another child turn") {
+          const another = routes.delegatedIngress(f.thread.id, original.text.match(/route:([^\]]+)/)[1], child.id);
+          const secondTurn = turnScope("second-worker-turn");
+          childEvents.push(request(4,"second-work",another),accept(5,"second-work",secondTurn),complete(6,secondTurn,210));
+        }
+        await bridge.observe();
+        assert.equal(reports().length,0,"child event can arrive while coordinator is still waiting");
+      }
+      if (scenario === "another update") {
+        ownerEvents.push(complete(3,parentScope,150));
+        const next = routes.ingress(f.thread.id,{kind:"telegram",chatId:OWNER_ID,topicId:100,updateId:2,messageId:2});
+        ownerEvents.push(request(4,"different-owner-request",next),accept(5,"different-owner-request",turnScope("different-turn")));
+      }
+      const finalScope = scenario === "another update" ? turnScope("different-turn") : parentScope;
+      const early = scenario === "early acknowledgement";
+      const hasClaim = !early && scenario !== "no claim";
+      ownerEvents.push(answer(ownerEvents.length+1,finalScope,
+        (early ? "Work started" : scenario === "empty final" ? "" : "Coordinator wording") +
+        (hasClaim ? "\n<!-- bb-telegram-child-result:thr_worker:worker-turn -->" : ""),
+        early || scenario === "premature claim" ? 140 : 250));
+      ownerEvents.push(complete(ownerEvents.length+1,finalScope,early ? 150 : 300,
+        scenario === "interrupted turn" ? "interrupted" : "completed"));
+      await bridge.observe();
+
+      if (scenario === "reordered recovery" || scenario === "part receipt recovery") {
+        const [outbox] = f.store.list<any>("chat:out:event:");
+        await bridge.flush();
+        assert.equal(f.sent.filter(m => m.text === "Coordinator wording").length, 1);
+        if (scenario === "part receipt recovery") {
+          // Simulate exit after saving the Telegram part receipt and before
+          // committing the overall final receipt.
+          f.store.put(outbox.key,outbox.value);
+          f.store.del("reply:final-delivered:" + outbox.key);
+        }
+        await bridge.dispose();
+        bridge = f.restart();
+      }
+      if (!childEvents.some(e => e.type === "turn/completed")) childCompletes();
+      if (scenario === "parent wait") {
+        f.failNextDelivery();
+        await bridge.flush();
+        await bridge.dispose();
+        bridge = f.restart();
+        await bridge.observe();
+        assert.equal(reports().length,0,"a retrying delivery owns the same final");
+      }
+      for (const {key, value} of f.store.list<any>("chat:out:event:")) {
+        if (scenario === "cancelled delivery") f.store.put(key,{...value,sentId:-1});
+        else if (!value.sentId) f.store.put(key,{...value,retryAt:0});
+      }
+      if (scenario === "rejected delivery") f.failNextDelivery(new TelegramFailure("telegram_400"),2);
+      await bridge.flush();
+      if (scenario === "parent wait") {
+        const seq = ownerEvents.length+1;
+        ownerEvents.push({seq,type:"client/turn/requested",scope:threadScope,data:{
+          requestId:"late-native-notice",initiator:"system",systemMessageKind:"child-completed",
+          systemMessageSubject:{kind:"thread",threadId:child.id,outcomes:[{
+            threadId:child.id,turnId:"worker-turn",status:"completed",
+          }]},
+        }},accept(seq+1,"late-native-notice",turnScope("late-notice-turn")),
+        answer(seq+2,turnScope("late-notice-turn"),"Late duplicate wording"),
+        complete(seq+3,turnScope("late-notice-turn"),350));
+      }
+      await bridge.observe(); await bridge.flush(); await bridge.observe();
+      assert.ok(!f.sent.some(m => m.text === "Late duplicate wording"));
+      assert.ok(f.sent.every(m => !m.text?.includes("bb-telegram-child-result")));
+      if (["parent wait", "reordered recovery", "part receipt recovery"].includes(scenario)) {
+        assert.equal(reports().length,0);
+        assert.equal(f.sent.filter(m => m.text === "Coordinator wording" && m.reply_parameters?.message_id === 1).length,1);
+      } else {
+        assert.equal(reports().length,1);
+        const report = reports()[0][1];
+        assert.match(report.input[0].text, scenario === "another child turn" ? /ход second-worker-turn/ : /ход worker-turn/);
+        const reportScope = turnScope("report-result");
+        ownerEvents.push(request(ownerEvents.length+1,"synthetic",report.input[1]),
+          accept(ownerEvents.length+2,"synthetic",reportScope),answer(ownerEvents.length+3,reportScope,"Worker wording"),
+          complete(ownerEvents.length+4,reportScope,400));
+        await bridge.observe(); await bridge.flush(); await bridge.observe(); await bridge.flush();
+        assert.equal(f.sent.filter(m => m.text === "Worker wording" && m.reply_parameters?.message_id === 1).length,1);
+      }
+    } finally { f.cleanup(); }
+  });
+}
 
 test("private project picker rejects a former group project even through a previously issued button",async()=>{
   const f=fixture();
@@ -1968,7 +2107,8 @@ test("delegated worker result returns to Telegram after its own child notices an
       {seq:11,type:"turn/input/accepted",scope:{kind:"turn",turnId:"t25"},data:{clientRequestId:"add-a"}},
       {seq:12,type:"turn/completed",scope:{kind:"turn",turnId:"t25"},data:{status:"completed"}},
     ];
-    f.sdk.threads.events.list=async (q:any)=>(q.threadId==="child"?childEvents:[]).filter(e=>e.seq>Number(q.afterSeq??0));
+    const parentCompleted = [{seq:3,type:"turn/completed",scope:{kind:"turn",turnId:"parent-turn"},data:{status:"completed"}}];
+    f.sdk.threads.events.list=async (q:any)=>(q.threadId==="child"?childEvents:parentCompleted).filter(e=>e.seq>Number(q.afterSeq??0));
     await f.bridge.observe(); await f.bridge.observe(); await f.bridge.observe();
     const reports = f.calls.filter(c => c[0] === "send" && c[1].threadId === "thr_one" && c[1].input[0].text.includes("конкретный ход"));
     assert.deepEqual(reports.map(r => r[1].input[0].text.match(/ход (\S+)/)[1]).sort(), ["t25","t7"]);
@@ -1976,10 +2116,10 @@ test("delegated worker result returns to Telegram after its own child notices an
     const receipt = reports.find(r => r[1].input[0].text.includes("ход t7"))[1].input[1];
     const scope = {kind:"turn",turnId:"receipt-turn"};
     const parentEvents = [
-      {seq:3,type:"client/turn/requested",scope:threadScope,data:{requestId:"receipt",originPluginId:"telegram-projects",input:[receipt]}},
-      {seq:4,type:"turn/input/accepted",scope,data:{clientRequestId:"receipt"}},
-      {seq:5,type:"item/completed",scope,data:{item:{type:"agentMessage",text:"WORKER-T7-RESULT"}}},
-      {seq:6,type:"turn/completed",scope,data:{status:"completed"}},
+      {seq:4,type:"client/turn/requested",scope:threadScope,data:{requestId:"receipt",originPluginId:"telegram-projects",input:[receipt]}},
+      {seq:5,type:"turn/input/accepted",scope,data:{clientRequestId:"receipt"}},
+      {seq:6,type:"item/completed",scope,data:{item:{type:"agentMessage",text:"WORKER-T7-RESULT"}}},
+      {seq:7,type:"turn/completed",scope,data:{status:"completed"}},
     ];
     f.sdk.threads.events.list=async(q:any)=>(q.threadId==="child"?childEvents:parentEvents).filter(e=>e.seq>Number(q.afterSeq??0));
     await f.bridge.observe(); await f.bridge.flush();
