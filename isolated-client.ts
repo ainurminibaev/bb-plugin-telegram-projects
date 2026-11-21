@@ -14,14 +14,35 @@ import {isolatedGroupResult,isolatedAnswer,isolatedPdfPart,isolatedImagePart} fr
 const exec=promisify(execFile);
 const target=z.object({projectId:z.string().min(1),threadId:z.string().min(1),cli:z.string().refine(isAbsolute)}).strict();
 
+const targetsSchema=z.record(z.string(),target);
+type Target=z.infer<typeof target>;
+function configuredTargets(raw?:string) {
+  return raw ? targetsSchema.parse(JSON.parse(raw)) : {};
+}
+
+const sameIsolation=(a:Target,b:Target)=>a.cli===b.cli || a.projectId===b.projectId || a.threadId===b.threadId;
+
+export function privateExecutor(bot:number,owner:number,subject:number) {
+  const targets=configuredTargets(process.env.BB_TELEGRAM_PRIVATE_EXECUTORS);
+  const key=[bot,owner,subject].join(":");
+  const entry=targets[key];
+  if (!entry) return;
+  if (Object.entries(targets).some(([id,other])=>id!==key && sameIsolation(entry,other)) ||
+      Object.values(configuredTargets(process.env.BB_TELEGRAM_GROUP_EXECUTORS)).some(other=>sameIsolation(entry,other)))
+    throw Error("private_worker_isolation_required");
+  return {...isolatedExecutor(entry,true),binding:createHash("sha256").update(JSON.stringify(entry)).digest("hex")};
+}
+
 // The administrator supplies a BB CLI launcher pointing only at the isolated instance.
 // No file path or command from the group conversation is executed by the bridge.
 export function groupExecutor(chatId:number,topicId:number) {
-  const raw=process.env.BB_TELEGRAM_GROUP_EXECUTORS;
-  if (!raw) return;
-  const targets=z.record(z.string(),target).parse(JSON.parse(raw));
-  const entry=targets[chatId+":"+topicId];
-  if (!entry) return;
+  const entry=configuredTargets(process.env.BB_TELEGRAM_GROUP_EXECUTORS)[chatId+":"+topicId];
+  if (entry && Object.values(configuredTargets(process.env.BB_TELEGRAM_PRIVATE_EXECUTORS)).some(other=>sameIsolation(entry,other)))
+    throw Error("private_worker_isolation_required");
+  return entry && isolatedExecutor(entry,false);
+}
+
+function isolatedExecutor(entry:Target,personal:boolean) {
   async function call(method:string,input:object,signal:AbortSignal) {
     const dir=await mkdtemp(join(tmpdir(),"bb-group-"));
     try {
@@ -42,9 +63,9 @@ export function groupExecutor(chatId:number,topicId:number) {
     image:async(routeToken:string,path:string,signal:AbortSignal)=>collectIsolatedImage(path,async offset=>
       isolatedImagePart.parse(await call("readIsolatedImage",{...ids,routeToken,path,offset},signal))),
     submit:async(routeToken:string,text:string,signal:AbortSignal,attachments:IsolatedAttachment[])=>
-      isolatedGroupResult.parse(await call("submitIsolatedGroup",{...ids,routeToken,text,...(attachments.length && {attachments})},signal)),
+      isolatedGroupResult.parse(await call(personal?"submitIsolatedPrivate":"submitIsolatedGroup",{...ids,routeToken,text,...(attachments.length && {attachments})},signal)),
     read:async(routeToken:string,signal:AbortSignal)=>
-      isolatedAnswer.parse(await call("readIsolatedGroup",{...ids,routeToken},signal)),
+      isolatedAnswer.parse(await call(personal?"readIsolatedPrivate":"readIsolatedGroup",{...ids,routeToken},signal)),
   };
 }
 

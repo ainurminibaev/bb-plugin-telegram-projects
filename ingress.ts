@@ -44,7 +44,7 @@ export function refersToExamples(text:string) {
 
 export type GroupExample = {fileId:string; name:string; size:number; messageId:number; album?:string; image?:true};
 
-function groupExample(message:any):GroupExample|undefined {
+export function groupExample(message:any):GroupExample|undefined {
   const photo=Array.isArray(message?.photo) ? message.photo.at(-1) : undefined;
   const file=message?.document ?? photo;
   if (!file?.file_id || !Number.isSafeInteger(message.message_id)) return;

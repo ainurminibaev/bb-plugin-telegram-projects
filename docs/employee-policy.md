@@ -98,3 +98,15 @@ Set BB_TELEGRAM_CHECKPOINT_ADAPTERS to an absolute path to an administrator-owne
 An unsuccessful read leaves the reminder queued for retry after 30 seconds. A successful read is followed by a fresh thread, binding, adapter and source check. The bridge replies under the original message or records cancelled for a silent completion. Revoked access prevents delivery. A Telegram send with an uncertain outcome remains unknown and is never automatically repeated. The bridge supplies no project-specific readers or decision logic.
 
 Run `node_modules/.bin/tsx --test test/group-result.test.ts` from the plugin checkout for the Unix-socket and restart fixture.
+
+### Private requests with separate BB workers
+
+The current employee installation can use the opt-in setting `employeePrivateRequests`. It defaults to false and applies only to employee installations with chat enabled and legacy operations disabled. The paired owner's direct chat and group settings keep their existing routes. Legacy `personalAccess` and `personalGrants` still apply in legacy mode. Their entitlements do not enable the separate BB inbox.
+
+A new user receives one access notice. The paired owner receives one decision card with the display name, username when provided, and Telegram user ID. The bridge accepts a decision only from the paired owner, in the owner's private chat, on the original card for this bot. The same card permits revocation. The bridge drops pre-approval messages. An approved user can queue work only when a separate worker is assigned.
+
+Provision a separate BB instance, project, root thread, history, attachment cache and administrator-owned launcher for each user. Configure `BB_TELEGRAM_PRIVATE_EXECUTORS` on the receiver as a JSON object keyed by `BOT_ID:OWNER_ID:TELEGRAM_USER_ID`. Each target has `projectId`, `threadId` and an absolute `cli` path. The bridge rejects shared targets across private and group routes. Set `isolatedPrivateProject` and `isolatedPrivateThread` on the worker. Keep polling, Telegram credentials and owner pairing absent on workers. Forward `submitIsolatedPrivate`, `readIsolatedPrivate` and the standard isolated attachment upload through that worker's launcher.
+
+Give each worker only its assigned role, read-only shared project knowledge and authorized tools. Keep private histories and upload caches in separate worker storage. Keep provider and integration credentials outside the model's shell. Keep the owner's BB, sibling instances and the host Docker socket inaccessible. Test these restrictions in the actual model's tool environment with synthetic data before activation. Tool adapters must enforce their resource and action scopes independently of the model. The receiver rechecks the subject and worker before submission and reply. Revocation stops future submissions and pending replies.
+
+Cloud and local Bot API support incoming photos. Other documents use the configured local Bot API and a scoped inbox. Private messages are excluded from shared topic history search. The bridge retains in-flight messages until handoff and discards delivered answers from the queue.

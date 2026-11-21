@@ -1,3 +1,8 @@
+# 0.9.39
+
+- Add opt-in private access requests for employee bots with one paired-owner decision card and revocation.
+- Route approved private messages separately by Telegram user ID through administrator-provisioned isolated BB workers. Private routes stay disabled by default. Group routes and the paired owner's direct chat retain their prior policy.
+
 # 0.9.38
 
 - Deliver authorized group photos as native agent input, including an explicit same-topic reply and unambiguous recent media explicitly referenced by the paired owner.

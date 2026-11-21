@@ -33,12 +33,14 @@ export async function submitIsolatedGroup(
   sdk: BbPluginApi["sdk"], store: Store, configuredProject: string | undefined,
   args: z.infer<typeof isolatedGroupInput>,
   inboxRoot?:string,
+  personal=false,
 ): Promise<z.infer<typeof isolatedGroupResult>> {
   if (!configuredProject || configuredProject !== args.projectId) throw Error("isolated_project_required");
   const thread = await sdk.threads.get({threadId:args.threadId});
   if (thread.projectId !== configuredProject || thread.id !== args.threadId ||
-      thread.visibility !== "visible" || thread.archivedAt || thread.deletedAt) throw Error("isolated_thread_required");
-  const key = "group:submission:" + args.routeToken;
+      thread.visibility !== "visible" || thread.archivedAt || thread.deletedAt || (personal && thread.parentThreadId))
+    throw Error("isolated_thread_required");
+  const key = submissionKey(args.routeToken,personal);
   const hash = createHash("sha256").update(JSON.stringify([args.projectId,args.threadId,args.text,...(args.attachments?.length ? [args.attachments] : [])])).digest("hex");
   const latest = await sdk.threads.events.list({threadId:args.threadId,order:"desc",limit:"1"});
   const attachments=await Promise.all((args.attachments??[]).map(item=>isolatedAttachmentInput(item,thread.id,inboxRoot)));
@@ -51,7 +53,7 @@ export async function submitIsolatedGroup(
   });
   if (previous) return {state:previous.state};
   await sdk.threads.send({threadId:thread.id,mode:"queue-if-active",input:[
-    {type:"text",text:[
+    {type:"text",text:personal ? args.text : [
       "Telegram group delivery: Save each requested PDF under outputs/ in this thread’s working directory. " +
       "For revisions, use a new filename. Include a Markdown link to the absolute PDF path in the final answer. " +
       "Requested JPG or PNG images can also be delivered when saved under outputs/ and linked by absolute path.",
@@ -64,15 +66,31 @@ export async function submitIsolatedGroup(
   return {state:"accepted"};
 }
 
+export function validateIsolatedPurpose(store:Store,projectId:string,privateThread?:string) {
+  const key="isolated:private-worker";
+  store.atomic(()=>{
+    const existing=store.get<{projectId:string;threadId:string}>(key);
+    if (privateThread===undefined) {
+      if (existing) throw Error("private_worker_isolation_required");
+      return;
+    }
+    if (existing ? existing.projectId!==projectId || existing.threadId!==privateThread :
+        store.list("group:submission:").length>0) throw Error("private_worker_isolation_required");
+    if (!existing) store.put(key,{projectId,threadId:privateThread});
+  });
+}
+
+const submissionKey=(token:string,personal:boolean)=>(personal?"private:submission:":"group:submission:")+token;
+
 export async function readIsolatedGroup(sdk:BbPluginApi["sdk"],store:Store,project:string,
-  args:z.infer<typeof isolatedLookup>):Promise<z.infer<typeof isolatedAnswer>> {
+  args:z.infer<typeof isolatedLookup>,personal=false):Promise<z.infer<typeof isolatedAnswer>> {
   if (project !== args.projectId) throw Error("isolated_project_required");
-  const key="group:submission:"+args.routeToken;
+  const key=submissionKey(args.routeToken,personal);
   const saved=store.get<Receipt>(key);
   if (!saved) return {state:"missing"};
   if (saved.projectId!==project || saved.threadId!==args.threadId) throw Error("group_submission_conflict");
   const thread=await sdk.threads.get({threadId:args.threadId});
-  if (thread.projectId!==project || thread.archivedAt || thread.deletedAt || thread.visibility!=="visible")
+  if (thread.projectId!==project || thread.archivedAt || thread.deletedAt || thread.visibility!=="visible" || (personal && thread.parentThreadId))
     throw Error("isolated_thread_required");
   if (saved.finished) return {state:"finished",text:saved.answer!};
   const events=await sdk.threads.events.list({threadId:args.threadId,afterSeq:String(saved.cursor),limit:"100",
