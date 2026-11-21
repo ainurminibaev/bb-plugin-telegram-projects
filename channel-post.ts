@@ -1,3 +1,4 @@
+import {stripTelegramMarkers} from "./reply-routing";
 import {createHash} from "node:crypto";
 import {z} from "zod";
 import type {Store, Telegram} from "./model";
@@ -38,6 +39,8 @@ export async function channelPost(store:Store,tg:Telegram,owner:number,bot:numbe
   const owned="channel:own:"+scope+":";
   const manual=action==="edit" && args.manual===true && !store.get(owned+args.messageId);
   if (action!=="publish" && !manual && !store.get(owned+args.messageId)) throw Error("channel_post_not_owned");
+  const outgoing = "text" in args ? stripTelegramMarkers(args.text).trim() : undefined;
+  if (outgoing === "") throw Error("channel_text_empty");
   const rights=await inspectChannelRights(tg,channelId,owner,bot);
   if (!(manual ? rights.editOthers : action==="delete" ? rights.publish || rights.deleteOthers : rights.publish || (action==="edit" && rights.editOthers)))
     throw Error(manual ? "channel_requires_can_edit_messages" : "channel_requires_can_post_messages");
@@ -49,7 +52,7 @@ export async function channelPost(store:Store,tg:Telegram,owner:number,bot:numbe
     id=args.messageId;
   } else {
     const result=await tg<{message_id:number;chat:{id:number;type:string}}>(
-      action==="publish"?"sendMessage":"editMessageText",{chat_id:channelId,text:args.text,
+      action==="publish"?"sendMessage":"editMessageText",{chat_id:channelId,text:outgoing,
         ...(action==="edit"?{message_id:args.messageId}:{})});
     if (result?.chat?.id!==channelId || result.chat.type!=="channel" || !Number.isSafeInteger(result.message_id) ||
         result.message_id<=0 || (action==="edit" && result.message_id!==args.messageId)) throw Error("channel_post_unconfirmed");

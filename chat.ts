@@ -1,5 +1,5 @@
 import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interactionOpen } from "./codex-async-question";
-import { splitChildResultClaims, ReplyRoutes, type ReplyRoute } from "./reply-routing";
+import { splitChildResultClaims, stripTelegramMarkers, ReplyRoutes, type ReplyRoute } from "./reply-routing";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
 import { TelegramHandoff, type HandoffJob } from "./handoff";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -2882,8 +2882,8 @@ export class ChatBridge {
           }
         }
         const assistantOutput = key.startsWith("chat:out:event:") || key.startsWith("chat:out:explicit:");
-        const delivered = assistantOutput ? await this.deliverArtifacts(o.text, key, o) : {text: o.text, lastMediaId: 0};
-        const chunks = assistantOutput ? renderTelegramParts(cleanAssistantText(delivered.text).trim()) : splitText(delivered.text, 1800);
+        const delivered = assistantOutput ? await this.deliverArtifacts(stripTelegramMarkers(o.text), key, o) : {text: o.text, lastMediaId: 0};
+        const chunks = assistantOutput ? renderTelegramParts(cleanAssistantText(delivered.text).trim()) : splitText(stripTelegramMarkers(delivered.text), 1800);
         // Keep formatted HTML below Telegram's limit even after escaping.
         // Durable per-part receipts prevent already-confirmed parts from replaying.
         let last = delivered.lastMediaId;

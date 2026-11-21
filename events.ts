@@ -1,3 +1,4 @@
+import {stripTelegramMarkers} from "./reply-routing";
 import { z } from "zod";
 import { escapeHtml, type Event } from "./model";
 
@@ -164,9 +165,10 @@ export function formatThreadCard(
   timeZone = "",
 ) {
   const p = cardParts(c, language, timeZone);
-  const reply = c.reply?.trim()
+  const body = stripTelegramMarkers(c.reply ?? "").trim();
+  const reply = body
     ? "\n\n<blockquote expandable>" +
-      markdownExcerpt(c.reply) +
+      markdownExcerpt(body) +
       "</blockquote>"
     : "";
   return (
@@ -191,7 +193,7 @@ export function formatThreadRich(
   timeZone = "",
 ) {
   const p = cardParts(c, language, timeZone);
-  let reply = c.reply?.trim() ?? "";
+  let reply = stripTelegramMarkers(c.reply ?? "").trim();
   if (reply.length > 3000) {
     const n = reply.lastIndexOf("\n", 3000);
     reply = reply.slice(0, n > 1500 ? n : 3000) + "\n\n…";
@@ -307,7 +309,8 @@ export function summaryPrompt(
   reply: string,
   language: "ru" | "en",
 ) {
-  const body = reply.length > 12000 ? reply.slice(0, 12000) + "\n…" : reply;
+  const clean = stripTelegramMarkers(reply);
+  const body = clean.length > 12000 ? clean.slice(0, 12000) + "\n…" : clean;
   return language === "en"
     ? `Summarize this coding agent's reply for a Telegram notification. Give 3–6 short Markdown bullet points: what was done, the result, and anything that needs the user's attention. No introduction, no closing remarks. Do not use tools or read files: work only with the text below. Write in English.\n\nThread: ${title}\n\nAgent reply:\n${body}`
     : `Сделай саммери ответа агента для уведомления в Telegram. 3–6 коротких пунктов списком в Markdown: что сделано, итог и что требует внимания пользователя. Без вступления и без заключения. Не используй инструменты и не читай файлы: работай только с текстом ниже. Пиши по-русски.\n\nТред: ${title}\n\nОтвет агента:\n${body}`;

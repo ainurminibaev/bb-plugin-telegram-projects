@@ -1,3 +1,4 @@
+import {stripTelegramMarkers} from "./reply-routing";
 import {readFileSync} from "node:fs";
 import {isAbsolute} from "node:path";
 import {callProjectAdapter} from "./project-adapter";
@@ -216,6 +217,8 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
       if(answer.kind==="complete") {finish("cancelled");continue;}
       text=answer.text;
     } else if (satisfied()) {finish("cancelled");continue;}
+    text=stripTelegramMarkers(text).trim();
+    if (!text) {finish("cancelled");continue;}
     finish("unknown");
     try {
       const sent=await transport(chatId)("sendMessage",{chat_id:chatId,message_thread_id:topicId||undefined,

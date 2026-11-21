@@ -8,7 +8,7 @@ import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {localArtifacts} from "./telegram-ux";
 import {readGroupPdf} from "./group-pdf";
 import {splitText} from "./chat";
-import {ReplyRoutes} from "./reply-routing";
+import {ReplyRoutes, stripTelegramMarkers} from "./reply-routing";
 import {refersToExamples, promisesExamples, canInvokeGroup, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
@@ -334,12 +334,12 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       store.put(key,job);
     }
     // NO_REPLY means "say nothing" in any group turn, not only in a scheduled check.
-    if (job.state==="ready" && job.answer?.trim()===NO_REPLY) {finish("done");continue;}
+    if (job.state==="ready" && stripTelegramMarkers(job.answer ?? "").trim()===NO_REPLY) {finish("done");continue;}
     if (job.state==="ready") {
       // Ready jobs may be resumed long after submission, including between reply parts.
       if (!allowed()) {finish("revoked");continue;}
       if (!executor && !belongsToGroup(await sdk.threads.get({threadId:r.threadId,signal}))) {finish("revoked");continue;}
-      let text=job.answer!;
+      let text=stripTelegramMarkers(job.answer!);
       const links=localArtifacts(text).filter(link=>/\.pdf$/i.test(link.path));
       const paths=[...new Set(links.map(link=>link.path))];
       for (let i=job.pdfIndex??0;i<paths.length;i++) {

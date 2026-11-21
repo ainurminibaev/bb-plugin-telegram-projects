@@ -237,3 +237,12 @@ test("checkpoint reads fresh project state at the deadline, rechecks access and 
     await new Promise<void>(r=>server.close(()=>r()));rmSync(dir,{recursive:true,force:true});
   }
 });
+
+
+test("owner return removes internal lines without changing the approved reply target", async () => {
+  const f=fixture();
+  queueGroupResult(f.store,2,1,"0","Approved\n<!-- bb-telegram-child-result:thr_worker:turn-1 -->");
+  await f.tick();
+  assert.equal(f.sent[0].text,"Approved");
+  assert.deepEqual(f.sent[0].reply_parameters,{message_id:42,allow_sending_without_reply:false});
+});

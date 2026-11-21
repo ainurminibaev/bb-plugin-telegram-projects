@@ -1517,7 +1517,7 @@ test("image-only final has a media receipt, no caption or extra text, and dedupl
  try {
   writeFileSync(join(dir,'a.png'),'image');f.sdk.environments.get=async()=>({path:dir});
   await f.bridge.handle(f.input('bind')); await f.bridge.flush(); f.sent.length=0;
-  const args={threadId:'thr_one',topicId:100,text:`![a.png](${dir}/a.png)`,deliveryId:'image_only_001'};
+  const args={threadId:'thr_one',topicId:100,text:`![a.png](${dir}/a.png)\n<!-- bb-telegram-child-result:thr_worker:turn-1 -->`,deliveryId:'image_only_001'};
   f.bridge.sendExplicit(args);await f.bridge.flush();
   const photos=f.sent.filter(x=>x.method==='sendPhoto');assert.equal(photos.length,1);
   assert.equal(photos[0].caption,undefined);

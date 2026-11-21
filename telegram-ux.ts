@@ -1,6 +1,8 @@
+import { stripTelegramMarkers } from "./reply-routing";
+
 /** Only public assistant text enters this formatter; never feed reasoning items. */
 export function cleanAssistantText(text: string): string {
-  return text
+  return stripTelegramMarkers(text)
     .replace(/\[([^\]]+)\]\((?:\/|file:\/\/)[^)]+\)/g, "$1")
     .replace(/@thread:thr_[a-zA-Z0-9]+(?:#msg=\d+)?/g, "рабочая сессия")
     .replace(/\bthr_[a-zA-Z0-9]+\b/g, "рабочая сессия")

@@ -21,6 +21,12 @@ export function splitChildResultClaims(text: string) {
   return {body: body.trim(), claims};
 }
 
+// Telegram accepts both plain text and formatted replies. Keep the exact
+// claim parser above separate: display-only variants cannot acknowledge work.
+export function stripTelegramMarkers(text: string) {
+  return text.replace(/^[ \t]*(?:<!--[ \t]*bb-telegram-child-result:[\w-]+:[\w-]+[ \t]*-->|bb-telegram-child-result:[\w-]+:[\w-]+|\[bb-telegram-reply-route:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\])[ \t]*(?:\r?\n|$)/gm, "");
+}
+
 export function routeMarker(id:string, owner = false) {
     return {type: "text" as const, visibility: "agent-only" as const, mentions: [],
       text: "[bb-telegram-reply-route:" + id + "]\nTransport metadata only; do not quote this marker in the answer." +

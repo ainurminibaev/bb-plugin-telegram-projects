@@ -315,7 +315,7 @@ test("an ordinary group turn that answers NO_REPLY stays silent",async()=>{
    const event=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"g"}});
    event("client/turn/requested",{requestId:"g",originPluginId:"telegram-projects",input:q.input});
    event("turn/input/accepted",{clientRequestId:"g"});
-   event("item/completed",{item:{type:"agentMessage",text:"NO_REPLY"}});
+   event("item/completed",{item:{type:"agentMessage",text:"NO_REPLY\n<!-- bb-telegram-child-result:thr_worker:turn-1 -->"}});
    event("turn/completed",{status:"completed"});
  }}};
  const sent:any[]=[];
@@ -323,4 +323,38 @@ test("an ordinary group turn that answers NO_REPLY stays silent",async()=>{
  await tick(); await tick();
  assert.equal(rows.get("group:receipt:5:8").state,"done");
  assert.equal(sent.filter(([,p])=>typeof p.text==="string").length,0);
+});
+
+test("group delivery keeps the PDF and strips marker lines from its accompanying text", async () => {
+  const rows = new Map<string, unknown>();
+  const store = {
+    get:<T>(key:string)=>rows.get(key) as T|undefined,
+    put:(key:string,value:unknown)=>{rows.set(key,value);},
+    del:(key:string)=>{rows.delete(key);},
+    atomic:(fn:()=>void)=>fn(),
+    list:<T>(prefix:string)=>[...rows].filter(([key])=>key.startsWith(prefix)).map(([key,value])=>({key,value:value as T})),
+  };
+  bindGroupTopic(store,{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",
+    requireMention:false,ownerOnly:true,revision:"original"},"group-project");
+  const directory = await mkdtemp(join(tmpdir(),"group-marker-"));
+  try {
+    await mkdir(join(directory,"outputs"));
+    const path = join(directory,"outputs","report.pdf");
+    await writeFile(path,"%PDF-1.4\nfixture");
+    const route={kind:"group",chatId:-1001,topicId:3,threadId:"t",senderId:7,updateId:43,messageId:9};
+    store.put("group:in:5:43",{route,ownerId:7,revision:"original",state:"ready",
+      answer:`Отчёт готов.\n  <!-- bb-telegram-child-result:thr_worker:turn-1 -->\n[PDF](${path})\nbb-telegram-child-result:thr_other:turn-2`});
+    const sdk={threads:{get:async()=>({id:"t",projectId:"group-project",visibility:"visible",environmentId:"env"})},
+      environments:{get:async()=>({hostId:"host",path:directory})}};
+    const sent: {method:string;payload:Record<string,unknown>}[]=[];
+    await processGroupInputs(store,sdk as never,7,5,()=>async <T>(method:string,payload:Record<string,unknown>)=>{
+      sent.push({method,payload});
+      return {message_id:sent.length,document:{file_id:"fixture"}} as T;
+    },new AbortController().signal,undefined,"host");
+    assert.deepEqual(sent.map(row=>row.method),["sendDocument","sendMessage"]);
+    assert.equal(sent[0].payload.caption,"report.pdf");
+    assert.equal(sent[1].payload.text,"Отчёт готов.");
+    assert.equal(sent[1].payload.message_thread_id,3);
+    assert.equal(store.get<{state:string}>("group:receipt:5:43")?.state,"done");
+  } finally { await rm(directory,{recursive:true,force:true}); }
 });
