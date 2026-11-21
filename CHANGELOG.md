@@ -1,3 +1,8 @@
+# 0.9.43
+
+- Accept incoming PDF documents up to 2 MiB through the cloud Telegram Bot API on configured isolated group and approved private routes. Files are checked and staged through the existing isolated inbox and transfer path.
+- Keep group and private admission rules, addressed replies and the local Bot API file path.
+
 # 0.9.42
 
 - Deliver private follow-up questions from the paired owner to a busy assistant through BB steering. Send each addressed answer back to its original Telegram message while work continues.

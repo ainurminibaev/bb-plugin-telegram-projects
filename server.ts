@@ -60,7 +60,7 @@ import {
 } from "node:fs";
 import {
   telegram,
-  transcribeTelegramVoice, downloadGroupImage,
+  transcribeTelegramVoice, downloadGroupImage, receiveCloudTelegramPdf,
   checkBot,
   runBb,
   readEnvToken,
@@ -774,20 +774,39 @@ export default async function plugin(bb: BbPluginApi) {
     const getFile=telegram(botToken,signal,30_000,undefined,apiRoot);
     return downloadGroupImage(botToken,await getFile("getFile",{file_id:file.fileId}),file.size,signal);
   }
+  async function receiveCloudPdf(file:import("./ingress").GroupExample,updateId:number,
+    threadId:string,scope:string[],signal:AbortSignal) {
+    if (!file.pdf) return;
+    const c=await settings.get();
+    if (checkedApiRoot(c.telegramApiRoot)!=="https://api.telegram.org" || !c.telegramInboxRoot) return;
+    const configuredToken=await botToken();
+    const requestToken=async()=>configuredToken;
+    const getFile=telegram(requestToken,signal,30_000,undefined,async()=>"https://api.telegram.org");
+    return receiveCloudTelegramPdf(requestToken,await getFile("getFile",{file_id:file.fileId}),{
+      ...file,updateId,threadId:"isolated:"+threadId,inboxRoot:join(c.telegramInboxRoot,...scope),signal,
+    });
+  }
   async function receiveGroupFile(file:import("./ingress").GroupExample,
     route:Extract<import("./ingress").Ingress,{kind:"group"}>, signal:AbortSignal,bot:number) {
     const cloud=await receiveCloudImage(file,signal);
     if (cloud) return cloud;
     const policy=store.get<import("./ingress").GroupTopicPolicy>(`group:policy:${route.chatId}:${route.topicId}`);
-    return receiveLocalFile(file,route.updateId,route.threadId,signal,
-      ["groups",String(bot),String(route.chatId),String(route.topicId),String(route.senderId)],
+    const scope=["groups",String(bot),String(route.chatId),String(route.topicId),String(route.senderId)];
+    if (policy?.isolated===true) {
+      const pdf=await receiveCloudPdf(file,route.updateId,route.threadId,scope,signal);
+      if (pdf) return pdf;
+    }
+    return receiveLocalFile(file,route.updateId,route.threadId,signal,scope,
       policy?.isolated===true,file.image ? maxImageBytes : undefined);
   }
   async function receivePrivateFile(file:import("./ingress").GroupExample,job:PrivateJob,signal:AbortSignal) {
     const cloud=await receiveCloudImage(file,signal);
     if (cloud) return cloud;
-    return receiveLocalFile(file,job.updateId,"employee-private:"+job.subject,signal,
-      ["employee-private",String(job.bot),String(job.owner),String(job.subject)],true,file.image?maxImageBytes:undefined);
+    const threadId="employee-private:"+job.subject;
+    const scope=["employee-private",String(job.bot),String(job.owner),String(job.subject)];
+    const pdf=await receiveCloudPdf(file,job.updateId,threadId,scope,signal);
+    if (pdf) return pdf;
+    return receiveLocalFile(file,job.updateId,threadId,signal,scope,true,file.image?maxImageBytes:undefined);
   }
   let cleaning=false;
   const inboxTimer=setInterval(async()=>{
