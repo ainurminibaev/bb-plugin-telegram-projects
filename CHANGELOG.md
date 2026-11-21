@@ -1,3 +1,8 @@
+# 0.9.40
+
+- Add paired-owner forum commands in the existing private chat, independent of a restored model session's tool inventory. Create, close and reopen topics from a preview card. Delete a specific topic only after a separate confirmation that warns about permanent loss of its Telegram history.
+- Let administrators delegate work forum topic management to an owner project. Private and work forums retain their distinct admission and worker rules. A new work topic requires an explicit worker binding.
+
 # 0.9.39
 
 - Add opt-in private access requests for employee bots with one paired-owner decision card and revocation.

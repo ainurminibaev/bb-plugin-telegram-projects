@@ -1796,7 +1796,8 @@ export class ChatBridge {
       }
     }
     if (!parts) text = this.withReplyContext(input,text);
-    const originalDigest=this.s.get("group:shared-project:"+b.projectId) && input.originalText && (!parts || parts.length===1) && text===input.text?.trim() &&
+    const originalDigest=(this.s.get("group:shared-project:"+b.projectId) ||
+      this.s.get("group:topic-manager-project:"+b.projectId)) && input.originalText && (!parts || parts.length===1) && text===input.text?.trim() &&
       !input.forwarded && !input.attachment && !input.voice && !input.replyTo
       ? createHash("sha256").update(text).digest("hex") : undefined;
     if (b.threadId) {

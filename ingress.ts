@@ -1,3 +1,4 @@
+import {isTopicPaused} from "./topic-lifecycle";
 import {historyCutoff,historyPrefix,topicPassages} from "./topic-search";
 import type { Store } from "./model";
 import {isSharedOwnerPolicy} from "./group-binding";
@@ -14,6 +15,7 @@ export type GroupTopicPolicy = {
   ownerOnly: boolean;
   ownerTopic?: true;
   ownerSharedProject?: true;
+  ownerTopicManagerProjectId?: string;
   requireMention: boolean;
   addressName?: string;
   allowedSenderIds?: number[];
@@ -289,6 +291,7 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
   if (!Number.isSafeInteger(chatId) || chatId >= 0 || !Number.isSafeInteger(topicId) || topicId < 0) return false;
   let accepted = false;
   store.atomic(() => {
+    if (isTopicPaused(store,botId,chatId,topicId)) return;
     const bound = store.get<GroupTopicPolicy>(`group:policy:${chatId}:${topicId}`);
     if (!bound || (bound.ownerId !== undefined && owner !== bound.ownerId) || bound.botId !== botId || typeof bound.ownerOnly !== "boolean" ||
         typeof bound.requireMention !== "boolean" || !bound.botUsername) return;

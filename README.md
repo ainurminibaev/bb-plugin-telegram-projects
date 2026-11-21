@@ -175,3 +175,12 @@ After the first topic is bound, the owner can request a new topic from the forum
 For an ordinary or isolated group in mention mode, the administrator can optionally set `addressName` when binding a topic. Only the exact name at the start followed by a comma or colon addresses the bot this way. The normal sender gate still applies. Telegram must deliver ordinary messages to the bot for this feature.
 
 Photos and supported image documents in an addressed message or a same-topic reply arrive as native image inputs. An unambiguous owner request to respond to a named participant can also select that participant's recent reply attachment from the same topic when topic context is enabled. The bridge asks for a direct reply when it finds multiple matching attachments. A requested PDF, JPG or PNG in the worker's `outputs/` directory can be returned as an attachment in the original topic.
+
+In the paired owner's existing private BB chat, forum commands work without model tool dispatch:
+
+- `/topic_create Title | Forum | First message` previews a new topic. The forum can be omitted when there is only one eligible forum. Use an exact title or a private forum link to choose among several. Use a link when forum titles match. The first message is optional.
+- `/topic_close https://t.me/c/123456/42` pauses a managed topic and keeps its history.
+- `/topic_reopen https://t.me/c/123456/42` reopens the topic.
+- `/topic_delete https://t.me/c/123456/42` shows the exact group and topic and warns that all messages in the Telegram topic will be deleted. After confirmation it also removes the bridge's searchable history for that topic. The separate BB thread and its history remain.
+
+Confirm from the paired owner's original chat on the preview card. Closing or deleting waits for that topic's active jobs, reminders and deliveries to drain. An unconfirmed Telegram operation is held for manual verification and is never repeated automatically. Existing bindings and the owner's private BB history remain in place. In a delegated work forum, a newly created topic requires its own administrative worker binding before it can receive new work.

@@ -1,3 +1,5 @@
+import {handleOwnerForumCommand} from "./forum-commands";
+import {topicStateKey} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,processPrivateEmployeeInputs,type PrivateJob} from "./employee-private";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
@@ -147,6 +149,7 @@ export const rpcContract = defineRpcContract({
     input: z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative(),
       threadId:z.string().min(1),ownerOnly:z.boolean(),requireMention:z.boolean(),
       ownerSharedProject:z.literal(true).optional(),
+      ownerTopicManagerProjectId:z.string().min(1).max(160).optional(),
       addressName:z.string().trim().min(3).max(40).regex(/^[\p{L}][\p{L}\p{M} -]*[\p{L}\p{M}]$/u).optional(),
       deliverySources:z.array(z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)).max(100).optional(),
       allowedSenderIds:z.array(z.number().int().positive().safe()).max(100).optional(),includeTopicContext:z.boolean().optional(),searchableHistory:z.boolean().optional(),retainFullHistory:z.boolean().optional()}).strict(),
@@ -433,7 +436,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (!String(error).includes("no such module: fts5")) throw error;
   }
   const forgetExamples=db.prepare("DELETE FROM state WHERE (key GLOB 'group:recent-files:*' OR key GLOB 'group:context-media:*') AND json_extract(value,'$.expiresAt')<=?");
-  const purgeHistory=()=>{history?.prune();forgetExamples.run(Date.now());};
+  const forgetCommands=db.prepare("DELETE FROM state WHERE key GLOB 'group:topic-command:*' AND json_extract(value,'$.expires')<=?");
+  const purgeHistory=()=>{history?.prune();forgetExamples.run(Date.now());forgetCommands.run(Date.now()-7*86400_000);};
   purgeHistory();
   const historyTimer=setInterval(purgeHistory,3600_000);
   const store: Store = {
@@ -593,9 +597,24 @@ export default async function plugin(bb: BbPluginApi) {
       return bridge.proveOwnerForumRequest(threadId,token,owner);
     },
   });
+  async function forumCommand(owner:number,bot:number,signal:AbortSignal,update:unknown) {
+    activeTelegramWrites++;
+    try {
+      return await handleOwnerForumCommand({
+        store,owner,bot,signal,
+        transport:chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),
+        binding:topicId=>{
+          const b=bridge?.bindings().find(row=>row.topicId===topicId);
+          return b?.threadId ? {threadId:b.threadId,projectId:b.projectId} : undefined;
+        },
+        current:()=>!!bridge && ownerId()===owner && botId()===bot && !stateTransferBusy,
+        create:createOwnerTopic,
+      },update);
+    } finally {activeTelegramWrites--;}
+  }
   bb.agents.registerTool({
     name:"telegram_create_owner_topic",
-    description:"Create a topic in the same private Telegram forum and post its first message. Use only if the paired owner explicitly requested a new topic in this current group task and gave its title. Copy the title from their request. Supply text only if the owner specified the exact first message; otherwise the bridge posts a fixed confirmation. A confirmed receipt may be repeated; do not retry an unconfirmed mutation or send the first message through another tool.",
+    description:"Create a topic in the same connected Telegram forum and post its first message. In a work forum, connecting an executor is a separate administrative step. Use only if the paired owner explicitly requested a new topic in this current group task and gave its title. Copy the title from their request. Supply text only if the owner specified the exact first message; otherwise the bridge posts a fixed confirmation. A confirmed receipt may be repeated; do not retry an unconfirmed mutation or send the first message through another tool.",
     parameters:ownerTopicInput,
     async execute(args,ctx) {
       activeTelegramWrites++;
@@ -605,7 +624,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name:"telegram_create_private_forum_topic",
-    description:"From a current direct Telegram request by the paired owner, create a topic in a configured private owner forum in this project. If several forums are available, the owner must explicitly give the exact forum name or a private forum link, and the forum argument must copy it. Use only for an explicit instruction to create a topic. Copy the exact topic title and any exact first message. Otherwise a fixed confirmation is used. Pass the current Telegram route token.",
+    description:"From a current direct Telegram request by the paired owner, create a topic in a configured owner forum or a work forum delegated to this project. If several forums are available, the owner must explicitly give the exact forum name or a private forum link, and the forum argument must copy it. If selection is required or ambiguous, ask which forum and wait for the owner's answer. Use only for an explicit instruction to create a topic. Copy the exact topic title and any exact first message. Otherwise a fixed confirmation is used. Pass the current Telegram route token.",
     parameters:ownerPrivateTopicInput,
     async execute(args,ctx) {
       activeTelegramWrites++;
@@ -1431,16 +1450,24 @@ export default async function plugin(bb: BbPluginApi) {
       try { return await channelPost(store,tg,owner,bot,current.managedChannels,args); }
       finally { activeTelegramWrites--; }
     },
-    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,ownerSharedProject,addressName,allowedSenderIds,deliverySources,includeTopicContext,searchableHistory,retainFullHistory})=>{
+    bindGroupTopic: async ({chatId,topicId,threadId,ownerOnly,requireMention,ownerSharedProject,ownerTopicManagerProjectId,addressName,allowedSenderIds,deliverySources,includeTopicContext,searchableHistory,retainFullHistory})=>{
       const owner=ownerId(), bot=botId();
       if (!owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
       const tg=telegram(botToken,lifetime.signal,15_000,()=>chatId,apiRoot);
+      if (store.get(topicStateKey(bot,chatId,topicId))==="deleted") throw Error("forum_topic_deleted");
       const me=await checkBot(tg,bot);
       const chat=await tg("getChat",{chat_id:chatId});
       if (chat.id!==chatId || !["group","supergroup"].includes(chat.type) ||
           (topicId>0 && !chat.is_forum)) throw Error("group_unavailable");
       const member=await tg("getChatMember",{chat_id:chatId,user_id:owner});
       if (!["creator","administrator"].includes(member.status)) throw Error("group_owner_required");
+      if (ownerTopicManagerProjectId) {
+        if (ownerSharedProject || chat.is_forum!==true || topicId<2 ||
+            (member.status!=="creator" && member.can_manage_topics!==true))
+          throw Error("work_forum_binding_required");
+        if ((await bb.sdk.projects.get({projectId:ownerTopicManagerProjectId})).kind!=="standard")
+          throw Error("owner_topic_manager_project_required");
+      }
       if (retainFullHistory && !searchableHistory) throw Error("full_history_requires_search");
       if (searchableHistory && (!includeTopicContext || !history)) throw Error("history_requires_topic_context_and_fts5");
       let warning:string|undefined;
@@ -1475,7 +1502,9 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
       if (owner!==ownerId() || bot!==botId() || stateTransferBusy) throw Error("bot_changed");
-      bindGroupTopic(store,{ownerSharedProject,addressName,deliverySources:deliverySources ? [...new Set(deliverySources)].sort() : store.get<{deliverySources?:string[]}>(`group:policy:${chatId}:${topicId}`)?.deliverySources,isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
+      const topicState=store.get(topicStateKey(bot,chatId,topicId));
+      if (topicState==="deleted" || topicState==="working" || topicState==="uncertain") throw Error("forum_topic_unavailable");
+      bindGroupTopic(store,{ownerSharedProject,ownerTopicManagerProjectId,addressName,deliverySources:deliverySources ? [...new Set(deliverySources)].sort() : store.get<{deliverySources?:string[]}>(`group:policy:${chatId}:${topicId}`)?.deliverySources,isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},projectId);
       return warning ? {bound:true as const,warning} : {bound:true as const};
     },
@@ -1483,6 +1512,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
       const key=`group:policy:${chatId}:${topicId}`;
       const previous=store.get<{botId:number}>(key);
+      const state=previous && store.get(topicStateKey(previous.botId,chatId,topicId));
+      if (state==="working" || state==="uncertain") throw Error("forum_topic_operation_pending");
       const removed=!!previous;
       store.atomic(()=>{if (previous) {
         for (const row of store.list(`group:recent-files:${previous.botId}:${chatId}:${topicId}:`)) store.del(row.key);
@@ -2133,6 +2164,11 @@ export default async function plugin(bb: BbPluginApi) {
           ingressError = null;
           for (const u of updates) {
             const privateOwner=ownerId(),privateBot=botId();
+            if (privateOwner && privateBot && cfg.chatEnabled && bridge &&
+                await forumCommand(privateOwner,privateBot,signal,u)) {
+              store.put("ingress:offset",u.update_id+1);
+              continue;
+            }
             if (!legacyOperations && cfg.employeePrivateRequests && cfg.installKind==="employee" && cfg.chatEnabled &&
                 privateOwner && privateBot && await acceptPrivateEmployeeUpdate({
                   store,owner:privateOwner,bot:privateBot,

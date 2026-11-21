@@ -20,7 +20,7 @@ export const ownerPrivateTopicInput=ownerTopicInput.extend({routeToken:z.string(
 const defaultFirstMessage = "Тема создана. Продолжим здесь.";
 
 type Args = z.infer<typeof ownerTopicInput> & {routeToken?:string;forum?:string};
-type Scope = {threadId:string; projectId:string; signal:AbortSignal};
+export type OwnerForumScope = {threadId:string; projectId:string; signal:AbortSignal};
 type Origin = GroupOrigin;
 type SubmittedJob = { state:string; ownerId:number; revision?:string; taskId?:string;
   route: Extract<Ingress,{kind:"group"}> };
@@ -28,18 +28,19 @@ type Receipt =
   | {phase:"creating"}
   | {phase:"topic" | "spawning"; topicId:number}
   | {phase:"thread" | "posting"; topicId:number; threadId:string; revision:string}
-  | {phase:"done"; topicId:number; threadId:string; revision:string; messageId:number};
-type Operation = {digest:string; projectId:string; receipt:Receipt};
+  | {phase:"work-posting"; topicId:number}
+  | {phase:"done"; topicId:number; threadId?:string; revision?:string; messageId:number};
+type Operation = {digest:string; projectId:string; work?:true; receipt:Receipt};
 type Dependencies = {
   store:Store; sdk:BbPluginApi["sdk"];
   identity:()=>Promise<{owner:number; bot:number}>;
   transport:(chatId:number, signal:AbortSignal)=>Telegram;
   provePrivate?:(threadId:string,routeToken:string,owner:number)=>Promise<{key:string;text:string}>;
 };
-type TopicSource={chatId:number;topicId:number;key:string;text?:string;shared?:true;
+export type TopicSource={chatId:number;topicId:number;key:string;text?:string;shared?:true;work?:true;
   current:()=>Promise<void>;prove:()=>Promise<void>};
 
-async function groupSource(d:Dependencies,scope:Scope,owner:number,bot:number):Promise<TopicSource> {
+async function groupSource(d:Dependencies,scope:OwnerForumScope,owner:number,bot:number):Promise<TopicSource> {
   const {store,sdk}=d;
   const {threadId,projectId,signal}=scope;
   const candidates = store.list<SubmittedJob>(`group:in:${bot}:`).map(row=>row.value)
@@ -55,7 +56,9 @@ async function groupSource(d:Dependencies,scope:Scope,owner:number,bot:number):P
     throw Error("current_owner_group_request_required");
   const {chatId} = origin;
   const sourceKey = `group:policy:${chatId}:${origin.topicId}`;
-  const sourceIsShared=store.get<GroupTopicPolicy>(sourceKey)?.ownerSharedProject;
+  const initial=store.get<GroupTopicPolicy>(sourceKey);
+  const sourceIsShared=initial?.ownerSharedProject;
+  const work=initial?.ownerTopicManagerProjectId ? true : undefined;
   const currentSource = async () => {
     signal.throwIfAborted();
     const live = await d.identity();
@@ -65,7 +68,8 @@ async function groupSource(d:Dependencies,scope:Scope,owner:number,bot:number):P
     if (persisted?.state!=="submitted" || persisted.taskId!==job.taskId ||
         source?.revision!==origin.revision || source?.ownerId!==owner || source.botId!==bot ||
         source.threadId!==threadId || source.projectId!==projectId || source.isolated ||
-        source.ownerSharedProject!==sourceIsShared || !groupThreadMatches(store,source,projectId) ||
+        source.ownerSharedProject!==sourceIsShared ||
+        source.ownerTopicManagerProjectId!==initial?.ownerTopicManagerProjectId || !groupThreadMatches(store,source,projectId) ||
         !sourcesVisible(source.deliverySources,bot,chatId,origin.topicId))
       throw Error("current_owner_group_request_required");
     signal.throwIfAborted();
@@ -87,55 +91,91 @@ async function groupSource(d:Dependencies,scope:Scope,owner:number,bot:number):P
       throw Error("current_owner_group_request_required");
   };
   return {chatId,topicId:origin.topicId,key:job.taskId!,text:route.ownerTopicText,
-    shared:sourceIsShared,current:currentSource,prove:proveTurn};
+    shared:sourceIsShared,work,current:currentSource,prove:proveTurn};
 }
 
-async function privateSource(d:Dependencies,scope:Scope,owner:number,bot:number,token:string,forum?:string):Promise<TopicSource> {
+export function eligibleOwnerForums(store:Store,owner:number,bot:number,projectId:string) {
+  const forums=new Map<number,GroupTopicPolicy>();
+  for (const {value:policy} of store.list<GroupTopicPolicy>("group:policy:")) {
+    if (policy.ownerId!==owner || policy.botId!==bot || !policy.projectId || !groupThreadMatches(store,policy,policy.projectId)) continue;
+    if ((isSharedOwnerPolicy(policy) && policy.projectId===projectId) || policy.ownerTopicManagerProjectId===projectId)
+      forums.set(policy.chatId,policy);
+  }
+  return forums;
+}
+
+const normalizeForum=(text:string)=>text.normalize("NFC").toLowerCase();
+
+export async function chooseOwnerForum(forums:Map<number,GroupTopicPolicy>,forum:string|undefined,
+  transport:(id:number)=>Telegram,originalText?:string) {
+  if (!forum) {
+    if (forums.size!==1) throw Error("explicit_private_forum_selection_required");
+    return [...forums.keys()][0];
+  }
+  const supplied=normalizeForum(forum);
+  const ref=/^https:\/\/t\.me\/c\/([1-9]\d*)(?:\/[1-9]\d*){0,2}\/?$/.exec(forum);
+  if (ref) {
+    const selected=Number("-100"+ref[1]);
+    if (forums.has(selected)) return selected;
+    throw Error("private_forum_selection_unavailable");
+  }
+  const chats=await Promise.all([...forums.keys()].map(async id=>{
+    const chat=await transport(id)<{id:number;title?:string}>("getChat",{chat_id:id});
+    return chat.id===id && chat.title ? {id,title:normalizeForum(chat.title)} : undefined;
+  }));
+  const matches=chats.filter(chat=>chat?.title===supplied);
+  const cited=originalText===undefined ? "" : normalizeForum(originalText);
+  const quoted=cited.includes("«"+supplied+"»") || cited.includes('"'+supplied+'"');
+  if (matches.length!==1 || (!quoted && chats.some(chat=>chat && chat.title!==supplied &&
+      chat.title.includes(supplied) && cited.includes(chat.title))))
+    throw Error("private_forum_selection_unavailable");
+  return matches[0]!.id;
+}
+
+export async function checkOwnerForum(tg:Telegram,chatId:number,owner:number,bot:number,
+  mode:{shared?:true;work?:true},deleting=false) {
+  if (mode.shared && !await sharedOwnerForum(tg,chatId,owner,bot))
+    throw Error("private_owner_forum_required");
+  const chat=await tg("getChat",{chat_id:chatId});
+  if (chat.id!==chatId || chat.type!=="supergroup" || chat.is_forum!==true ||
+      (!mode.work && (chat.username || chat.active_usernames?.length)))
+    throw Error("closed_forum_supergroup_required");
+  const self=await tg("getMe",{});
+  if (self.id!==bot || !self.is_bot || !self.username) throw Error("bot_changed");
+  const ownerMember=await tg("getChatMember",{chat_id:chatId,user_id:owner});
+  if (ownerMember.user?.id!==owner || !(ownerMember.status==="creator" ||
+      (ownerMember.status==="administrator" && ownerMember.can_manage_topics===true &&
+        (!deleting || ownerMember.can_delete_messages===true))))
+    throw Error("forum_owner_rights_required");
+  const botMember=await tg("getChatMember",{chat_id:chatId,user_id:bot});
+  if (botMember.user?.id!==bot || botMember.status!=="administrator" || botMember.can_manage_topics!==true)
+    throw Error("bot_requires_can_manage_topics");
+  if (deleting && botMember.can_delete_messages!==true) throw Error("bot_requires_can_delete_messages");
+  return {username:self.username as string,title:String(chat.title??chatId).slice(0,128)};
+}
+
+async function privateSource(d:Dependencies,scope:OwnerForumScope,owner:number,bot:number,token:string,forum?:string):Promise<TopicSource> {
   if (!d.provePrivate) throw Error("current_owner_request_required");
   const {threadId,projectId,signal}=scope;
   const proof=()=>d.provePrivate!(threadId,token,owner);
-  const originals=()=>{
-    const policies=d.store.list<GroupTopicPolicy>("group:policy:").map(row=>row.value)
-      .filter(p=>isSharedOwnerPolicy(p) && p.ownerId===owner && p.botId===bot && p.projectId===projectId &&
-        groupThreadMatches(d.store,p,projectId));
-    return new Set(policies.map(p=>p.chatId));
-  };
+  const originals=()=>eligibleOwnerForums(d.store,owner,bot,projectId);
   const original=await proof();
-  const normalized=(text:string)=>text.normalize("NFC").toLowerCase();
-  const choose=async()=>{
-    const chatIds=originals();
-    if (!forum) {
-      if (chatIds.size!==1) throw Error("explicit_private_forum_selection_required");
-      return [...chatIds][0];
-    }
-    const supplied=normalized(forum);
-    if (!normalized(original.text).includes(supplied)) throw Error("explicit_private_forum_selection_required");
-    const ref=/^https:\/\/t\.me\/c\/([1-9]\d*)(?:\/[1-9]\d*){0,2}\/?$/.exec(forum);
-    if (ref) {
-      const selected=Number("-100"+ref[1]);
-      if (chatIds.has(selected)) return selected;
-      throw Error("private_forum_selection_unavailable");
-    }
-    const chats=await Promise.all([...chatIds].map(async id=>{
-      const tg=d.transport(id,signal);
-      const chat=await tg<{id:number;title?:string}>("getChat",{chat_id:id});
-      return chat.id===id && chat.title ? {id,title:normalized(chat.title)} : undefined;
-    }));
-    const matches=chats.filter(chat=>chat?.title===supplied);
-    const cited=normalized(original.text);
-    const quoted=cited.includes("«"+supplied+"»") || cited.includes('"'+supplied+'"');
-    if (matches.length!==1 || (!quoted && chats.some(chat=>chat && chat.title!==supplied &&
-        chat.title.includes(supplied) && cited.includes(chat.title))))
-      throw Error("private_forum_selection_unavailable");
-    return matches[0]!.id;
-  };
+  if (forum && !normalizeForum(original.text).includes(normalizeForum(forum)))
+    throw Error("explicit_private_forum_selection_required");
+  const choose=()=>chooseOwnerForum(originals(),forum,id=>d.transport(id,signal),original.text);
   const chatId=await choose();
-  return {chatId,topicId:0,key:original.key,text:original.text,shared:true,
+  const selected=originals().get(chatId);
+  if (!selected) throw Error("private_owner_forum_changed");
+  const shared=selected.ownerSharedProject;
+  const work=shared ? undefined : true;
+  return {chatId,topicId:0,key:original.key,text:original.text,shared,work,
     current:async()=>{
       signal.throwIfAborted();
       const identity=await d.identity();
       if (identity.owner!==owner || identity.bot!==bot || await choose()!==chatId)
         throw Error("private_owner_forum_changed");
+      const current=originals().get(chatId);
+      if (!current || current.ownerSharedProject!==shared) throw Error("private_owner_forum_changed");
     },
     prove:async()=>{
       const live=await proof();
@@ -146,12 +186,12 @@ async function privateSource(d:Dependencies,scope:Scope,owner:number,bot:number,
 
 export function ownerTopicTool(d: Dependencies) {
   const inFlight = new Set<string>();
-  return async (args: Args, scope: Scope) => {
+  return async (args: Args, scope: OwnerForumScope, confirmedCommand?:TopicSource) => {
     const {store, sdk} = d;
     const {owner,bot} = await d.identity();
     const {threadId, projectId, signal} = scope;
-    const source=args.routeToken ? await privateSource(d,scope,owner,bot,args.routeToken,args.forum) : await groupSource(d,scope,owner,bot);
-    const {chatId,shared:sourceIsShared,current:currentSource,prove:proveTurn,text:ownerMessage}=source;
+    const source=confirmedCommand ?? (args.routeToken ? await privateSource(d,scope,owner,bot,args.routeToken,args.forum) : await groupSource(d,scope,owner,bot));
+    const {chatId,shared:sourceIsShared,work,current:currentSource,prove:proveTurn,text:ownerMessage}=source;
     const privateChat = /^-100([1-9]\d*)$/.exec(String(chatId))?.[1];
     if (!privateChat || !ownerMessage?.includes(args.title) || stripTelegramMarkers(args.title)!==args.title)
       throw Error("explicit_owner_title_required");
@@ -171,25 +211,16 @@ export function ownerTopicTool(d: Dependencies) {
           (sourceIsShared && thread.parentThreadId))
         throw Error("group_source_thread_unavailable");
       const tg = d.transport(chatId,signal);
-      const checkForum = async () => {
-        if (sourceIsShared && !await sharedOwnerForum(tg,chatId,owner,bot))
-          throw Error("private_owner_forum_required");
-        const chat = await tg("getChat",{chat_id:chatId});
-        if (chat.id!==chatId || chat.type!=="supergroup" || chat.is_forum!==true || chat.username ||
-            chat.active_usernames?.length)
-          throw Error("closed_forum_supergroup_required");
-        const self = await tg("getMe",{});
-        if (self.id!==bot || !self.is_bot || !self.username) throw Error("bot_changed");
-        const ownerMember = await tg("getChatMember",{chat_id:chatId,user_id:owner});
-        if (ownerMember.user?.id!==owner || !(ownerMember.status==="creator" ||
-            (ownerMember.status==="administrator" && ownerMember.can_manage_topics===true)))
-          throw Error("forum_owner_rights_required");
-        const botMember = await tg("getChatMember",{chat_id:chatId,user_id:bot});
-        if (botMember.user?.id!==bot || botMember.status!=="administrator" || botMember.can_manage_topics!==true)
-          throw Error("bot_requires_can_manage_topics");
-        return self.username as string;
-      };
-      const username = await checkForum();
+      const checkForum=()=>checkOwnerForum(tg,chatId,owner,bot,{shared:sourceIsShared,work});
+      const {username}=await checkForum();
+      async function post(topicId:number) {
+        const message=await tg("sendMessage",{chat_id:chatId,message_thread_id:topicId,text,
+          link_preview_options:{is_disabled:true}});
+        if (message?.chat?.id!==chatId || message.message_thread_id!==topicId ||
+            !Number.isSafeInteger(message.message_id) || message.message_id<1)
+          throw Error("owner_topic_post_unconfirmed");
+        return message.message_id as number;
+      }
 
       const taskKey = "group:owner-topic-task:"+source.key;
       const claimTask = () => {
@@ -198,11 +229,11 @@ export function ownerTopicTool(d: Dependencies) {
         if (!existing) store.put(taskKey,key);
       };
       const saved = store.get<Operation>(key);
-      if (saved && (saved.digest!==digest || saved.projectId!==projectId))
+      if (saved && (saved.digest!==digest || saved.projectId!==projectId || saved.work!==work))
         throw Error("owner_topic_request_conflict");
       let receipt: Receipt | undefined = saved?.receipt;
       const save = (next: Receipt) => {
-        store.put(key,{digest,projectId,receipt:next} satisfies Operation);
+        store.put(key,{digest,projectId,...(work && {work}),receipt:next} satisfies Operation);
         receipt = next;
       };
       if (receipt) claimTask();
@@ -230,6 +261,21 @@ export function ownerTopicTool(d: Dependencies) {
       // deliberately held for manual reconciliation instead of replayed.
       let stage = store.get<Operation>(key)!.receipt;
       if (stage.phase==="creating") throw Error("owner_topic_creation_unconfirmed");
+      if (stage.phase==="work-posting") throw Error("owner_topic_post_unconfirmed");
+      if (stage.phase==="topic" && work) {
+        await checkForum();
+        await currentSource();
+        await proveTurn();
+        signal.throwIfAborted();
+        save({...stage,phase:"work-posting"});
+        try {
+          stage={...stage,phase:"done",messageId:await post(stage.topicId)};
+        } catch (error) {
+          if (error instanceof TelegramFailure && !error.ambiguous) save(stage);
+          throw error;
+        }
+        save(stage);
+      }
       if (stage.phase==="topic") {
         await currentSource();
         await proveTurn();
@@ -283,22 +329,18 @@ export function ownerTopicTool(d: Dependencies) {
             bound.chatId!==chatId || bound.topicId!==stage.topicId || store.get("group:thread:"+stage.threadId)!==targetKey)
           throw Error("owner_topic_binding_conflict");
         save({...stage,phase:"posting"});
-        let message;
         try {
-          message = await tg("sendMessage",{chat_id:chatId,message_thread_id:stage.topicId,text,
-            link_preview_options:{is_disabled:true}});
+          stage={...stage,phase:"done",messageId:await post(stage.topicId)};
         } catch (error) {
           if (error instanceof TelegramFailure && !error.ambiguous) save(stage);
           throw error;
         }
-        if (message?.chat?.id!==chatId || message.message_thread_id!==stage.topicId ||
-            !Number.isSafeInteger(message.message_id) || message.message_id<1)
-          throw Error("owner_topic_post_unconfirmed");
-        stage = {...stage,phase:"done",messageId:message.message_id};
         save(stage);
       }
       if (stage.phase!=="done") throw Error("owner_topic_operation_unconfirmed");
-      return {topicId:stage.topicId,threadId:stage.threadId,messageId:stage.messageId,
+      store.put(`group:managed-topic:${bot}:${chatId}:${stage.topicId}`,{title:args.title,messageId:stage.messageId});
+      return {topicId:stage.topicId,...(stage.threadId ? {threadId:stage.threadId} : {requiresBinding:true as const}),
+        messageId:stage.messageId,
         url:`https://t.me/c/${privateChat}/${stage.topicId}/${stage.messageId}`};
     } finally {
       inFlight.delete(key);

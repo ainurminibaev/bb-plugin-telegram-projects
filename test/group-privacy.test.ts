@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import {acceptGroupUpdate,routeUpdate,type GroupTopicPolicy} from "../ingress";
-import {bindGroupTopic} from "../group-worker";
+import {bindGroupTopic,processGroupInputs} from "../group-worker";
 import {historyPrefix,openTopicSearch} from "../topic-search";
 import type {Store} from "../model";
 
@@ -92,3 +92,53 @@ for (const topicId of [0,3]) for (const isolated of [false,true]) {
     } finally { f.db.close(); }
   });
 }
+
+test("the same named topic in two work supergroups sends only its own bytes and answer to its chat",async()=>{
+  const f=fixture(false,3);
+  const second={...f.chat,id:-1001237654};
+  const p={...f.policy,chatId:second.id,threadId:"second-thread",revision:"second",
+    ownerTopicManagerProjectId:"owner-project"};
+  bindGroupTopic(f.store,{...f.policy,ownerTopicManagerProjectId:"owner-project"},"group-project");
+  bindGroupTopic(f.store,p,"group-project");
+  const fixturePixels={first:"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",second:"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC"};
+  try {
+    for (const [chat,label] of [[f.chat,"first"],[second,"second"]] as const) {
+      f.post("Контекст "+label,f.owner,{chat});
+      f.post("@fixture_bot проверь",f.owner,{chat,text:undefined,caption:"@fixture_bot проверь",
+        caption_entities:f.mention,photo:[{file_id:label}]});
+    }
+    const turns=new Map<string,any[]>();
+    const events=new Map<string,any[]>();
+    const sdk={threads:{get:async({threadId}:any)=>({id:threadId,projectId:"group-project",visibility:"visible"}),
+      events:{list:async(q:any)=>(events.get(q.threadId)??[]).filter(e=>e.seq>Number(q.afterSeq??0))},
+      send:async(q:any)=>{
+        turns.set(q.threadId,q.input);
+        const seq:any[]=[];
+        const add=(type:string,data:object)=>seq.push({type,data,seq:seq.length+1,scope:{kind:"turn",turnId:q.threadId}});
+        add("client/turn/requested",{requestId:q.threadId,originPluginId:"telegram-projects",input:q.input});
+        add("turn/input/accepted",{clientRequestId:q.threadId});
+        add("item/completed",{item:{type:"agentMessage",text:"result "+q.threadId}});
+        add("turn/completed",{status:"completed"});
+        events.set(q.threadId,seq);
+      }}};
+    const sent:any[]=[];
+    const tick=()=>processGroupInputs(f.store,sdk as never,f.owner,f.bot,id=>async <T>(method:string,payload:any)=>{
+      assert.equal(method,"sendMessage");
+      sent.push({id,...payload});
+      return {message_id:200} as T;
+    },new AbortController().signal,undefined,undefined,async file=>{
+      const label=file.fileId as keyof typeof fixturePixels;
+      return {type:"image",url:fixturePixels[label]};
+    });
+    await tick();await tick();
+    for (const [thread,label,chat] of [["group-worker","first",f.chat],["second-thread","second",second]] as const) {
+      const input=turns.get(thread)!;
+      assert.match(input[0].text,new RegExp("Контекст "+label));
+      assert.doesNotMatch(input[0].text,new RegExp("Контекст "+(label==="first"?"second":"first")));
+      assert.deepEqual(input.filter(x=>x.type==="image"),[{type:"image",url:fixturePixels[label]}]);
+      assert.equal(sent.filter(m=>m.id===chat.id).length,1);
+      assert.equal(sent.find(m=>m.id===chat.id).message_thread_id,3);
+      assert.equal(sent.find(m=>m.id===chat.id).text,"result "+thread);
+    }
+  } finally { f.db.close(); }
+});

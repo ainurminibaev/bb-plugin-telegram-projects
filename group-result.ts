@@ -1,3 +1,4 @@
+import {assertTopicQueueWritable,isTopicPaused} from "./topic-lifecycle";
 import {groupThreadMatches} from "./group-binding";
 import {stripTelegramMarkers} from "./reply-routing";
 import {readFileSync} from "node:fs";
@@ -67,6 +68,7 @@ export function queueGroupResult(store:Store, owner:number, bot:number, taskId:s
       if (old.text!==text) throw Error("group_result_conflict");
       return;
     }
+    assertTopicQueueWritable(store,origin);
     store.put(key,{state:"queued",text});
     store.put("group:result-queue:"+taskId,true);
   });
@@ -122,6 +124,7 @@ export function queueGroupReminder(store:Store,owner:number,bot:number,args:z.in
         throw Error("group_reminder_conflict");
       return;
     }
+    assertTopicQueueWritable(store,origin);
     if(args.waitingFor==="checkpoint" && (!groupBindingActive(store,origin) || !checkpoint(origin.projectId)))
       throw Error("checkpoint_unavailable");
     if(args.waitingFor==="agent" && !groupBindingActive(store,origin)) throw Error("group_task_unavailable");
@@ -155,6 +158,7 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     });
     if (!origin) {finish("revoked");continue;}
     const {chatId,topicId,threadId,projectId,bot,owner,sender}=origin;
+    if (isTopicPaused(store,bot,chatId,topicId)) continue;
     const policyKey=`group:policy:${chatId}:${topicId}`;
     const allowed=()=>current(origin) && groupBindingActive(store,origin);
     if (!allowed()) {finish("revoked");continue;}

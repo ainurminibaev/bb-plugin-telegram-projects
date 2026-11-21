@@ -1,3 +1,4 @@
+import {isTopicPaused} from "./topic-lifecycle";
 import {groupThreadMatches,isSharedOwnerPolicy,sharedGroupScopeKey,sharedGroupThreadKey} from "./group-binding";
 import {isolatedFile,localFileInput,maxEncodedImages,maxGroupAttachments,readSavedImage,type ImageAttachment,type IsolatedAttachment} from "./group-attachments";
 import {awaitProjectProposal} from "./owner-selection";
@@ -41,6 +42,14 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     // zone of trust: its private chat and groups share one folder, one memory and one set of rules.
     const employee=store.get<string>("rights:install-kind")==="employee";
     const previous=store.get<GroupTopicPolicy>(key);
+    if (policy.ownerTopicManagerProjectId && (policy.ownerSharedProject || policy.topicId<2 || !policy.ownerId))
+      throw Error("work_forum_binding_required");
+    if (policy.ownerSharedProject || policy.ownerTopicManagerProjectId) {
+      const otherTopics=store.list<GroupTopicPolicy>(`group:policy:${chatId}:`)
+        .filter(({key:stored})=>stored!==key);
+      if (otherTopics.some(({value})=>policy.ownerSharedProject ? !!value.ownerTopicManagerProjectId : !!value.ownerSharedProject))
+        throw Error("forum_mode_conflict");
+    }
     if (policy.ownerSharedProject) {
       if (!isSharedOwnerPolicy(policy) || employee || store.get("group:project:"+projectId) ||
           (previous && !previous.ownerSharedProject) ||
@@ -64,6 +73,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     } else store.put("group:project:"+projectId,true);
     const prev=previous;
     if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly && prev.ownerTopic===policy.ownerTopic && prev.ownerSharedProject===policy.ownerSharedProject &&
+        prev.ownerTopicManagerProjectId===policy.ownerTopicManagerProjectId &&
         JSON.stringify(prev.deliverySources??[])===JSON.stringify(policy.deliverySources??[]) &&
         prev.requireMention===policy.requireMention && prev.addressName===policy.addressName && prev.botId===policy.botId &&
         !!prev.retainFullHistory===!!policy.retainFullHistory && !!prev.searchableHistory===!!policy.searchableHistory && !!prev.includeTopicContext===!!policy.includeTopicContext &&
@@ -157,6 +167,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   for (const {key,value:job} of pending) {
     if (signal.aborted) return;
     const r=job.route;
+    if (isTopicPaused(store,botId,r.chatId,r.topicId)) continue;
     let sourceDenied=false;
     const finish=(state:"done"|"revoked"|"sending", sentId?:number)=>{
       store.atomic(()=>{

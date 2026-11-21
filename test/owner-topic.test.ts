@@ -15,7 +15,7 @@ const scope = {threadId:"source",projectId:"team",signal:new AbortController().s
 const explicit = {confirm:true as const,title,text};
 
 async function fixture(message = `Создай тему ${title} и напиши туда ${text}`, sender = owner,
-  extra: Record<string,unknown> = {}, shared=false) {
+  extra: Record<string,unknown> = {}, shared=false,work=false) {
   const rows = new Map<string,unknown>();
   const store:Store = {
     get:<T>(key:string)=>structuredClone(rows.get(key)) as T|undefined,
@@ -27,7 +27,8 @@ async function fixture(message = `Создай тему ${title} и напиши
   };
   bindGroupTopic(store,{chatId,topicId:3,threadId:"source",botId:bot,botUsername:"fixture_bot",
     requireMention:false,ownerOnly:true,ownerId:owner,revision:"source-revision",
-    ...(shared && {ownerSharedProject:true})},"team");
+    ...(shared && {ownerSharedProject:true}),
+    ...(work && {ownerTopicManagerProjectId:"team"})},"team");
   // The new topic must stay owner-only even when group-level settings and
   // the bot's access list allow other people to start ordinary group work.
   setAccess(store,bot,[{id:9,name:"Other administrator"}]);
@@ -39,6 +40,7 @@ async function fixture(message = `Создай тему ${title} и напиши
   const events:any[]=[];
   const calls: {method:string; payload:Record<string,any>}[]=[];
   const forums=new Map([[chatId,"Первый форум"]]);
+  const workForums=new Set(work?[chatId]:[]);
   const spawned=new Set<number>();
   let activeForum=chatId;
   const config = {forum:true,isPublic:false,botMayManage:true,ownerMayManage:true,fail:"",newThread:false,revokeAfterCreate:false,audience:2};
@@ -82,7 +84,8 @@ async function fixture(message = `Создай тему ${title} и напиши
       return {message_thread_id:22} as T;
     }
     if (method==="sendMessage") {
-      assert.equal(store.get<any>(`group:policy:${destination}:22`)?.threadId,destination===chatId?"new-thread":"another-thread");
+      const binding=store.get<any>(`group:policy:${destination}:22`);
+      assert.equal(binding?.threadId,workForums.has(destination)?undefined:destination===chatId?"new-thread":"another-thread");
       if (config.fail==="post") throw new TelegramFailure("telegram_network",30,true);
       if (config.fail==="post-rejected") throw new TelegramFailure("telegram_429",30,false);
       return {chat:{id:destination},message_thread_id:22,message_id:23} as T;
@@ -93,7 +96,7 @@ async function fixture(message = `Создай тему ${title} и напиши
   const makeTool=(provePrivate?:Parameters<typeof ownerTopicTool>[0]["provePrivate"])=>
     ownerTopicTool({store,sdk:sdk as never,identity:async()=>({owner,bot}),transport,provePrivate});
   const mutations=()=>calls.filter(c=>["createForumTopic","spawn","sendMessage"].includes(c.method));
-  return {store,start,config,record,makeTool,mutations,forums};
+  return {store,start,config,record,makeTool,mutations,forums,workForums};
 }
 
 test("a proven owner request creates a topic, binds a separate thread and posts once",async()=>{
@@ -229,6 +232,10 @@ test("private owner request chooses an explicitly named forum and same named top
   await assert.rejects(create(args,scope),/explicit_private_forum_selection_required/);
   await assert.rejects(create({...args,forum:"Второй форум"},scope),/explicit_private_forum_selection_required/);
   assert.equal(f.mutations().length,0);
+  f.forums.set(other,"Первый форум");
+  await assert.rejects(create({...args,forum:"Первый форум"},scope),/private_forum_selection_unavailable/);
+  assert.equal(f.mutations().length,0);
+  f.forums.set(other,"Второй форум");
   const a=await create({...args,forum:"Первый форум"},scope);
   const link="https://t.me/c/9898/3";
   original=`Создай тему «${title}» в форуме ${link}.`;
@@ -247,4 +254,38 @@ test("a request originating inside a forum always creates its topic in that foru
   const receipt=await f.makeTool()(explicit,scope);
   assert.equal(receipt.url,"https://t.me/c/4242/22/23");
   assert.equal(f.store.get("group:policy:-1009898:22"),undefined);
+});
+
+test("a work forum explicitly delegated to the owner project can be chosen in DM without binding the owner environment",async()=>{
+  const f=await fixture(undefined,owner,{},true);
+  const workChat=-1009898;
+  f.forums.set(workChat,"Рабочий форум");
+  f.workForums.add(workChat);
+  bindGroupTopic(f.store,{chatId:workChat,topicId:3,threadId:"worker",botId:bot,botUsername:"fixture_bot",
+    requireMention:true,ownerOnly:false,isolated:true,ownerId:owner,ownerTopicManagerProjectId:"team",revision:"work-rev"},"isolated-project");
+  const args={...explicit,routeToken:"5c8a898d-4b04-42f7-afe8-5a6bda456331"};
+  const create=f.makeTool(async(_id,token)=>({key:"private:"+token,text:`Создай тему «${title}» в «Рабочий форум». ${text}`}));
+  await assert.rejects(create(args,scope),/explicit_private_forum_selection_required/);
+  const receipt=await create({...args,forum:"Рабочий форум"},scope);
+  assert.deepEqual(receipt,{topicId:22,requiresBinding:true,messageId:23,url:"https://t.me/c/9898/22/23"});
+  assert.deepEqual(await create({...args,forum:"Рабочий форум"},scope),receipt);
+  assert.deepEqual(f.mutations().map(m=>[m.method,m.payload.chat_id]),[["createForumTopic",workChat],["sendMessage",workChat]]);
+  assert.equal(f.store.get("group:policy:-1009898:22"),undefined);
+  assert.equal(f.store.get("group:project:team"),undefined);
+});
+
+test("an owner request in a delegated local work topic keeps its work forum even with a different private forum",async()=>{
+  const f=await fixture(undefined,owner,{},false,true);
+  f.config.isPublic=true;
+  f.forums.set(-1009898,"Отдельный форум");
+  const receipt=await f.makeTool()(explicit,scope);
+  assert.deepEqual(receipt,{topicId:22,requiresBinding:true,messageId:23,url:"https://t.me/c/4242/22/23"});
+  assert.deepEqual(f.mutations().map(m=>[m.method,m.payload.chat_id]),[["createForumTopic",chatId],["sendMessage",chatId]]);
+});
+
+test("delegated work still requires current Telegram topic management rights",async()=>{
+  const f=await fixture(undefined,owner,{},false,true);
+  f.config.ownerMayManage=false;
+  await assert.rejects(f.makeTool()(explicit,scope),/forum_owner_rights_required/);
+  assert.deepEqual(f.mutations(),[]);
 });
