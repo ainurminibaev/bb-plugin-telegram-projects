@@ -2920,8 +2920,12 @@ export class ChatBridge {
           if (event.type==="provider/error" && event.data.errorInfo?.category)
             this.s.put(errorKey,event.data.errorInfo.category);
           if (event.type==="turn/completed") {
-            if (event.data.status==="failed")
-              await this.reportFailure(b,b.threadId,t.title,event.scope.turnId,event.seq,this.s.get<string>(errorKey));
+            if (event.data.status==="failed") {
+              const category = this.s.get<string>(errorKey);
+              // Пара тредов: лимит действующего — переключение без «⚠️».
+              if (!(category === "rate-limit" && await this.pairs.onLimit(b, b.threadId, event.scope.turnId).catch(() => false)))
+                await this.reportFailure(b,b.threadId,t.title,event.scope.turnId,event.seq,category);
+            }
             this.s.del(errorKey);
           }
           if (event.type === "item/started") {

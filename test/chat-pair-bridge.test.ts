@@ -69,11 +69,12 @@ function setup() {
     const marker = routes.ingress(threadId, {kind: "telegram", chatId: OWNER, topicId: 0, updateId: 7, messageId: 7});
     routes.requested(threadId, {requestId: "req-" + turnId, originPluginId: "telegram-projects", input: [{type: "text", text}, marker]});
     routes.accept(threadId, turnId, "req-" + turnId);
+    store.put("reply:active-turn:" + threadId, turnId);
     const e = events[threadId], n = e.length;
     e.push({seq: n + 1, type: "client/turn/requested", createdAt: Date.now(),
       data: {requestId: "req-" + turnId, originPluginId: "telegram-projects", input: [{type: "text", text}, marker]}});
     e.push({seq: n + 2, type: "turn/started", scope: {kind: "turn", turnId}, data: {}});
-    e.push({seq: n + 3, type: "provider/error", data: {errorInfo: {category: "rate-limit"}}});
+    e.push({seq: n + 3, type: "provider/error", scope: {kind: "turn", turnId}, data: {errorInfo: {category: "rate-limit"}}});
     e.push({seq: n + 4, type: "turn/completed", scope: {kind: "turn", turnId}, data: {status: "failed"}});
     queues[threadId].push({id: "retry-" + turnId, state: "scheduled", sendAt: Date.now() + 2 * 3600_000,
       payload: {kind: "retry", retryOfTurnRequestId: "req-" + turnId}});
@@ -91,6 +92,7 @@ test("мост: лимит Claude — сообщение уходит в Codex �
     await f.bridge.observe(); await f.bridge.flush();
     const texts = f.sent.map(s => String(s.text ?? ""));
     assert.ok(!texts.some(t => t.startsWith("⚠️")), "нет сообщения о сбое: " + texts.join(" | "));
+    assert.equal(f.store.list("chat:out:failure:").length, 0, "сообщение о сбое не ставится даже в очередь отправки");
     assert.ok(texts.some(t => /^Claude в лимите до .*Пока отвечает Codex\.$/.test(t)), texts.join(" | "));
     assert.equal(f.store.get<any>("chat:binding:0").threadId, "thr_codex");
     const replay = f.sends.find(s => s.threadId === "thr_codex");
