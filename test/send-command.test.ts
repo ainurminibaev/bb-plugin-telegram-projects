@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {askNotes,findGroup,findPerson,openAsks,rememberAsk,sendRefusal} from "../send-command";
+import {askNotes,findGroup,findPerson,findTopic,openAsks,rememberAsk,sendRefusal,sendTargets} from "../send-command";
 import {setAccess} from "../rights";
 
 const OWNER=7, BOT=5, TEAM=-1001, OTHER=-1002, ALICE=21, BOB=22;
@@ -49,4 +49,23 @@ test("names are found by the agent; ambiguity is refused",()=>{
   assert.equal(findGroup(s,BOT,"склад"),OTHER);
   setAccess(s,BOT,[{id:ALICE,name:"Алиса Иванова"},{id:BOB,name:"Алиса Петрова"}]);
   assert.throws(()=>findPerson(s,BOT,"алиса"),/person_ambiguous/);
+});
+
+test("a topic is found by its name without the group; the agent can list where it may write",()=>{
+  const s=setup() as any;
+  s.put(`group:topic-name:${BOT}:${TEAM}:64`,{name:"Стенд: этап 2"});
+  s.put(`group:topic-name:${BOT}:${OTHER}:9`,{name:"Отчёты"});
+  s.put(`group:topic-name:${BOT}:${TEAM}:10`,{name:"Отчёты"});
+  assert.deepEqual(findTopic(s,BOT,undefined,"«Стенд: этап 2»"),{chat:TEAM,topic:64});
+  assert.deepEqual(findTopic(s,BOT,OTHER,"отчеты"),{chat:OTHER,topic:9});
+  assert.throws(()=>findTopic(s,BOT,undefined,"отчёты"),/topic_ambiguous: .*Штурвал \/ Отчёты/);
+  assert.throws(()=>findTopic(s,BOT,undefined,"нет такой"),/topic_unknown; known topics: .*Стенд: этап 2/);
+  assert.equal(findPerson(s,BOT,"Алисе"),ALICE,"a name in another case");
+  const owner=sendTargets(s,BOT,OWNER,{kind:"owner"},groupsOf);
+  assert.deepEqual(owner.groups.map((g:any)=>g.title).sort(),["Склад","Штурвал"]);
+  assert.ok(owner.groups.find((g:any)=>g.chat===TEAM).topics.some((t:any)=>t.name==="Стенд: этап 2"));
+  assert.deepEqual(owner.people.map((p:any)=>[p.name,!!p.note]),[["Алиса",false],["Боб",true]]);
+  const group=sendTargets(s,BOT,OWNER,{kind:"group",chat:OTHER},groupsOf);
+  assert.deepEqual(group.groups.map((g:any)=>g.title),["Склад"]);
+  assert.deepEqual(group.people.map((p:any)=>p.name),["Боб"],"only people it may reach, and who to mention");
 });

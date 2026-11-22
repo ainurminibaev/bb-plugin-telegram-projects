@@ -6,7 +6,7 @@ import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
 import {conversationOf,conversationOfThread,guardGroupMemory,readableChats} from "./archive-access";
-import {closeAsk,findGroup,findPerson,findTopic,rememberAsk,sendRefusal} from "./send-command";
+import {closeAsk,findGroup,findPerson,findTopic,rememberAsk,sendRefusal,sendTargets} from "./send-command";
 import {sendOutboundMessage} from "./outbound-message";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
@@ -2003,7 +2003,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name:"send",
         summary:"Send a message or file to a group topic or a person with access; --ask remembers the question so the answer comes back",
-        usage:"bb telegram-projects send (--chat GROUP [--topic TOPIC] | --person PERSON | --answer ASK) (--text TEXT | --text-file FILE) [--file PATH] [--ask]",
+        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON | --answer ASK) (--text TEXT | --text-file FILE) [--file PATH] [--ask]",
       },
       {
         name:"search-history",
@@ -2060,18 +2060,21 @@ export default async function plugin(bb: BbPluginApi) {
         const rest=argv.slice(1);
         for (let i=0;i<rest.length;i++) {
           if (rest[i]==="--ask") ask=true;
+          else if (rest[i]==="--targets") opt.targets="1";
           else if (rest[i]==="--json") continue;
           else if (rest[i].startsWith("--") && rest[i+1]!==undefined) opt[rest[i].slice(2)]=rest[++i];
           else return {exitCode:2,stderr:"unexpected_argument "+rest[i]};
         }
         try {
           const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
+          if (opt.targets) return {exitCode:0,stdout:JSON.stringify(sendTargets(store,bot,owner,caller,p=>archive?.groupsOf(bot,p) ?? []))};
           let target:{chat:number;topic:number};
           const answer=store.get<import("./send-command").Ask>(`send:ask:${bot}:${opt.answer}`);
           if (opt.answer) { if (!answer) return {exitCode:1,stderr:"no_open_question_for_this_answer"}; target=answer.origin; }
           else if (opt.person) target={chat:findPerson(store,bot,opt.person),topic:0};
-          else if (opt.chat) { const chat=findGroup(store,bot,opt.chat); target={chat,topic:opt.topic ? findTopic(store,bot,chat,opt.topic) : 0}; }
-          else return {exitCode:2,stderr:"target_required: --chat, --person or --answer"};
+          else if (opt.chat) { const chat=findGroup(store,bot,opt.chat); target=opt.topic ? findTopic(store,bot,chat,opt.topic) : {chat,topic:0}; }
+          else if (opt.topic) target=findTopic(store,bot,undefined,opt.topic);
+          else return {exitCode:2,stderr:"target_required: --chat, --topic, --person or --answer; see --targets"};
           const refusal=sendRefusal(store,bot,owner,caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer);
           if (refusal) return {exitCode:1,stderr:refusal};
           const text=opt["text-file"] ? await readFile(opt["text-file"],"utf8") : opt.text;

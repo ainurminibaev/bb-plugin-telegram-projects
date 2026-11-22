@@ -26,30 +26,55 @@ export function openAsks(store:Store,bot:number,target:number,now=Date.now()) {
 /** A person, by Telegram ID or part of a name, among people with access. */
 export function findPerson(store:Store,bot:number,who:string) {
   if (/^\d+$/.test(who.trim())) return Number(who.trim());
-  const q=who.trim().toLowerCase();
-  const hits=accessList(store,bot).filter(p=>p.name.toLowerCase().includes(q));
+  const q=norm(who);
+  // Names come in any case form ("Виктору", "Алисе"): a query word matches the stem of a name word.
+  const stem=(w:string)=>w.length>4 ? w.slice(0,-2) : w.length>3 ? w.slice(0,-1) : w;
+  const words=q.split(" ").filter(w=>w.length>2);
+  const hits=accessList(store,bot).filter(p=>norm(p.name).includes(q) ||
+    norm(p.name).split(" ").some(w=>w.length>2 && words.some(x=>x.startsWith(stem(w)))));
   if (hits.length===1) return hits[0].id;
-  throw Error(hits.length ? "person_ambiguous: "+hits.map(p=>p.name).join(", ") : "person_unknown");
+  throw Error(hits.length ? "person_ambiguous: "+hits.map(p=>p.name).join(", ") :
+    "person_unknown; people with access: "+accessList(store,bot).map(p=>p.name).join(", "));
 }
 
 /** A group the bot is in, by chat ID or part of its title. */
 export function findGroup(store:Store,bot:number,what:string) {
   if (/^-\d+$/.test(what.trim())) return Number(what.trim());
-  const q=what.trim().toLowerCase();
+  const q=norm(what);
   const hits=store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`).map(r=>r.value)
-    .filter(g=>String(g.title??"").toLowerCase().includes(q));
+    .filter(g=>norm(String(g.title??"")).includes(q));
   if (hits.length===1) return hits[0].chat;
-  throw Error(hits.length ? "group_ambiguous: "+hits.map(g=>g.title).join(", ") : "group_unknown");
+  const known=store.list<{title?:string}>(`visibility:${bot}:group:`).map(r=>r.value.title).join(", ");
+  throw Error(hits.length ? "group_ambiguous: "+hits.map(g=>g.title).join(", ") : "group_unknown; known groups: "+known);
 }
 
-/** A topic by ID or part of its name, among the topics the bridge knows in that group. */
-export function findTopic(store:Store,bot:number,chat:number,what:string) {
-  if (/^\d+$/.test(what.trim())) return Number(what.trim());
-  const q=what.trim().toLowerCase();
-  const topics=new Set(store.list<{chatId:number;topicId:number}>(`group:policy:${chat}:`).map(r=>r.value.topicId));
-  const hits=[...topics].filter(t=>String(forumName(store,bot,chat,t)??"").toLowerCase().includes(q));
-  if (hits.length===1) return hits[0];
-  throw Error(hits.length ? "topic_ambiguous" : "topic_unknown");
+const norm=(v:string)=>v.toLowerCase().replaceAll("ё","е").replace(/[«»"'“”„]/g,"").replace(/\s+/g," ").trim();
+const groupTitle=(store:Store,bot:number,chat:number)=>
+  String(store.get<{title?:string}>(`visibility:${bot}:group:${chat}`)?.title ?? chat);
+
+/** Topics the bridge knows in a group: named ones and bound ones. */
+export function groupTopics(store:Store,bot:number,chat:number) {
+  const ids=new Set<number>([
+    ...store.list<{name?:string}>(`group:topic-name:${bot}:${chat}:`).map(r=>Number(r.key.split(":").at(-1))),
+    ...store.list<{topicId:number}>(`group:policy:${chat}:`).map(r=>r.value.topicId)]);
+  return [...ids].filter(t=>Number.isSafeInteger(t) && t>0).map(t=>({topic:t,name:forumName(store,bot,chat,t) ?? (t===1 ? "General" : "")}));
+}
+
+/** A topic by ID or part of its name, in one group or, without a group, in every group the bot is in. */
+export function findTopic(store:Store,bot:number,chat:number|undefined,what:string):SendTarget {
+  const groups=chat!==undefined ? [chat] :
+    store.list<{chat:number}>(`visibility:${bot}:group:`).map(r=>r.value.chat);
+  if (/^\d+$/.test(what.trim())) {
+    if (chat===undefined) throw Error("group_required_for_topic_number");
+    return {chat,topic:Number(what.trim())};
+  }
+  const q=norm(what);
+  const all=groups.flatMap(g=>groupTopics(store,bot,g).map(t=>({chat:g,...t})));
+  const exact=all.filter(t=>norm(t.name)===q);
+  const hits=exact.length ? exact : all.filter(t=>t.name && norm(t.name).includes(q));
+  if (hits.length===1) return {chat:hits[0].chat,topic:hits[0].topic};
+  const list=(hits.length ? hits : all).map(t=>`${groupTitle(store,bot,t.chat)} / ${t.name||t.topic}`).join("; ");
+  throw Error((hits.length ? "topic_ambiguous: " : "topic_unknown; known topics: ")+list);
 }
 
 const reachable=(store:Store,bot:number,owner:number,person:number)=>
@@ -78,6 +103,17 @@ export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversat
   if (caller.kind==="group" && groupsOf(target.chat).includes(caller.chat)) return;
   if (caller.kind==="person" && caller.subject===target.chat) return;
   return "person_not_allowed_from_this_conversation";
+}
+
+/** Where this conversation may send, for the agent to pick names from. */
+export function sendTargets(store:Store,bot:number,owner:number,caller:Conversation|undefined,groupsOf:(person:number)=>number[]) {
+  const groups=store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`).map(r=>r.value)
+    .filter(g=>!sendRefusal(store,bot,owner,caller,{chat:g.chat,topic:0},groupsOf))
+    .map(g=>({chat:g.chat,title:g.title ?? String(g.chat),topics:groupTopics(store,bot,g.chat)}));
+  const people=accessList(store,bot).map(p=>({...p,reachable:reachable(store,bot,owner,p.id)}))
+    .filter(p=>!p.reachable || !sendRefusal(store,bot,owner,caller,{chat:p.id,topic:0},groupsOf))
+    .map(p=>({id:p.id,name:p.name,...(!p.reachable && {note:"has not started the bot: mention them in a group"})}));
+  return {groups,people};
 }
 
 export function rememberAsk(store:Store,bot:number,target:number,origin:SendTarget,question:string) {
