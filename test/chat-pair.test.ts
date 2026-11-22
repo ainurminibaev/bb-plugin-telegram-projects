@@ -35,6 +35,7 @@ function world() {
   const notices: string[] = [];
   const handoffs: unknown[] = [];
   const archived: string[] = [];
+  let handoffInstalled = true;
   let schedules: {enabled: boolean; execution: {targetThreadId?: string | null}}[] = [];
   let spawned = 0;
   const store = memStore();
@@ -75,6 +76,7 @@ function world() {
       spawn: async () => { spawned++; return {id: "new"}; },
     },
     plugins: {
+      list: async () => ({plugins: handoffInstalled ? [{id: "handoff", enabled: true}] : []}),
       callRpc: async (a: {pluginId: string; method: string; input: {threadId: string}}) => {
         if (a.method === "automations_list") return schedules;
         handoffs.push(a);
@@ -127,6 +129,7 @@ function world() {
   };
   return {threads, queues, events, sent, notices, handoffs, store, deps, limitTurn, now0, archived, child, pairDigested,
     setSchedules: (v: typeof schedules) => { schedules = v; },
+    setHandoff: (v: boolean) => { handoffInstalled = v; },
     get binding() { return binding; }, get spawned() { return spawned; }};
 }
 
@@ -482,4 +485,19 @@ test("сводка не вкладывается сама в себя: берё�
   const s = await pairs.summary("codex", Date.now() - 60_000);
   assert.match(s, /Владелец: Новая просьба/);
   assert.doesNotMatch(s, /старая сводка/);
+});
+
+
+test("нет плагина handoff: «перенести» отказывает понятно и не блокирует повтор после установки", async () => {
+  const w = world();
+  w.threads.delete("kid");
+  const pairs = new ChatPairs(w.deps);
+  await pairs.configure(0, "claude", "codex");
+  w.child("stuck", {originPluginId: "telegram-projects"}, "failed");
+  w.threads.get("claude")!.status = "idle";
+  await pairs.manualSwitch(0, "claude", "codex");
+  w.setHandoff(false);
+  await assert.rejects(() => pairs.continueOnActive(0, "stuck"), /handoff_plugin_missing/);
+  w.setHandoff(true);
+  assert.equal(await pairs.continueOnActive(0, "stuck"), "kid2");
 });

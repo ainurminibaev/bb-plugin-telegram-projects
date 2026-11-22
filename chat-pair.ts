@@ -537,6 +537,9 @@ export class ChatPairs {
     }
     const target = await this.thread(providerOf);
     const options = await this.d.sdk.threads.defaultExecutionOptions({threadId: target.id}).catch(() => null);
+    const plugins = await this.d.sdk.plugins.list().catch(() => undefined);
+    // Без плагина handoff перенос невозможен, и это известно до попытки.
+    if (plugins && !plugins.plugins.some(x => x.id === "handoff" && x.enabled)) throw Error("handoff_plugin_missing");
     this.d.store.put(doneKey, {at: Date.now()});
     const result = await this.d.sdk.plugins.callRpc({pluginId: "handoff", method: "startHandoff",
       input: {threadId: child.id, providerId: target.providerId, ...(options?.model ? {model: options.model} : {}),
