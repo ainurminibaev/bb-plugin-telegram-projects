@@ -307,11 +307,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           }
           if (!("type" in received) && (!image || example.document)) {
             if (executor) remoteInputs.push(isolatedFile(await executor.upload(received,signal),!example.pdf));
-            else if (example.pdf) localInputs.push(localFileInput(received,fileHostId));
-            else {
-              (job.opaqueFiles??=[]).push(received);
-              localInputs.push(opaqueAttachmentInput(received));
-            }
+            // Any file, any format: the agent gets the saved file and reads it with its own tools.
+            else localInputs.push(localFileInput(received,fileHostId));
           }
         }
         if (!allowed()) {finish("revoked");continue;}

@@ -331,19 +331,21 @@ test("addressed group messages preserve text, photo and opaque HTML with optiona
       const message={chat,date:Math.floor(Date.now()/1000)+5,message_thread_id:3,message_id:source,from:{id:7},...attachment,
         ...(caption && ext!=="text" && {caption}),reply_to_message:{chat,message_thread_id:3,message_id:10,from:{id:5}}};
       const before=sent.length;
-      answer=[caption,ext==="html"?"HANDLE":ext==="png"?"[Фото]("+png+")":undefined].filter(Boolean).join("\n");
+      answer=[caption ?? (ext==="html" ? "Прочитал файл." : undefined),ext==="png"?"[Фото]("+png+")":undefined].filter(Boolean).join("\n");
       assert.ok(acceptGroupUpdate(store,{update_id:source,message},7,5));
       await tick(); await tick();
       const deliveries=sent.slice(before);
       assert.equal(deliveries.length,1);
-      assert.equal(deliveries[0].method,ext==="html"?"sendDocument":ext==="png"?"sendPhoto":"sendMessage");
+      assert.equal(deliveries[0].method,ext==="png"?"sendPhoto":"sendMessage");
       assert.equal(deliveries[0].payload.message_thread_id,3);
       assert.deepEqual(deliveries[0].payload.reply_parameters,{message_id:source,allow_sending_without_reply:false});
-      assert.equal(deliveries[0].payload[ext==="text"?"text":"caption"],caption);
-      if (ext!=="text") assert.deepEqual(Buffer.from(await (deliveries[0].payload.document??deliveries[0].payload.photo).arrayBuffer()),ext==="html"?data:pixel);
+      if (ext==="png") {
+        assert.equal(deliveries[0].payload.caption,caption);
+        assert.deepEqual(Buffer.from(await deliveries[0].payload.photo.arrayBuffer()),pixel);
+      } else assert.match(deliveries[0].payload.text,new RegExp(caption ?? "Прочитал файл"));
       if (ext==="html") {
-        assert.equal(deliveries[0].payload.document_filename,"нейтральный.html");
-        assert.doesNotMatch(JSON.stringify(currentInput),/SYNTHETIC_NOT_MODEL_CONTEXT|localFile/);
+        // Any file reaches the agent the same way: as the saved file it reads with its own tools.
+        assert.ok(currentInput.some(input=>input.type==="localFile" && input.name==="нейтральный.html"));
       }
       if (caption) assert.ok(currentInput.some(input=>input.text?.includes(caption)));
     }
