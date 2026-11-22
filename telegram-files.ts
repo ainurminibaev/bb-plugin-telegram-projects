@@ -7,6 +7,17 @@ import { pipeline } from "node:stream/promises";
 
 export const maxRoutedDocumentBytes = 2 * 1024 * 1024;
 export const MAX_INCOMING_BYTES = 2 * 1024 * 1024 * 1024;
+const CLOUD_UPLOAD_BYTES = 49 * 1024 * 1024;
+const LOCAL_UPLOAD_BYTES = 1990 * 1024 * 1024;
+let currentUploadLimit = CLOUD_UPLOAD_BYTES;
+/**
+ * The largest file a bot may send: 50 MB through api.telegram.org, 2000 MB through a local Bot API server.
+ * The bridge sets it from its Telegram server setting; senders read it at the moment of sending.
+ */
+export function setUploadLimit(apiRoot: string) {
+  currentUploadLimit = telegramApiRoot(apiRoot) === "https://api.telegram.org" ? CLOUD_UPLOAD_BYTES : LOCAL_UPLOAD_BYTES;
+}
+export const uploadLimit = () => currentUploadLimit;
 
 export function safeTelegramFilename(filename:string) {
   // The client filename is metadata, never a filesystem path.

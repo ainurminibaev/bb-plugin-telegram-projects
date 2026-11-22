@@ -1,4 +1,4 @@
-import {maxRoutedDocumentBytes,safeTelegramFilename} from "./telegram-files";
+import {safeTelegramFilename,uploadLimit} from "./telegram-files";
 import {imageFormat,maxImageBytes,validTelegramPhoto} from "./group-attachments";
 import {createHash} from "node:crypto";
 import {constants} from "node:fs";
@@ -16,7 +16,7 @@ function validHeader(bytes:Buffer,path:string,format:ExportFormat) {
   return validTelegramPhoto(bytes,/\.png$/i.test(path) ? "png" : "jpeg");
 }
 async function readGroupExportBytes(workspace:string,path:string,start:number,length:number,format:ExportFormat) {
-  const max=format==="pdf" ? maxGroupPdfSize : format==="image" ? maxImageBytes : maxRoutedDocumentBytes;
+  const max=format==="pdf" ? maxGroupPdfSize : format==="image" ? maxImageBytes : uploadLimit();
   const extension=format==="pdf" ? /\.pdf$/i : format==="image" ? groupImagePath : undefined;
   if (!Number.isSafeInteger(start) || start<0 || !Number.isSafeInteger(length) || length<=0 || length>max)
     throw Error("invalid_pdf_range");
@@ -65,7 +65,7 @@ export async function readGroupPdf(workspace:string,path:string) {
     document:new Blob([new Uint8Array(bytes)],{type:"application/pdf"})};
 }
 
-export function readGroupDocumentBytes(workspace:string,path:string,start=0,length=maxRoutedDocumentBytes) {
+export function readGroupDocumentBytes(workspace:string,path:string,start=0,length=uploadLimit()) {
   return readGroupExportBytes(workspace,path,start,length,"document");
 }
 

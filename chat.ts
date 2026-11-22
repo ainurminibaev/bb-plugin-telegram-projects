@@ -1,3 +1,4 @@
+import { uploadLimit } from "./telegram-files";
 import {voiceTranscripts} from "./archive";
 import {maxEncodedImages,readSavedImage,type ImageAttachment} from "./group-attachments";
 import {albumCaption,albumKind,albumKey,albumChanged,albumChangedNotice,collectAlbum,copyAlbum,releaseAlbums,sendAlbum, type AlbumMedia} from "./media-album";
@@ -3306,7 +3307,7 @@ export class ChatBridge {
           if (path.split(sep).some(x => x.startsWith("."))) throw new Error("private_path");
           if (!ARTIFACT_EXTENSIONS.test(path)) throw new Error("unsupported_artifact");
           const stat = statSync(path);
-          if (!stat.isFile() || stat.size > 49 * 1024 * 1024) throw new Error("file_limit");
+          if (!stat.isFile() || stat.size > uploadLimit()) throw new Error("file_limit");
           const photo = /\.(png|jpe?g|webp|gif)$/i.test(path) && !link.asDocument;
           if (photo && stat.size > 10 * 1024 * 1024) throw new Error("photo_limit");
           const field = photo ? "photo" : isVideo ? "video" : "document";

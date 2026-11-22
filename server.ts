@@ -23,7 +23,7 @@ import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLooku
 import {cleanInbox} from "./inbox-retention";
 import {openTopicSearch,historyPrefix,topicPassages} from "./topic-search";
 import { transcribeWithVoiceRouter } from "./voice-router";
-import {maxRoutedDocumentBytes, safeTelegramFilename, saveLocalTelegramFile, telegramApiRoot as checkedApiRoot } from "./telegram-files";
+import {MAX_INCOMING_BYTES, maxRoutedDocumentBytes, safeTelegramFilename, saveLocalTelegramFile, setUploadLimit, telegramApiRoot as checkedApiRoot, uploadLimit } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
 import { translate } from "./locale";
 import {
@@ -924,7 +924,7 @@ export default async function plugin(bb: BbPluginApi) {
     const document=await receiveCloudDocument(file,file.sourceUpdateId??route.updateId,route.threadId,scope,signal);
     if (document) return document;
     return receiveLocalFile(file,file.sourceUpdateId??route.updateId,route.threadId,signal,scope,
-      policy?.isolated===true,file.image && !file.document ? maxImageBytes : maxRoutedDocumentBytes);
+      policy?.isolated===true,file.image && !file.document ? maxImageBytes : policy?.isolated===true ? maxRoutedDocumentBytes : MAX_INCOMING_BYTES);
   }
   // Every conversation of an employee is an ordinary thread in its own project: the same
   // environment, agent and instructions as the owner's private chat. A person's private chat and
@@ -2169,7 +2169,7 @@ export default async function plugin(bb: BbPluginApi) {
           let file:import("./outbound-message").OutboundFile|undefined;
           if (opt.file) {
             const bytes=await readFile(opt.file);
-            if (bytes.length>maxRoutedDocumentBytes) return {exitCode:1,stderr:"file_too_large"};
+            if (bytes.length>uploadLimit()) return {exitCode:1,stderr:"file_too_large"};
             const name=safeTelegramFilename(opt.file.split("/").at(-1) ?? "file");
             const photo=/\.(?:png|jpe?g)$/i.test(name);
             file={name,kind:photo ? "photo" : "document",data:new Blob([new Uint8Array(bytes)],{type:photo ? "image/"+(name.toLowerCase().endsWith("png") ? "png" : "jpeg") : "application/octet-stream"}),
@@ -2404,6 +2404,7 @@ export default async function plugin(bb: BbPluginApi) {
             rich = cfg.richReplies;
             currentUrl = new URL(cfg.appUrl).origin;
             language = cfg.language as "ru" | "en";
+            try { setUploadLimit(cfg.telegramApiRoot); } catch { /* invalid setting: cloud limit stays */ }
             bbMentions = cfg.bbMentions as BbMentionsSetting;
             if (!bridge) {
               if (spool) await mkdir(spool, { recursive: true, mode: 0o700 });
