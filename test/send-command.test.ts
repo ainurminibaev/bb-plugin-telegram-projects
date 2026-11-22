@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {askNotes,findGroup,findPerson,findTopic,openAsks,rememberAsk,sendRefusal,sendTargets} from "../send-command";
 import {setAccess} from "../rights";
+import {learnTopicName} from "../forum-defaults";
 
 const OWNER=7, BOT=5, TEAM=-1001, OTHER=-1002, ALICE=21, BOB=22;
 function memoryStore(){
@@ -68,4 +69,19 @@ test("a topic is found by its name without the group; the agent can list where i
   const group=sendTargets(s,BOT,OWNER,{kind:"group",chat:OTHER},groupsOf);
   assert.deepEqual(group.groups.map((g:any)=>g.title),["Склад"]);
   assert.deepEqual(group.people.map((p:any)=>p.name),["Боб"],"only people it may reach, and who to mention");
+});
+
+test("topic names are learned from any topic message of any group",()=>{
+  const s=setup() as any;
+  const chat={id:TEAM,type:"supergroup",is_forum:true};
+  learnTopicName(s,BOT,{update_id:5,message:{chat,message_thread_id:64,message_id:70,text:"привет",
+    reply_to_message:{message_id:64,forum_topic_created:{name:"Стенд: этап 2"}}}});
+  assert.deepEqual(findTopic(s,BOT,undefined,"стенд"),{chat:TEAM,topic:64});
+  learnTopicName(s,BOT,{update_id:6,message:{chat,message_thread_id:64,message_id:71,forum_topic_edited:{name:"Стенд: этап 3"}}});
+  learnTopicName(s,BOT,{update_id:7,message:{chat,message_thread_id:64,message_id:72,text:"ещё",
+    reply_to_message:{message_id:64,forum_topic_created:{name:"Стенд: этап 2"}}}});
+  assert.deepEqual(findTopic(s,BOT,undefined,"этап 3"),{chat:TEAM,topic:64},"a rename wins over the old creation message");
+  learnTopicName(s,BOT,{update_id:8,message:{chat,message_thread_id:65,message_id:73,text:"Стенд: подмена",
+    reply_to_message:{message_id:60,text:"Стенд: подмена"}}});
+  assert.throws(()=>findTopic(s,BOT,undefined,"подмена"),/topic_unknown/,"text never names a topic");
 });

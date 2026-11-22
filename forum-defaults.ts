@@ -33,6 +33,23 @@ export function rememberForumName(store:Store,bot:number,chat:number,topic:numbe
   store.put(key,{name:clean,updateId,created:created??prior?.created,creationDate:creationDate??prior?.creationDate} satisfies TopicMetadata);
 }
 
+/**
+ * Topic names of any group the bot is in, so the agent can address a topic by name. A topic message
+ * carries its topic's creation service message as reply_to_message; names come only from service fields.
+ */
+export function learnTopicName(store:Store,bot:number,update:any) {
+  const m=update?.message ?? update?.edited_message;
+  const chat=m?.chat?.id,topic=m?.message_thread_id;
+  if (m?.chat?.type!=="supergroup" || m.chat.is_forum!==true || !Number.isSafeInteger(chat) ||
+      !Number.isSafeInteger(topic) || topic<2 || !Number.isSafeInteger(update.update_id)) return;
+  const head=m.reply_to_message?.message_id===topic ? m.reply_to_message : undefined;
+  const name=m.forum_topic_edited?.name ?? m.forum_topic_created?.name ?? head?.forum_topic_edited?.name ?? head?.forum_topic_created?.name;
+  // A creation message seen only through a reply is older than any rename this bridge recorded.
+  const fromHead=!m.forum_topic_edited?.name && !m.forum_topic_created?.name;
+  if (fromHead && store.get(forumNameKey(bot,chat,topic))) return;
+  rememberForumName(store,bot,chat,topic,name,update.update_id);
+}
+
 export function forumName(store:Store,bot:number,chat:number,topic:number) {
   return store.get<TopicMetadata>(forumNameKey(bot,chat,topic))?.name;
 }

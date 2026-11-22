@@ -1,4 +1,4 @@
-import {describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,type ForumDefaults} from "./forum-defaults";
+import {learnTopicName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
 import {handleOwnerForumCommand} from "./forum-commands";
 import {topicStateKey} from "./topic-lifecycle";
@@ -2509,7 +2509,7 @@ export default async function plugin(bb: BbPluginApi) {
           for (const u of updates) {
             const moved=groupMigration(u);
             if (moved && botId()) {migrateGroupChat(store,botId()!,moved.from,moved.to);archive?.moveChat(botId()!,moved.from,moved.to);}
-            try { if (botId()) archive?.record(botId()!,u); } catch { /* the archive never blocks a message */ }
+            try { if (botId()) { archive?.record(botId()!,u); learnTopicName(store,botId()!,u); } } catch { /* the archive never blocks a message */ }
             if (botId() && ownerId()) {
               const closed=guardGroupMemory(store,botId()!,ownerId()!,u);
               if (closed) await telegram(botToken,signal,15_000,ownerId,apiRoot)("sendMessage",{chat_id:ownerId(),
