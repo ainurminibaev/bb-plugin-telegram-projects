@@ -64,3 +64,13 @@ test("a conversation reads what its memory allows; another person's private chat
   const alice=readableChats(store as any,a,BOT,OWNER,conv("thr_alice"));
   assert.deepEqual([alice(ALICE),alice(TEAM),alice(OWNER),alice(BOB)],[true,true,false,false]);
 });
+
+test("a voice message keeps the bridge's transcript, and search finds it",()=>{
+  const a=openArchive(new Database(":memory:") as any);
+  a.record(BOT,{update_id:1,message:{message_id:50,date:1_795_300_000,chat:{id:OWNER,type:"private"},from:{id:OWNER,first_name:"Айнур"},
+    voice:{file_id:"V",file_unique_id:"v",duration:4}}});
+  assert.equal(a.transcript(BOT,OWNER,50,"опубликуй выпуск пятьдесят два"),true);
+  const found=a.find(BOT,()=>true,{words:"пятьдесят"},"UTC");
+  assert.equal(found.length,1);
+  assert.equal(found[0].transcript,"опубликуй выпуск пятьдесят два");
+});

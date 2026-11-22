@@ -8,7 +8,6 @@ import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
 import {conversationOf,readableChats} from "./archive-access";
-import {ownerRelay,relayInput,relayKey} from "./owner-relay";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
 import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
@@ -611,27 +610,6 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const {file:_file,...query}=args;
       return JSON.stringify({messages:archive.find(bot,readable,query,safeTimeZone(cfg.timeZone))});
-    },
-  });
-  // P20: the owner's own words reach a worker thread unchanged (owner-relay.ts).
-  bb.agents.registerTool({
-    name:"relay_owner_message",
-    description:"Pass the owner's own Telegram message, word for word, to a worker thread that needs the owner's permission "+
-      "(publish, release, delete, send on the owner's behalf). Name the owner's message by its Telegram ID and add, in your words, "+
-      "the one action and its object. Only a message the owner wrote in this private chat can be passed; you cannot write or edit its text. "+
-      "If the action or its object does not follow unambiguously from the owner's words, ask the owner instead.",
-    parameters:relayInput,
-    async execute(args,{threadId,signal}) {
-      const owner=ownerId(),bot=botId();
-      if (!owner || !bot || !archive) throw Error("relay_unavailable");
-      const caller=await conversationOf(store,bb.sdk.threads,threadId,signal);
-      const result=ownerRelay(store,archive,bot,owner,caller,args,threadId);
-      if ("error" in result) throw Error(result.error);
-      const target=await bb.sdk.threads.get({threadId:args.threadId,signal});
-      if (!target?.id || target.archivedAt || target.deletedAt) throw Error("target_thread_unavailable");
-      store.put(relayKey(bot,args.messageId,args.threadId),{at:Date.now(),via:threadId,action:args.action,object:args.object});
-      await bb.sdk.threads.send({threadId:args.threadId,mode:"queue-if-active",input:[{type:"text",text:result.text,mentions:[]}]});
-      return JSON.stringify({relayed:true,threadId:args.threadId,messageId:args.messageId});
     },
   });
   bb.agents.registerTool({

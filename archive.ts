@@ -182,11 +182,6 @@ export function openArchive(db:Database) {
         text:String(r.text).slice(0,2000),transcript:r.transcript ? String(r.transcript).slice(0,2000) : undefined,
         link:String(r.chat).startsWith("-100") ? `https://t.me/c/${String(r.chat).slice(4)}/${r.topic ? r.topic+"/" : ""}${r.message}` : undefined}));
     },
-    /** One archived message exactly as Telegram delivered it (the latest edit). */
-    message(bot:number,chat:number,message:number) {
-      return db.prepare("SELECT chat,message,date,sender,sender_name,chat_type,text,file_kind,transcript FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as
-        {chat:number;message:number;date:number;sender:number;sender_name:string;chat_type:string;text:string;file_kind:string|null;transcript:string|null}|undefined;
-    },
     file(bot:number,chat:number,message:number) {
       return db.prepare("SELECT file_id,file_name,file_kind,file_size FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as
         {file_id:string|null;file_name:string|null;file_kind:string|null;file_size:number|null}|undefined;
