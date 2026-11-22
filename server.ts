@@ -969,7 +969,23 @@ export default async function plugin(bb: BbPluginApi) {
       if (cfg.telegramInboxRoot)
         await rm(join(cfg.telegramInboxRoot,"archive",String(g.bot),String(g.chat),String(g.message)),{recursive:true,force:true});
   }
-  const firstExpiry=setTimeout(()=>void settings.get().then(expireArchiveFiles).catch(()=>{}),60_000);
+  // The history kept before the archive existed moves into it once per start; repeating adds nothing.
+  function importOldHistory() {
+    const bot=botId();
+    if (!archive || !bot) return;
+    const items=store.list<{id?:number;sender?:number;name?:string;date?:number;replyTo?:number;text?:string}>("group:history:").flatMap(({key,value})=>{
+      const [,, chat, topic]=key.split(":").map(Number);
+      if (!Number.isSafeInteger(chat) || !Number.isSafeInteger(topic) || !value || typeof value.text!=="string") return [];
+      return [{chat,topic,id:Number(value.id),sender:Number(value.sender ?? 0),name:String(value.name ?? ""),date:Number(value.date),
+        replyTo:Number.isSafeInteger(value.replyTo) ? value.replyTo : undefined,text:value.text,
+        title:store.get<{title?:string}>(`visibility:${bot}:group:${chat}`)?.title}];
+    });
+    store.put("archive:history-imported:"+bot,{at:Date.now(),added:archive.importHistory(bot,items),seen:items.length});
+  }
+  const firstExpiry=setTimeout(()=>{
+    try { importOldHistory(); } catch { /* the next start repeats it */ }
+    void settings.get().then(expireArchiveFiles).catch(()=>{});
+  },60_000);
   let cleaning=false;
   const inboxTimer=setInterval(async()=>{
     if(cleaning || stateTransferBusy)return;

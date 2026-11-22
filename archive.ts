@@ -184,7 +184,7 @@ export function openArchive(db:Database) {
         album:r.album??undefined,file:r.file_id ? {kind:r.file_kind,name:r.file_name??undefined,size:r.file_size??undefined} :
           r.file_removed ? {kind:r.file_kind,name:r.file_name??undefined,removed:FILE_REMOVED} : undefined,
         text:String(r.text).slice(0,2000),transcript:r.transcript ? String(r.transcript).slice(0,2000) : undefined,
-        link:String(r.chat).startsWith("-100") ? `https://t.me/c/${String(r.chat).slice(4)}/${r.topic ? r.topic+"/" : ""}${r.message}` : undefined}));
+        link:String(r.chat).startsWith("-100") && r.message>0 ? `https://t.me/c/${String(r.chat).slice(4)}/${r.topic ? r.topic+"/" : ""}${r.message}` : undefined}));
     },
     file(bot:number,chat:number,message:number) {
       return db.prepare("SELECT file_id,file_name,file_kind,file_size,file_removed FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as
@@ -199,6 +199,28 @@ export function openArchive(db:Database) {
         {bot:number;chat:number;message:number}[];
       if (gone.length) db.prepare("UPDATE archive SET file_id=NULL,file_removed=1 WHERE file_id IS NOT NULL AND date<?").run(before);
       return gone;
+    },
+    /**
+     * The history the bridge kept before the archive existed (group:history). Imported once on update and safe
+     * to repeat: a message already in the archive (same chat, time, author and text) is not added again. Imported
+     * messages get negative numbers: before a group became a supergroup Telegram numbered them separately, so
+     * they must not collide with the group's current messages.
+     */
+    importHistory(bot:number,items:{chat:number;topic:number;id:number;sender:number;name:string;date:number;replyTo?:number;text:string;title?:string}[]) {
+      const exists=db.prepare("SELECT 1 FROM archive WHERE bot=? AND chat=? AND date=? AND sender=? AND (text=? OR message=?)");
+      const insert=db.prepare(`INSERT OR IGNORE INTO archive(bot,chat,topic,message,date,sender,sender_name,chat_type,chat_title,reply_to,album,file_id,file_name,file_kind,file_size,text,search)
+        VALUES(?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,?,?)`);
+      let added=0;
+      db.transaction(()=>{
+        for (const h of items) {
+          if (!h.text || !Number.isSafeInteger(h.id) || !Number.isSafeInteger(h.date)) continue;
+          if (exists.get(bot,h.chat,h.date,h.sender,h.text,-h.id)) continue;
+          const type=String(h.chat).startsWith("-100") ? "supergroup" : h.chat<0 ? "group" : "private";
+          added+=insert.run(bot,h.chat,h.topic,-h.id,h.date,h.sender,h.name.slice(0,128),type,(h.title ?? h.name).slice(0,128),
+            h.replyTo ? -h.replyTo : null,h.text,searchText(h.text,h.name)).changes;
+        }
+      })();
+      return added;
     },
     /** Groups where a person has written: their memberships as the archive knows them. */
     groupsOf(bot:number,person:number) {

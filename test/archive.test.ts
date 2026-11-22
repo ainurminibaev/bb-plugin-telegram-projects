@@ -102,3 +102,20 @@ test("retention: a text older than the term is found, its file is removed by ter
   assert.equal(a.find(BOT,()=>true,{words:"новый вариант"},"UTC")[0].file!.name,"Вариант.pdf");
   assert.equal(a.expireFiles(fresh-86400).length,0,"once");
 });
+
+test("history kept before the archive moves into it once, without duplicates or clashes",()=>{
+  const a=openArchive(new Database(":memory:"));
+  a.record(BOT,msg(TEAM,ALICE,"Алиса","уже в архиве",{date:1_795_300_100}));
+  const live=a.find(BOT,()=>true,{words:"уже в архиве"},"UTC")[0];
+  const items=[
+    {chat:TEAM,topic:0,id:live.message,sender:ALICE,name:"Алиса",date:1_795_300_100,text:"уже в архиве"},
+    {chat:TEAM,topic:0,id:live.message,sender:BOB,name:"Боб",date:1_795_000_000,text:"предложи варианты названия домена",title:"Команда"},
+  ];
+  assert.equal(a.importHistory(BOT,items),1,"the message already archived is not added again");
+  assert.equal(a.importHistory(BOT,items),0,"repeating adds nothing");
+  const [old]=a.find(BOT,()=>true,{words:"домена"},"UTC");
+  assert.equal(old.author,"Боб");
+  assert.ok(old.message<0,"an old number never clashes with the group's current messages");
+  assert.equal(old.link,undefined);
+  assert.equal(a.find(BOT,()=>true,{words:"уже в архиве"},"UTC")[0].message,live.message,"the live message is untouched");
+});
