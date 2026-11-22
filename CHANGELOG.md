@@ -1,3 +1,14 @@
+# 0.9.54
+
+- Local Telegram Bot API server (one per machine, shared by every bot on it): files up to 2 GB are received in groups and private chats and sent back (up to 2000 MB); through api.telegram.org the usual 50 MB stays. Any file type goes out from the owner's chat as a document, as in groups.
+- Switching between api.telegram.org and a local server no longer loses the first updates (each server numbers updates on its own); a switch back to the cloud clears the logout mark, so the next switch logs out again.
+- Voice transcripts through BB's transcription get the install language as a hint (Russian speech was taken for Polish).
+- `send --person owner` reaches the owner's chat (statuses of the owner's tasks from task subthreads).
+- The skill tells agents the upload limit depends on the Telegram server.
+- A file from the conversation memory is taken from disk when the bridge uses a local Telegram server.
+- The same question to the same person from the same place stays one open question: the answer comes back once.
+- In groups and people's chats, the result of a turn woken by a finished subthread reaches the same chat, as schedule results do.
+
 # 0.9.53
 
 - A group message that arrives while the agent works joins the running turn and gets its own answer, as in the owner's chat; without that answer it is sent again in turn order.
