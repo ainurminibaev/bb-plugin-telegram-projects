@@ -27,6 +27,13 @@ export function splitChildResultClaims(text: string) {
 
 // Telegram accepts both plain text and formatted replies. Keep the exact
 // claim parser above separate: display-only variants cannot acknowledge work.
+/** The answer enclosed for one message that arrived while work was running, or undefined. */
+export function busyAnswerText(text: string, label: string) {
+  const m = /^\[telegram-answer:([a-f0-9]{8}|[a-f0-9-]{36})\][ \t]*\r?\n([\s\S]+?)\r?\n\[\/telegram-answer\]$/.exec(text.trim());
+  return m && m[1] === label && !/\[\/?telegram-answer[\]:]/.test(m[2]) ? m[2].trim() : undefined;
+}
+export const isBusyAnswer = (text: string) => text.trim().startsWith("[telegram-answer:");
+
 export function stripTelegramMarkers(text: string) {
   return text.replace(/^[ \t]*(?:<!--[ \t]*bb-telegram-child-result:[\w-]+:[\w-]+[ \t]*-->|bb-telegram-child-result:[\w-]+:[\w-]+|\[bb-telegram-reply-route:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\])[ \t]*(?:\r?\n|$)/gm, "");
 }
@@ -73,7 +80,7 @@ export class ReplyRoutes {
   }
   // The reply label is public in the native timeline and carries no permission
   // to delegate. The separate hidden ingress token proves the native request.
-  busyIngress(threadId: string, route: Extract<ReplyRoute, {kind: "telegram"}>, digest?: string) {
+  busyIngress(threadId: string, route: Extract<ReplyRoute, {kind: "telegram"}>, digest?: string, sender?: string) {
     const token = randomUUID();
     const marker = this.ingress(threadId, route, undefined, undefined, digest, token);
     const uuid = randomUUID();
@@ -90,7 +97,8 @@ export class ReplyRoutes {
       this.store.put("reply:busy-ingress:" + token, label);
     });
     return [marker, {type: "text" as const, visibility: "agent-only" as const, mentions: [],
-      text: "This private Telegram message arrived while work was running. Answer the owner's message promptly in a separate public assistant message. " +
+      text: (sender ? "This Telegram message from " + sender + " in the group arrived while work was running. Answer it promptly in a separate public assistant message. "
+        : "This private Telegram message arrived while work was running. Answer the owner's message promptly in a separate public assistant message. ") +
         "Start that message with this line exactly: [telegram-answer:" + label + "]. On the following lines write only the answer intended for this message. " +
         "End it with [/telegram-answer] on a line of its own. The bridge sends the enclosed answer only if the selector matches exactly. " +
         "Copy only the selector shown for this message. Never guess or reuse another message's selector. " +

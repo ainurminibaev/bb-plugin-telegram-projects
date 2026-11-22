@@ -445,3 +445,42 @@ for (const kind of ["photo","document"] as const) test(`forum ${kind} album subm
     assert.equal(sends[2].body.reply_parameters.message_id,21);
   } finally {await rm(root,{recursive:true,force:true});}
 });
+
+test("a group message that arrives while the thread works joins the running turn and gets its own answer",async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ const events:any[]=[]; const sends:any[]=[];
+ let status="idle", enclose=true;
+ const event=(type:string,data:any,turnId:string)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId}});
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible",status}),
+   events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+   send:async(q:any)=>{sends.push(q);
+     const id="r"+sends.length;
+     event("client/turn/requested",{requestId:id,originPluginId:"telegram-projects",input:q.input},sends.length===1||q.mode!=="steer-if-active"?id:"r1");
+     if (q.mode==="steer-if-active") {
+       event("turn/input/accepted",{clientRequestId:id},"r1");
+       const label=/\[telegram-answer:([a-f0-9-]+)\]/.exec(q.input.map((b:any)=>b.text??"").join("\n"))![1];
+       if (enclose) event("item/completed",{item:{type:"agentMessage",text:`[telegram-answer:${label}]\nбыстрый ответ\n[/telegram-answer]`}},"r1");
+       event("item/completed",{item:{type:"agentMessage",text:"долгий ответ"}},"r1");
+       event("turn/completed",{status:"completed"},"r1");
+     } else {
+       event("turn/input/accepted",{clientRequestId:id},id);
+       if (sends.length===1) return; // the first turn keeps working
+       event("item/completed",{item:{type:"agentMessage",text:"ответ по очереди"}},id);
+       event("turn/completed",{status:"completed"},id);
+     }
+   }}};
+ const sent:any[]=[];
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{sent.push(p.text);return {} as T},new AbortController().signal);
+ assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"долгая задача"}},7,5));
+ await tick();
+ status="active";
+ assert.ok(acceptGroupUpdate(store,{update_id:9,message:{message_id:11,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"а сколько времени?"}},7,5));
+ await tick(); await tick(); await tick();
+ assert.equal(sends[1].mode,"steer-if-active");
+ assert.deepEqual(sent.sort(),["быстрый ответ","долгий ответ"],"each message gets its own answer; the enclosed one is not the long answer");
+});

@@ -14,7 +14,7 @@ import {readGroupImage,readGroupPdf,readGroupDocument} from "./group-pdf";
 import {outboundMessagePayload} from "./outbound-message";
 import {routedArtifactKind,routedCaption} from "./routed-message";
 import {splitText} from "./chat";
-import {ReplyRoutes, stripTelegramMarkers} from "./reply-routing";
+import {ReplyRoutes, busyAnswerText, isBusyAnswer, stripTelegramMarkers} from "./reply-routing";
 import {voiceTranscripts} from "./archive";
 import {askNotes} from "./send-command";
 import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumScope, type GroupTopicPolicy, type Ingress} from "./ingress";
@@ -34,6 +34,8 @@ type Job = {
   imageIndex?:number; failedImages?:string[];
   opaqueFiles?:SavedTelegramFile[]; captionSent?:true;
   cursor?:number; turnId?:string; answer?:string; part?:number;
+  /** Sent into a running turn: the selector of its separate answer; busyOnce — the plain retry is under way. */
+  busyLabel?:string; busyOnce?:true;
 };
 
 // Keep thread ownership after disconnect: history may already contain group messages.
@@ -375,14 +377,19 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
       if (!allowed() || !await safeToSend()) {finish("revoked");continue;}
-      const marker=routes.ingress(r.threadId,dest);
+      // A message that arrives while the thread works goes into the running turn and gets its own answer
+      // there, as in the owner's chat. If that turn ends without it, the message is sent again in turn order.
+      const busy=(thread as {status?:string}).status==="active" && !job.busyOnce;
+      const metadata=busy ? routes.busyIngress(r.threadId,dest,undefined,senderName) : [routes.ingress(r.threadId,dest)];
+      if (busy) job.busyLabel=/\[telegram-answer:([a-f0-9-]+)\]/.exec(metadata[1]?.text ?? "")?.[1];
+      else delete job.busyLabel;
       job.cursor=latest[0]?.seq ?? 0;
       delete r.examples;
       job.state="submitted";
       store.put(key,job);
       // The mode persists for later messages of the thread, so every group message sets it.
-      await sdk.threads.send({threadId:r.threadId,mode:"queue-if-active",permissionMode,
-        input:[{type:"text",text:r.text,mentions:[]},...localInputs,marker,{type:"text" as const,visibility:"agent-only" as const,text:rules,mentions:[]},
+      await sdk.threads.send({threadId:r.threadId,mode:busy ? "steer-if-active" : "queue-if-active",permissionMode,
+        input:[{type:"text",text:r.text,mentions:[]},...localInputs,...metadata,{type:"text" as const,visibility:"agent-only" as const,text:rules,mentions:[]},
           ...(taskNote ? [{type:"text" as const,visibility:"agent-only" as const,text:taskNote,mentions:[]}] : [])]});
     }
     if (job.state==="submitted") {
@@ -393,9 +400,23 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (e.scope.kind==="turn") {
           const turn=e.scope.turnId;
           if (e.type==="turn/input/accepted") routes.accept(r.threadId,turn,e.data.clientRequestId);
-          if (routes.sameTask(routes.destination(r.threadId,turn),dest)) {
+          const label=job.busyLabel;
+          if (label && routes.busyAnswer(r.threadId,turn,label)) {
+            // This message joined a running turn: its answer is the enclosed one.
+            const enclosed=e.type==="item/completed" && e.data.item.type==="agentMessage" && !e.data.item.parentToolCallId ?
+              busyAnswerText(e.data.item.text,label) : undefined;
+            if (enclosed) {job.turnId=turn; job.answer=enclosed; job.state="ready";}
+            else if (e.type==="turn/completed" && !routes.sameTask(routes.destination(r.threadId,turn),dest)) {
+              // The turn ended without that answer: send the message again, in turn order.
+              job.busyOnce=true; delete job.busyLabel; job.state="pending";
+            }
+          }
+          if (job.state==="submitted" && routes.sameTask(routes.destination(r.threadId,turn),dest)) {
             if (e.type==="item/completed" && e.data.item.type==="agentMessage" && !e.data.item.parentToolCallId) {
-              job.turnId=turn; job.answer=e.data.item.text;
+              const text=e.data.item.text;
+              // Answers to other messages that joined this turn are not this message's answer.
+              const own=label ? busyAnswerText(text,label) : undefined;
+              if (own || !isBusyAnswer(text)) {job.turnId=turn; job.answer=own ?? text;}
             }
             if (e.type==="turn/completed") {
               if (e.data.status!=="completed") job.answer="Помощнику не удалось завершить это поручение.";
@@ -405,7 +426,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           }
         }
         job.cursor=e.seq;
-        if (job.state==="ready") break;
+        if (job.state!=="submitted") break;
       }
       store.put(key,job);
     }
