@@ -528,3 +528,20 @@ test("неизвестный исход переноса: по истории ha
   await assert.rejects(() => pairs.continueOnActive(0, "b"));
   assert.equal(await pairs.continueOnActive(0, "b"), "kid2", "треда не было — повтор");
 });
+
+
+test("пакет исходов подтредов: все — лимит с повтором → ждёт; есть готовый результат → сразу родителю", async () => {
+  const w = world();
+  const pairs = new ChatPairs(w.deps);
+  for (const id of ["k1", "k2"]) {
+    w.child(id, {originPluginId: "telegram-projects"}, "failed");
+    w.events.get(id)!.push({seq: 9, type: "provider/error", createdAt: Date.now(), data: {errorInfo: {category: "rate-limit"}}});
+    w.queues.set(id, [{id: "r" + id, payload: {kind: "retry", retryOfTurnRequestId: "x"}, state: "waiting", sendAt: Date.now() + 3600_000}]);
+  }
+  const ctx = (outcomes: {threadId: string; status: string}[]) => ({thread: {id: "claude"}, initiator: "system",
+    queuedMessages: [{id: "q", systemNotice: {kind: "child-outcome-batch", subject: {kind: "thread-batch", outcomes}}}]}) as never;
+  const held = await pairs.admitChildNotice(ctx([{threadId: "k1", status: "failed"}, {threadId: "k2", status: "failed"}]));
+  assert.equal(held?.action, "wait");
+  assert.match((held as {reason: string}).reason, /^Подтреды «Задача k1», «Задача k2» ждут сброса лимита до .* МСК, повторы поставлены\.$/);
+  assert.equal(await pairs.admitChildNotice(ctx([{threadId: "k1", status: "failed"}, {threadId: "kid", status: "completed"}])), undefined);
+});

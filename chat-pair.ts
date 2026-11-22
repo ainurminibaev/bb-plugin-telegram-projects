@@ -461,6 +461,9 @@ export class ChatPairs {
   async admitChildNotice(ctx: MessageDispatchHookContext): Promise<MessageDispatchHookDecision | undefined> {
     const q = ctx.queuedMessages?.length === 1 ? ctx.queuedMessages[0] : undefined;
     const notice = q?.systemNotice;
+    if (q && notice?.kind === "child-outcome-batch" && notice.subject?.kind === "thread-batch")
+      return this.admitChildBatch(ctx.thread.id, q.id,
+        ((notice.subject as {outcomes?: {threadId: string; status: string}[]}).outcomes ?? []));
     if (!q || notice?.kind !== "child-failed" || notice.subject?.kind !== "thread") return;
     const childId = (notice.subject as {threadId?: string; id?: string}).threadId ?? (notice.subject as {id?: string}).id;
     if (!childId) return;
@@ -473,6 +476,26 @@ export class ChatPairs {
     }
     return {action: "wait", sendAt: limited.until + 10 * 60_000,
       reason: `Подтред «${limited.title}» ждёт сброса лимита до ${msk(limited.until)} МСК, повтор поставлен.`};
+  }
+
+  /**
+   * Пакет исходов подтредов: ждёт только если все исходы в нём — сбои по
+   * лимиту с поставленным повтором. Если в пакете есть готовый результат,
+   * родитель получает пакет сразу.
+   */
+  private async admitChildBatch(parent: string, queuedId: string, outcomes: {threadId: string; status: string}[]):
+    Promise<MessageDispatchHookDecision | undefined> {
+    if (!outcomes.length || outcomes.some(o => o.status !== "failed")) return;
+    const states = await Promise.all(outcomes.map(o => this.childLimit(o.threadId)));
+    if (states.some(x => !x)) return;
+    if (states.every(x => x!.state === "recovered")) {
+      void this.d.sdk.threads.queuedMessages.delete({threadId: parent, queuedMessageId: queuedId}).catch(() => undefined);
+      return {action: "wait", reason: "Подтреды продолжили работу после лимита.", sendAt: Date.now() + 60 * 60_000};
+    }
+    if (states.some(x => x!.state !== "waiting")) return;
+    const until = Math.max(...states.map(x => x!.until));
+    return {action: "wait", sendAt: until + 10 * 60_000,
+      reason: `Подтреды ${states.map(x => "«" + x!.title + "»").join(", ")} ждут сброса лимита до ${msk(until)} МСК, повторы поставлены.`};
   }
 
   /** Состояние подтреда по лимиту: ждёт повтора или уже работает дальше. */
