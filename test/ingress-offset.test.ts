@@ -11,5 +11,7 @@ test("switching Telegram servers starts the update offset over; an unrecorded in
   assert.equal(offsetForServer(store,"http://127.0.0.1:8083"),0,"the local server numbers updates anew");
   store.put("ingress:offset",151221810);
   assert.equal(offsetForServer(store,"http://127.0.0.1:8083"),151221810);
+  store.put("migration:cloud-logout",{state:"done"});
   assert.equal(offsetForServer(store,"https://api.telegram.org"),0,"and back");
+  assert.equal(store.get("migration:cloud-logout"),undefined,"a later switch logs out of the cloud again");
 });

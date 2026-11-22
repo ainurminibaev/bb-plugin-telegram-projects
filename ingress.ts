@@ -601,6 +601,8 @@ export function offsetForServer(store:Store,root:string) {
   if (known!==root) {
     if (known!==undefined) store.put("ingress:offset",0);
     store.put("ingress:api-root",root);
+    // Back on api.telegram.org the bot is logged in there again: a later switch must log it out anew.
+    if (root==="https://api.telegram.org") store.del("migration:cloud-logout");
   }
   return store.get<number>("ingress:offset") ?? 0;
 }
