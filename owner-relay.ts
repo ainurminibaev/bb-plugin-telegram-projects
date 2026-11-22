@@ -28,15 +28,21 @@ export function ownerRelay(store:Store,archive:Pick<Archive,"message">,bot:numbe
   const m=archive.message(bot,owner,args.messageId);
   if (!m || m.chat!==owner || m.chat_type!=="private") return {error:"owner_message_not_found"};
   if (m.sender!==owner) return {error:"not_the_owners_message"};
-  if (!m.text.trim()) return {error:"owner_message_has_no_text"};
+  const voice=m.file_kind==="voice" || m.file_kind==="audio" || m.file_kind==="video_note";
+  if (voice && !m.transcript?.trim()) return {error:"voice_not_transcribed_yet"};
+  if (!voice && !m.text.trim()) return {error:"owner_message_has_no_text"};
   if (now/1000-m.date>RELAY_HOURS*3600) return {error:"owner_message_too_old"};
   if (store.get(relayKey(bot,args.messageId,args.threadId))) return {error:"already_relayed_to_this_thread"};
   const when=new Date(m.date*1000).toISOString().replace("T"," ").slice(0,16)+" UTC";
   return {text:[
     `Сообщение владельца (${m.sender_name||"владелец"}, Telegram ID ${owner}) из его личного чата с ботом, ${when}, сообщение № ${m.message}.`,
     `Передано мостом дословно через тред ${via}; помощник текст не писал и не менял:`,
-    "«"+m.text+"»",
+    ...(voice ? [
+      "Это расшифровка голосового сообщения владельца, сделанная мостом; в названиях возможны ошибки распознавания:",
+      "«"+[m.text.trim(),m.transcript!.trim()].filter(Boolean).join("\n")+"»",
+    ] : ["«"+m.text+"»"]),
     "",
     `[Слова помощника, не владельца] Понял как одно действие: ${args.action}; объект: ${args.object}. Сверь со словами владельца выше: разрешено только то, что в них сказано.`,
+    ...(voice ? ["Если действие или объект в расшифровке и в строке помощника расходятся хоть в чём-то, не выполняй: попроси владельца уточнить."] : []),
   ].join("\n")};
 }

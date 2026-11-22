@@ -6,7 +6,7 @@ import {handleOwnerForumCommand} from "./forum-commands";
 import {topicStateKey} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
-import {archiveQuery,openArchive,type Archive} from "./archive";
+import {archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
 import {conversationOf,readableChats} from "./archive-access";
 import {ownerRelay,relayInput,relayKey} from "./owner-relay";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
@@ -572,6 +572,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   let chatWake: (() => void) | undefined;
   sentMessages.observe=(message)=>{ const bot=botId(); if (bot) archive?.record(bot,{message}); };
+  voiceTranscripts.observe=(chat,message,transcript)=>{ const bot=botId(); if (bot) archive?.transcript(bot,chat,message,transcript); };
   // One reading tool for the conversation archive. The calling conversation comes from the thread
   // BB names for this call; what it may read is decided in archive-access.ts.
   const archiveToolInput=archiveQuery.extend({

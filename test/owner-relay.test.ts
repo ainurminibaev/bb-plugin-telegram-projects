@@ -43,3 +43,17 @@ test("only the owner's message, only from the owner's chat, once per thread, not
   store.put(relayKey(BOT,40,"thr_worker1"),{at:1});
   assert.equal(err(ownerRelay(store as any,a,BOT,OWNER,{kind:"owner"},args(40),"thr_o",NOW*1000)),"already_relayed_to_this_thread");
 });
+
+test("the owner's voice message is relayed as the bridge's transcript, marked, with the strict check",()=>{
+  const {store,a}=setup();
+  a.record(BOT,{update_id:5,message:{message_id:50,date:NOW-40,chat:{id:OWNER,type:"private"},from:{id:OWNER,first_name:"Айнур"},
+    voice:{file_id:"V",file_unique_id:"v",duration:4}}});
+  const before=ownerRelay(store as any,a,BOT,OWNER,{kind:"owner"},args(50),"thr_owner1",NOW*1000) as {error:string};
+  assert.equal(before.error,"voice_not_transcribed_yet");
+  assert.equal(a.transcript(BOT,OWNER,50,"опубликуй выпуск ноль девять пятьдесят два"),true);
+  const r=ownerRelay(store as any,a,BOT,OWNER,{kind:"owner"},args(50),"thr_owner1",NOW*1000) as {text:string};
+  assert.match(r.text,/Это расшифровка голосового сообщения владельца, сделанная мостом/);
+  assert.match(r.text,/«опубликуй выпуск ноль девять пятьдесят два»/);
+  assert.match(r.text,/расходятся хоть в чём-то, не выполняй: попроси владельца уточнить/);
+  assert.equal(a.find(BOT,()=>true,{words:"пятьдесят"},"UTC").length,1,"the transcript is searchable");
+});

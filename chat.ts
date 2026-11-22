@@ -1,3 +1,4 @@
+import {voiceTranscripts} from "./archive";
 import {maxEncodedImages,readSavedImage,type ImageAttachment} from "./group-attachments";
 import {albumCaption,albumKind,albumKey,albumChanged,albumChangedNotice,collectAlbum,copyAlbum,releaseAlbums,sendAlbum, type AlbumMedia} from "./media-album";
 import {claimBusyExact,exactOutboxPrefix,finishBusyExact,startBusyExact,type BusyExactEvidence} from "./busy-exact-outbox";
@@ -1541,7 +1542,9 @@ export class ChatBridge {
         return;
       }
       try {
-        text = [text, await this.d.transcribe(input.voice)].filter(Boolean).join("\n");
+        const transcript = await this.d.transcribe(input.voice);
+        text = [text, transcript].filter(Boolean).join("\n");
+        if (transcript) voiceTranscripts.observe?.(input.chatId, input.messageId, transcript);
         if (this.d.signal.aborted) return;
       } catch {
         if (this.d.signal.aborted) return;

@@ -15,6 +15,7 @@ import {outboundMessagePayload} from "./outbound-message";
 import {routedArtifactKind,routedCaption} from "./routed-message";
 import {splitText} from "./chat";
 import {ReplyRoutes, stripTelegramMarkers} from "./reply-routing";
+import {voiceTranscripts} from "./archive";
 import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumScope, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
@@ -234,6 +235,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           r.text=topicPassages(matches,r.chatId)+r.text;
         }
         r.text += "\nГолосовое обращение: " + transcript;
+        voiceTranscripts.observe?.(r.chatId, r.messageId, transcript);
         delete r.voice;
       } catch {
         if (signal.aborted) return;

@@ -7,6 +7,9 @@ type Database=ReturnType<BbPluginApi["storage"]["database"]>;
 // file IDs (the bytes live in the inbox under its own retention). The agent reads the archive
 // with one tool; what a conversation may read is decided here, by the conversation that calls.
 
+/** Voice transcripts made by the bridge, for the archive. Set once by the bridge. */
+export const voiceTranscripts:{observe?:(chat:number,message:number,transcript:string)=>void}={};
+
 export type ArchiveRow={chat:number;topic:number;message:number;date:number;sender:number;senderName:string;
   chatType:string;chatTitle:string;replyTo:number|null;album:string|null;fileId:string|null;fileName:string|null;
   fileKind:string|null;fileSize:number|null;text:string};
@@ -61,6 +64,7 @@ export function archiveRow(update:any):ArchiveRow|undefined {
   const file=fileOf(m);
   const text=String(m.text ?? m.caption ?? "");
   if (!text && !file) return;
+  // A voice message is archived at once; its transcript is added when the bridge has it.
   return {chat:m.chat.id,topic:m.is_topic_message ? (m.message_thread_id ?? 0) : 0,message:m.message_id,date:m.date,
     sender:Number.isSafeInteger(sender?.id) ? sender.id : 0,senderName:String(senderName).slice(0,128),
     chatType:String(m.chat.type ?? ""),chatTitle:String(m.chat.title ?? senderName ?? "").slice(0,128),
@@ -106,6 +110,8 @@ export function openArchive(db:Database) {
       text TEXT NOT NULL, search TEXT NOT NULL, PRIMARY KEY(bot,chat,message));
     CREATE INDEX IF NOT EXISTS archive_by_date ON archive(bot,chat,topic,date);
     CREATE INDEX IF NOT EXISTS archive_by_sender ON archive(bot,sender,date);`);
+  const columns=(db.prepare("PRAGMA table_info(archive)").all() as {name:string}[]).map(c=>c.name);
+  if (!columns.includes("transcript")) db.exec("ALTER TABLE archive ADD COLUMN transcript TEXT");
   let fts=true;
   try {
     db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS archive_fts USING fts5(search, content='archive', content_rowid='rowid', tokenize='trigram');
@@ -123,6 +129,15 @@ export function openArchive(db:Database) {
       const row=archiveRow(update);
       if (row) upsert.run({bot,...row,search:searchText(row.text+" "+(row.fileName??""),row.senderName)});
       return row;
+    },
+    /** The bridge's transcript of a voice message: kept with the message and searchable. */
+    transcript(bot:number,chat:number,message:number,transcript:string) {
+      const row=db.prepare("SELECT text,file_name,sender_name FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as
+        {text:string;file_name:string|null;sender_name:string}|undefined;
+      if (!row) return false;
+      db.prepare("UPDATE archive SET transcript=?, search=? WHERE bot=? AND chat=? AND message=?")
+        .run(transcript,searchText(row.text+" "+transcript+" "+(row.file_name??""),row.sender_name),bot,chat,message);
+      return true;
     },
     /** A basic group that became a supergroup keeps its archive under the new chat ID. */
     moveChat(bot:number,from:number,to:number) { moveChat.run(to,bot,from); },
@@ -164,13 +179,13 @@ export function openArchive(db:Database) {
       return found.reverse().map(r=>({chat:r.chat,chatTitle:r.chat_title,topic:r.topic,message:r.message,
         date:new Date(r.date*1000).toISOString(),author:r.sender_name,authorId:r.sender,replyTo:r.reply_to??undefined,
         album:r.album??undefined,file:r.file_id ? {kind:r.file_kind,name:r.file_name??undefined,size:r.file_size??undefined} : undefined,
-        text:String(r.text).slice(0,2000),
+        text:String(r.text).slice(0,2000),transcript:r.transcript ? String(r.transcript).slice(0,2000) : undefined,
         link:String(r.chat).startsWith("-100") ? `https://t.me/c/${String(r.chat).slice(4)}/${r.topic ? r.topic+"/" : ""}${r.message}` : undefined}));
     },
     /** One archived message exactly as Telegram delivered it (the latest edit). */
     message(bot:number,chat:number,message:number) {
-      return db.prepare("SELECT chat,message,date,sender,sender_name,chat_type,text FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as
-        {chat:number;message:number;date:number;sender:number;sender_name:string;chat_type:string;text:string}|undefined;
+      return db.prepare("SELECT chat,message,date,sender,sender_name,chat_type,text,file_kind,transcript FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as
+        {chat:number;message:number;date:number;sender:number;sender_name:string;chat_type:string;text:string;file_kind:string|null;transcript:string|null}|undefined;
     },
     file(bot:number,chat:number,message:number) {
       return db.prepare("SELECT file_id,file_name,file_kind,file_size FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as
