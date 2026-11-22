@@ -169,8 +169,23 @@ export async function notifyGroupsAdded(ctx: SetupContext) {
         { text: "Оставить так", callback_data: "rs:k" },
       ]] } });
       ctx.store.put(key, signature);
-    } catch { /* retried on the next pass */ }
+    } catch { continue; /* retried on the next pass */ }
+    // Only a group the bot has just joined: an update never posts into an existing group.
+    if (visible) await announceInGroup(ctx, g.chat, s);
   }
+}
+
+/** An employee open to all members says once in the group how to reach it. */
+export async function announceInGroup(ctx: SetupContext, chat: number, s: GroupSettings) {
+  const key = `rights:${ctx.bot}:announced:${chat}`;
+  if (ctx.store.get(key) || installKind(ctx.store) !== "employee" || s.who !== "all" || openGroupLock(ctx.store)) return;
+  const name = ctx.botUsername ? "@" + ctx.botUsername : "мне";
+  const how = s.reply === "mention" ? `отметьте ${name} или ответьте на моё сообщение` : "напишите в группу";
+  try {
+    await ctx.tg(chat)("sendMessage", { chat_id: chat,
+      text: `Здравствуйте! Я отвечаю здесь всем участникам: ${how}. Можно просить и поручать. Написать мне лично: откройте чат со мной и нажмите «Старт» — доступ одобрит владелец.` });
+    ctx.store.put(key, Date.now());
+  } catch { /* retried on the next pass */ }
 }
 
 async function providerOf(ctx: SetupContext, chat: number) {

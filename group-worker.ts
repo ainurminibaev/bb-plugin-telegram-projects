@@ -75,7 +75,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
       store.put(sharedGroupThreadKey(threadId),true);
       store.put(sharedGroupScopeKey(chatId,topicId),true);
       store.put("group:shared-project:"+projectId,true);
-    } else if (!policy.privateChat) store.put("group:project:"+projectId,true);
+    } else if (!policy.privateChat && !policy.inOwnerProject) store.put("group:project:"+projectId,true);
     const prev=previous;
     if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly && prev.ownerTopic===policy.ownerTopic && prev.ownerSharedProject===policy.ownerSharedProject &&
         prev.ownerTopicManagerProjectId===policy.ownerTopicManagerProjectId &&
@@ -98,7 +98,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     }
     store.del(`group:context:${chatId}:${topicId}`);
     store.put("group:thread:"+threadId,key);
-    store.put(key,{...policy,projectId,acceptAfterSecond:policy.privateChat ? 0 : Math.floor(Date.now()/1000)});
+    store.put(key,{...policy,projectId,acceptAfterSecond:policy.acceptAfterSecond ?? (policy.privateChat ? 0 : Math.floor(Date.now()/1000))});
   });
 }
 

@@ -30,7 +30,7 @@ import { bindGroupTopic, groupCliRestricted, groupTyping, processGroupInputs } f
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
-import { acceptGroupUpdate, contextMediaPrefix, routeUpdate, skipExcludedForumUpdate, type GroupTopicPolicy } from "./ingress";
+import { acceptGroupUpdate, contextMediaPrefix, routeUpdate, skipExcludedForumUpdate, unboundAddressedGroupMessage, type GroupTopicPolicy } from "./ingress";
 import { accessList, accessModeKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, setAccess } from "./rights";
 import { handleConsentCallback, watchConsents } from "./consent";
 import { handleSetupUpdate, notifyGroupsAdded, welcomeScreen } from "./setup-screens";
@@ -867,26 +867,28 @@ export default async function plugin(bb: BbPluginApi) {
     return receiveLocalFile(file,file.sourceUpdateId??route.updateId,route.threadId,signal,scope,
       policy?.isolated===true,file.image && !file.document ? maxImageBytes : maxRoutedDocumentBytes);
   }
-  // A person with access talks to an ordinary thread of the employee: same project, environment,
-  // agent and instructions as the owner's private chat. One thread per person, created once.
-  async function bindPrivatePerson(owner:number,bot:number,subject:number,name:string,signal:AbortSignal) {
-    if (store.get<GroupTopicPolicy>(privatePolicyKey(subject))?.privateChat) return true;
+  // Every conversation of an employee is an ordinary thread in its own project: the same
+  // environment, agent and instructions as the owner's private chat. A person's private chat and
+  // each group topic get one thread, created on first use.
+  async function bindConversation(owner:number,bot:number,c:{chatId:number;topicId:number;title:string;
+    privateChat?:boolean;allowedSenderIds?:number[];acceptAfterSecond?:number},signal:AbortSignal) {
+    if (store.get(`group:policy:${c.chatId}:${c.topicId}`)) return true;
     const dm=store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId);
     const botUsername=store.get<string>("bot:username");
     if (!dm?.threadId || !botUsername) return false;
-    const reserve="employee:private:thread:"+bot+":"+subject;
+    const reserve="employee:conversation:thread:"+bot+":"+c.chatId+":"+c.topicId;
     const prior=store.get<{at:number;threadId?:string}>(reserve);
     let threadId=prior?.threadId;
     if (!threadId) {
-      // An unconfirmed spawn is not repeated for ten minutes, so one person never gets two threads.
+      // An unconfirmed spawn is not repeated for ten minutes, so one conversation never gets two threads.
       if (prior && Date.now()-prior.at<10*60_000) return false;
       const source=await bb.sdk.threads.get({threadId:dm.threadId,signal});
       if (!source?.environmentId || source.projectId!==dm.projectId) return false;
       store.put(reserve,{at:Date.now()});
-      const thread=await bb.sdk.threads.spawn({projectId:dm.projectId,title:"Личка: "+(name||subject),
+      const thread=await bb.sdk.threads.spawn({projectId:dm.projectId,title:c.title,
         visibility:"visible",permissionMode:"accept-edits",
         input:[{type:"text",visibility:"agent-only",mentions:[],
-          text:"This thread is a private Telegram chat with "+(name||"a person")+" (Telegram ID "+subject+"), who has access to you. Wait for a request. Reply with NO_REPLY, without using tools."}],
+          text:"This thread is the Telegram conversation «"+c.title+"». Wait for a request. Reply with NO_REPLY, without using tools."}],
         environment:{type:"reuse",environmentId:source.environmentId},
         ...(source.providerId && {providerId:source.providerId})});
       if (!thread.id || thread.projectId!==dm.projectId) return false;
@@ -894,8 +896,11 @@ export default async function plugin(bb: BbPluginApi) {
       store.put(reserve,{at:Date.now(),threadId});
     }
     if (owner!==ownerId() || bot!==botId() || stateTransferBusy) return false;
-    bindGroupTopic(store,{chatId:subject,topicId:0,threadId,privateChat:true,ownerOnly:true,allowedSenderIds:[subject],
-      requireMention:false,includeTopicContext:true,searchableHistory:true,retainFullHistory:true,
+    bindGroupTopic(store,{chatId:c.chatId,topicId:c.topicId,threadId,
+      ...(c.privateChat ? {privateChat:true as const} : {inOwnerProject:true as const}),
+      ownerOnly:!!c.privateChat,allowedSenderIds:c.allowedSenderIds,requireMention:!c.privateChat,
+      includeTopicContext:true,searchableHistory:true,retainFullHistory:true,
+      ...(c.acceptAfterSecond!==undefined && {acceptAfterSecond:c.acceptAfterSecond}),
       botId:bot,botUsername,ownerId:owner,revision:crypto.randomUUID()},dm.projectId);
     return true;
   }
@@ -2381,7 +2386,8 @@ export default async function plugin(bb: BbPluginApi) {
                   store,owner:privateOwner,bot:privateBot,
                   current:()=>ownerId()===privateOwner && botId()===privateBot && !stateTransferBusy,
                   transport:chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),
-                  bindPerson:(subject,name)=>bindPrivatePerson(privateOwner,privateBot,subject,name,signal),
+                  bindPerson:(subject,name)=>bindConversation(privateOwner,privateBot,{chatId:subject,topicId:0,
+                    title:"Личка: "+(name||subject),privateChat:true,allowedSenderIds:[subject],acceptAfterSecond:0},signal),
               },u)) {
                 store.put("ingress:offset",u.update_id+1);
                 chatWake?.();
@@ -2449,6 +2455,12 @@ export default async function plugin(bb: BbPluginApi) {
             if (cfg.chatEnabled && await handleOwnerSelection(store,u,ownerId(),botId(),tg)) {
               store.put("ingress:offset",u.update_id+1);
               continue;
+            }
+            if (cfg.chatEnabled && !legacyOperations && cfg.installKind==="employee" && privateOwner && privateBot) {
+              const unbound=unboundAddressedGroupMessage(store,u,privateBot,store.get<string>("bot:username")??"");
+              if (unbound) await bindConversation(privateOwner,privateBot,{chatId:unbound.chatId,topicId:unbound.topicId,
+                title:unbound.topicId ? `${unbound.title} · тема ${unbound.topicId}` : unbound.title,
+                acceptAfterSecond:unbound.date-1},signal).catch(()=>false);
             }
             if (cfg.chatEnabled && acceptGroupUpdate(store, u, ownerId(), botId())) continue;
             const route = routeUpdate(u, ownerId(), store.get("pair:code"));

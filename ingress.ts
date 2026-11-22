@@ -13,6 +13,8 @@ export type GroupTopicPolicy = {
   isolated?: boolean;
   /** A person's private chat with an employee, bound to an ordinary employee thread. */
   privateChat?: true;
+  /** The thread lives in the employee's own project, next to the owner's chat. */
+  inOwnerProject?: true;
   deliverySources?: string[];
   projectId?: string; // Older bindings used project and thread markers only.
   chatId: number;
@@ -577,4 +579,27 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     accepted = true;
   });
   return accepted;
+}
+
+/**
+ * A message addressed to the bot (mention, text mention or reply to the bot) in a group topic that
+ * has no thread yet, in a group the bot is a member of. An employee binds such a topic on first use:
+ * one group setting covers all its topics, including new ones.
+ */
+export function unboundAddressedGroupMessage(store: Store, update: any, botId: number, botUsername: string) {
+  const m = update?.message;
+  if (!m || !["group", "supergroup"].includes(m.chat?.type) || !Number.isSafeInteger(m.chat?.id) || m.chat.id >= 0) return;
+  if (!Number.isSafeInteger(m.from?.id) || m.from.is_bot || m.sender_chat) return;
+  const topicId = m.is_topic_message ? (m.message_thread_id ?? 0) : 0;
+  if (store.get(`group:policy:${m.chat.id}:${topicId}`)) return;
+  const member = store.get<{title?: string}>(`visibility:${botId}:group:${m.chat.id}`);
+  if (!member) return;
+  const text = m.text ?? m.caption ?? "";
+  const entities = m.entities ?? m.caption_entities ?? [];
+  const username = "@" + botUsername.toLowerCase();
+  const addressed = m.reply_to_message?.from?.id === botId || entities.some((e: any) =>
+    (e.type === "mention" && String(text).slice(e.offset, e.offset + e.length).toLowerCase() === username) ||
+    (e.type === "text_mention" && e.user?.id === botId));
+  if (!addressed) return;
+  return {chatId: m.chat.id as number, topicId, date: m.date as number, title: member.title || "группа"};
 }
