@@ -2506,7 +2506,8 @@ export default async function plugin(bb: BbPluginApi) {
             // A basic group upgraded while the bridge was away: Telegram names the new ID on request.
             for (const chat of basicGroupChats(store)) {
               // getChat still answers for an upgraded group; a member count names the new chat.
-              try { await tg("getChatMemberCount",{chat_id:chat}); }
+              // The ingress transport is bound to the owner's chat; ask about the old group directly.
+              try { await telegram(botToken,signal,15_000,()=>chat,apiRoot)("getChatMemberCount",{chat_id:chat}); }
               catch (error) { if (error instanceof TelegramFailure && error.migrateTo) migrateGroupChat(store,botId()!,chat,error.migrateTo); }
             }
           }
