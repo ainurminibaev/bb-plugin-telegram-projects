@@ -73,12 +73,25 @@ export class ReplyRoutes {
   busyIngress(threadId: string, route: Extract<ReplyRoute, {kind: "telegram"}>, digest?: string) {
     const token = randomUUID();
     const marker = this.ingress(threadId, route, undefined, undefined, digest, token);
-    const label = randomUUID();
-    this.store.put("reply:busy-ingress:" + token, label);
+    const uuid = randomUUID();
+    const short = uuid.slice(0, 8);
+    const reserved = "reply:busy-selector:" + short;
+    // Reserve before BB accepts the request, so concurrent pending inputs
+    // cannot receive the same selector. Retain UUIDs as the collision fallback.
+    let label: string = uuid;
+    this.store.atomic(() => {
+      if (!this.store.get(reserved)) {
+        this.store.put(reserved, true);
+        label = short;
+      }
+      this.store.put("reply:busy-ingress:" + token, label);
+    });
     return [marker, {type: "text" as const, visibility: "agent-only" as const, mentions: [],
       text: "This private Telegram message arrived while work was running. Answer the owner's message promptly in a separate public assistant message. " +
         "Start that message with this line exactly: [telegram-answer:" + label + "]. On the following lines write only the answer intended for this message. " +
-        "End it with [/telegram-answer] on a line of its own. The bridge sends the enclosed answer immediately. Continue the ongoing work in a separate message."}];
+        "End it with [/telegram-answer] on a line of its own. The bridge sends the enclosed answer only if the selector matches exactly. " +
+        "Copy only the selector shown for this message. Never guess or reuse another message's selector. " +
+        "Continue the ongoing work in a separate message."}];
   }
   private markerId(input: readonly {type: string; text?: string; visibility?: string}[]) {
     const ids = input.flatMap(block => {
@@ -101,6 +114,10 @@ export class ReplyRoutes {
     if (!turn?.requestIds.includes(requestId)) return;
     const route = this.routeOf(threadId, requestId);
     return route?.kind === "telegram" && !this.cancelled(route) ? route : undefined;
+  }
+  busyLabel(threadId: string, requestId: string) {
+    const label = this.store.get<string>("reply:busy-source-label:" + this.requestKey(threadId,requestId));
+    return label && this.store.get("reply:busy-answer:"+label) === requestId ? label : undefined;
   }
   delegatedIngress(parentThreadId: string, token: string, childThreadId: string | null) {
     if (!/^[a-f0-9-]{36}$/.test(token)) throw Error("invalid_parent_route_token");
@@ -298,6 +315,7 @@ export class ReplyRoutes {
     const label = this.store.get<string>("reply:busy-ingress:" + token);
     if (label) {
       this.store.put("reply:busy-answer:" + label, data.requestId);
+      this.store.put("reply:busy-source-label:" + this.requestKey(threadId,data.requestId),label);
       this.store.put(this.auxiliaryKey(threadId, data.requestId), {kind: "busy-reply"});
     }
     // A persisted native request proves BB accepted the submission even if the

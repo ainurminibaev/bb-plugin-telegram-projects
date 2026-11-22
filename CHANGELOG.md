@@ -1,3 +1,9 @@
+# 0.9.48
+
+- Recover a saved, addressed text reply from the original BB turn journal on native turn completion. Preserve direct delivery for replies observed earlier in the same turn.
+- Use one atomic delivery record for both paths. Report unproven results as unconfirmed and do not resend an uncertain Telegram delivery.
+- Keep file replies on their existing path and preserve silent replies and late-album warnings.
+
 # 0.9.47
 
 - Collect Telegram photo and document albums into one ordered BB request, preserve captions and the original reply address, and warn when a new album item arrives after dispatch.

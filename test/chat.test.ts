@@ -19,6 +19,7 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
   let failedAttempts = 0;
   let albumFailure: TelegramFailure | undefined;
   let malformedAlbum = false;
+  let lostReceiptMethod: string | undefined;
   let events: any[] = [];
   let interactions: any[] = [];
   const thread = {
@@ -123,6 +124,7 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
         throw deliveryFailure;
       }
       sent.push({ method, ...payload });
+      if (method===lostReceiptMethod) throw new TelegramFailure("telegram_network",30,true);
       if (method === "copyMessages") return [{message_id:++message},{message_id:++message}] as any;
       if (method === "sendMediaGroup") {
         if (albumFailure) { const error = albumFailure; albumFailure = undefined; throw error; }
@@ -176,6 +178,7 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
     input,
     press,
     malformedAlbum: () => { malformedAlbum = true; },
+    loseReceiptFor: (method:string) => { lostReceiptMethod=method; },
     failNextAlbum: (error: TelegramFailure) => { albumFailure = error; },
     failNextDelivery: (error = new TelegramFailure("telegram_429", 20, false), attempts = 1) => {
       deliveryFailure = error;
@@ -2706,6 +2709,166 @@ for (const busy of [false,true]) for (const kind of ["html","photo-caption","pho
   });
 }
 
+test("a busy reply can recover an exact selector with two pending requests and one receipt after restart", async () => {
+  const f = fixture();
+  try {
+    f.store.put("chat:binding:0", {topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"paired",ready:true,cursor:0});
+    f.thread.status = "active";
+    const inputs = [f.input("Что со сборкой?", 0), f.input("Что с отчётом?", 0)];
+    for (const input of inputs) await f.bridge.handle(input);
+    const dispatches = f.calls.filter(call => call[0] === "send").map(call => call[1]);
+    assert.deepEqual(dispatches.map(d => d.mode), ["steer-if-active", "steer-if-active"]);
+    const selectors = dispatches.map(d => /\[telegram-answer:([a-f0-9]{8})\]/.exec(d.input.at(-1).text)![1]);
+    assert.notEqual(selectors[0], selectors[1]);
+
+    const routes = new ReplyRoutes(f.store);
+    const foreign = "1decbe44-a1d3-43ed-b714-6bc35e6f5871";
+    routes.record("thr_one", "another-request", {kind:"telegram",chatId:OWNER_ID,topicId:0,updateId:88,messageId:99});
+    routes.accept("thr_one", "another-turn", "another-request");
+    f.store.put("reply:busy-answer:" + foreign, "another-request");
+    assert.ok(routes.busyAnswer("thr_one", "another-turn", foreign));
+
+    const scope = {kind:"turn",turnId:"current"};
+    const assistant = (seq:number, selector:string, body:string) => ({
+      seq,type:"item/completed",scope,
+      data:{item:{type:"agentMessage",text:`[telegram-answer:${selector}]\n${body}\n[/telegram-answer]`}},
+    });
+    // Pick a real one-character typo that cannot equal either pending code.
+    const typo = [..."0123456789abcdef"].map(digit => selectors[1].slice(0, 7) + digit)
+      .find(candidate => !selectors.includes(candidate))!;
+    const events = [
+      ...dispatches.flatMap((d, index) => [
+        {seq:index*2+1,type:"client/turn/requested",scope:{kind:"thread"},
+          data:{requestId:"check-"+index,originPluginId:"telegram-projects",input:d.input}},
+        {seq:index*2+2,type:"turn/input/accepted",scope,data:{clientRequestId:"check-"+index}},
+      ]),
+      assistant(5, typo, "Отчёт готов."),
+      assistant(6, foreign, "Отчёт готов."),
+    ];
+    f.thread.status = "idle";
+    f.setEvents(events);
+    await f.bridge.observe();
+    await f.bridge.flush();
+    assert.equal(f.sent.filter(m => m.method === "sendMessage").length, 0);
+    assert.equal(f.store.list("chat:out:event:paired:busy-request:").length, 0);
+
+    const exact = assistant(7, selectors[1], "Отчёт готов.");
+    f.setEvents([...events, exact, {seq:8,type:"turn/completed",scope,data:{status:"completed"}}]);
+    await f.restart().observe();
+    await f.restart().flush();
+    const deliveryWatch = f.store.get<{cursor:number}>("reply:watch:paired")!;
+    f.store.put("reply:watch:paired", {...deliveryWatch,cursor:6});
+    await f.restart().observe(); // Re-observe the same event from the persisted ledger.
+    await f.restart().flush();
+
+    const sends = f.sent.filter(m => m.method === "sendMessage");
+    assert.deepEqual(sends.map(m => [m.text, m.reply_parameters?.message_id]), [["Отчёт готов.", inputs[1].messageId]]);
+    const outboxKey = "chat:out:event:paired:busy-request:" + selectors[1];
+    const receipt = f.store.get<{sentId:number;taskRoute:{updateId:number;messageId:number}}>(outboxKey)!;
+    assert.ok(receipt.sentId > 0);
+    assert.equal(f.store.get("chat:receipt:" + outboxKey + ":0"), receipt.sentId);
+    assert.equal(receipt.taskRoute.updateId, inputs[1].updateId);
+    assert.equal(receipt.taskRoute.messageId, inputs[1].messageId);
+    assert.equal(f.store.list("chat:out:event:paired:busy-request:").length, 1);
+  } finally { f.cleanup(); }
+});
+
+test("a UUID issued before the short-selector upgrade remains deliverable in exactly its accepted turn", async () => {
+  const f = fixture();
+  try {
+    const binding = {topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"paired",ready:true,cursor:0};
+    f.store.put("chat:binding:0", binding);
+    const routes = new ReplyRoutes(f.store);
+    const uuid = "11111111-1111-4111-8111-111111111111";
+    const token = "22222222-2222-4222-8222-222222222222";
+    const input = f.input("Какой статус?", 0);
+    const marker = routes.ingress("thr_one", {kind:"telegram",chatId:OWNER_ID,topicId:0,
+      updateId:input.updateId,messageId:input.messageId}, undefined, undefined, undefined, token);
+    f.store.put("reply:busy-ingress:" + token, uuid);
+    const root = {kind:"turn",turnId:"legacy-turn"};
+    const result = `[telegram-answer:${uuid}]\nСборка закончилась.\n[/telegram-answer]`;
+    f.setEvents([
+      {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"legacy",originPluginId:"telegram-projects",input:[marker]}},
+      {seq:2,type:"turn/input/accepted",scope:root,data:{clientRequestId:"legacy"}},
+      {seq:3,type:"item/completed",scope:{...root,turnId:"foreign-turn"},data:{item:{type:"agentMessage",text:result}}},
+      {seq:4,type:"item/completed",scope:root,
+        data:{item:{type:"agentMessage",text:result.replace(uuid, uuid.slice(0,-1)+"0")}}},
+    ]);
+    await f.bridge.observe();
+    await f.bridge.flush();
+    assert.equal(f.sent.filter(m => m.method === "sendMessage").length, 0);
+    f.setEvents([{seq:5,type:"item/completed",scope:root,data:{item:{type:"agentMessage",text:result}}}]);
+    await f.restart().observe();
+    await f.restart().flush();
+    assert.deepEqual(f.sent.filter(m => m.method === "sendMessage").map(m => [m.text, m.reply_parameters?.message_id]),
+      [["Сборка закончилась.", input.messageId]]);
+  } finally { f.cleanup(); }
+});
+
+for (const outcome of ["saved", "wrong-selector", "conflicting", "unknown-receipt", "rebound"] as const) {
+  test(`native completion recovers a saved busy reply without starting a turn: ${outcome}`, async () => {
+    const f = fixture();
+    try {
+      const binding = {topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"paired",ready:true,cursor:0};
+      f.store.put("owner:id", OWNER_ID);
+      f.store.put("chat:binding:0", binding);
+      f.thread.status = "active";
+      const inputs = [f.input("Статус сборки?", 0),f.input("Статус отчёта?", 0)];
+      for (const input of inputs) await f.bridge.handle(input);
+      const dispatched = f.calls.filter(call => call[0] === "send").map(call => call[1]);
+      const labels = dispatched.map(d => /\[telegram-answer:([a-f0-9]{8})\]/.exec(d.input.at(-1).text)![1]);
+      const scope = {kind:"turn",turnId:"original"};
+      const output = (seq:number, label:string, body:string) => ({
+        seq,type:"item/completed",scope,data:{item:{type:"agentMessage",text:
+          `[telegram-answer:${label}]\n${body}\n[/telegram-answer]`}},
+      });
+      const before = [
+        ...dispatched.flatMap((d,index) => [
+          {seq:2*index+1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"ack-"+index,
+            originPluginId:"telegram-projects",target:{kind:"steer",expectedTurnId:scope.turnId},input:d.input}},
+          {seq:2*index+2,type:"turn/input/accepted",scope,data:{clientRequestId:"ack-"+index}},
+        ]),
+        output(5,labels[0],"Сборка готова."),
+      ];
+      f.thread.status = "idle";
+      f.setEvents(before);
+      await f.bridge.observe();
+      await f.bridge.flush();
+      const label = outcome === "wrong-selector" ? "33333333-3333-4333-8333-333333333333" : labels[1];
+      const completed = [output(6,label,"Отчёт готов."),
+        ...(outcome === "conflicting" ? [output(7,label,"Отчёт ещё готовится.")] : []),
+        {seq:8,type:"turn/completed",scope,data:{status:"completed"}}];
+      if (outcome === "rebound") f.store.put("chat:binding:0",{...binding,revision:"changed"});
+      f.setEvents([...before,...completed]);
+      const restarted=f.restart();
+      await restarted.observe();
+      if (outcome === "unknown-receipt") f.failNextDelivery(new TelegramFailure("telegram_network",0,true));
+      await restarted.flush();
+      const watch=f.store.get<{cursor:number}>("reply:watch:paired")!;
+      f.store.put("reply:watch:paired",{...watch,cursor:0});
+      await f.restart().observe();
+      await f.restart().flush();
+      const sends=f.sent.filter(m => m.method==="sendMessage");
+      const uncertain=outcome==="unknown-receipt", rebound=outcome==="rebound";
+      const status=outcome==="wrong-selector" || outcome==="conflicting";
+      assert.deepEqual(sends.map(m=>[m.reply_parameters?.message_id,m.text]),[
+        [inputs[0].messageId,"Сборка готова."],
+        ...(uncertain || rebound ? [] : [[inputs[1].messageId,status ?
+          "Не удалось подтвердить ответ по журналу. Состояние исходной операции неизвестно." : "Отчёт готов."]]),
+      ]);
+      const rows=f.store.list<{taskRoute:{messageId:number};busyExact:string;evidence:{completedSeq?:number;itemSeq?:number}}>("chat:out:busy-exact:");
+      assert.equal(rows.length,rebound?1:2);
+      const recovered=rows.find(row=>row.value.taskRoute.messageId===inputs[1].messageId)?.value;
+      if (!rebound) {
+        assert.equal(recovered?.busyExact,uncertain?"unknown":"sent");
+        assert.equal(recovered?.evidence.completedSeq,8);
+        assert.equal(recovered?.evidence.itemSeq,status?undefined:6);
+      }
+      assert.equal(f.calls.filter(call=>call[0]==="send").length,2);
+    } finally {f.cleanup();}
+  });
+}
+
 test("an existing busy reply from 0.9.44 prevents replay under a new event sequence",async()=>{
   const f=fixture();
   try {
@@ -2925,5 +3088,87 @@ test("late unique occurrence suppresses an album result still waiting in the out
     assert.equal(warning.length,1);
     assert.equal(warning[0].reply_parameters.message_id,31);
     assert.equal(f.calls.filter(c=>c[0]==="send").length,0);
+  } finally {f.cleanup();}
+});
+
+async function nativeBusyEvents(f:ReturnType<typeof fixture>, input:ChatInput, result:string) {
+  f.store.put("owner:id",OWNER_ID);
+  f.store.put("chat:binding:0",{topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"paired",ready:true,cursor:0});
+  f.thread.status="active";
+  await f.bridge.handle(input);
+  const send=f.calls.find(call=>call[0]==="send")[1];
+  const tag=send.input.at(-1).text.match(/telegram-answer:([a-f0-9]{8})/)?.[1];
+  assert.ok(tag);
+  const scope={kind:"turn",turnId:"native-busy"};
+  f.thread.status="idle";
+  const response=`[telegram-answer:${tag}]\n${result}\n[/telegram-answer]`;
+  const events=[
+    {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{
+      requestId:"test-native-request",originPluginId:"telegram-projects",input:send.input,
+      target:{kind:"steer",expectedTurnId:scope.turnId},
+    }},
+    {seq:2,type:"turn/input/accepted",scope,data:{clientRequestId:"test-native-request"}},
+    {seq:3,type:"item/completed",scope,data:{item:{type:"agentMessage",text:response}}},
+    {seq:4,type:"turn/completed",scope,data:{status:"completed"}},
+  ];
+  f.setEvents(events);
+  return events;
+}
+
+for (const kind of ["photo","document"] as const) test(`lost ${kind} receipt stays on the normal file route through recovery and restart`,async()=>{
+  const f=fixture();
+  const root=mkdtempSync(join(tmpdir(),"native-busy-file-"));
+  try {
+    const name=kind==="photo"?"fixture.png":"fixture.txt";
+    const file=join(root,name);
+    const bytes=kind==="photo"
+      ? Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==","base64")
+      : Buffer.from("Inert document.\n");
+    writeFileSync(file,bytes);
+    f.sdk.environments.get=async()=>({path:root});
+    const method=kind==="photo"?"sendPhoto":"sendDocument";
+    f.loseReceiptFor(method);
+    const input=f.input("Верни приложенный образец.",0);
+    await nativeBusyEvents(f,input,`[Fixture](${file})`);
+    await f.bridge.observe();await f.bridge.flush();
+    const restarted=f.restart();
+    await restarted.observe();await restarted.flush();await restarted.flush();
+    const files=f.sent.filter(row=>row.method===method);
+    assert.equal(files.length,1);
+    assert.equal(files[0].reply_parameters.message_id,input.messageId);
+    assert.deepEqual(Buffer.from(await files[0][kind].arrayBuffer()),bytes);
+    assert.equal(f.store.list("chat:out:busy-exact:").length,0);
+    assert.ok(f.store.list("chat:file:").some(row=>row.value==="uncertain"));
+    assert.equal(f.calls.filter(call=>call[0]==="send").length,1);
+  } finally {f.cleanup();rmSync(root,{recursive:true,force:true});}
+});
+
+test("a native busy request with an explicit silent reply does not create a recovery notice",async()=>{
+  const f=fixture();
+  try {
+    const input=f.input("Не отвечай.",0);
+    await nativeBusyEvents(f,input," NO_REPLY ");
+    await f.bridge.observe();await f.bridge.flush();await f.restart().flush();
+    assert.equal(f.sent.filter(row=>row.method==="sendMessage").length,0);
+    assert.equal(f.store.list("chat:out:busy-exact:").length,0);
+  } finally {f.cleanup();}
+});
+
+test("a late album part stops saved busy text already queued in the shared outbox",async()=>{
+  const f=fixture();
+  try {
+    const input=f.input("Проверь порядок вложений.",0);
+    const albumKey="fixture-late-album";
+    f.store.put("chat:in:"+input.updateId,{input:{...input,albumKey},state:"done",at:Date.now()});
+    await nativeBusyEvents(f,input,"Порядок проверен.");
+    await f.bridge.observe();
+    const exact=f.store.list<{busyExact:string}>("chat:out:busy-exact:");
+    assert.equal(exact.length,1);
+    assert.equal(exact[0].value.busyExact,"queued");
+    f.store.put(albumKey,{changed:true});
+    await f.bridge.flush();await f.restart().flush();
+    assert.equal(f.sent.filter(row=>row.method==="sendMessage").length,0);
+    assert.equal(f.store.get<{busyExact:string}>(exact[0].key)?.busyExact,"cancelled");
+    assert.equal(f.calls.filter(call=>call[0]==="send").length,1);
   } finally {f.cleanup();}
 });

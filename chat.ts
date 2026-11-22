@@ -1,5 +1,6 @@
 import {maxEncodedImages,readSavedImage,type ImageAttachment} from "./group-attachments";
 import {albumCaption,albumKind,albumKey,albumChanged,albumChangedNotice,collectAlbum,copyAlbum,releaseAlbums,sendAlbum, type AlbumMedia} from "./media-album";
+import {claimBusyExact,exactOutboxPrefix,finishBusyExact,startBusyExact,type BusyExactEvidence} from "./busy-exact-outbox";
 import {sharedGroupThreads} from "./group-binding";
 import {NO_REPLY} from "./group-result";
 import {maxOutboundDocumentBytes,outboundMessagePayload} from "./outbound-message";
@@ -141,6 +142,13 @@ type QuestionDelivery = {
   turnId?: string;
   route?: ReplyRoute;
 };
+type NativeBusyRequest = {revision:string;turnId:string;label:string};
+type NativeBusySource = {
+  revision:string;requestId:string;label:string;acceptedSeq:number;
+  saved?:{itemSeq:number;text:string};
+  ambiguous?:true;legacy?:true;closed?:true;silent?:true;
+};
+const busySourcePrefix = "reply:busy-observed-source:";
 type Outbox = {
   taskRoute?: ReplyRoute;
   coversChildResults?: boolean;
@@ -959,7 +967,7 @@ export class ChatBridge {
     ))
       if (
         ((key.startsWith("chat:in:") && (value as Inbox).state === "done") ||
-          (key.startsWith("chat:out:") && (value as Outbox).sentId) ||
+          (key.startsWith("chat:out:") && !key.startsWith(exactOutboxPrefix) && (value as Outbox).sentId) ||
           key.startsWith("chat:async-question:")) &&
         value.at &&
         value.at < Date.now() - 7 * 86400_000
@@ -2616,6 +2624,104 @@ export class ChatBridge {
       ? [...result.slice(0, 3), `Ещё задач выполняется: ${result.length - 3}`]
       : result;
   }
+  private nativeBusyBinding(b: Binding) {
+    const current = this.binding(b.topicId);
+    return this.s.get("rights:install-kind") !== "employee" && Boolean(b.threadId) &&
+      current?.threadId === b.threadId && current?.revision === b.revision;
+  }
+  private nativeBusyRequest(b: Binding, requestId: string, turnId: string) {
+    if (!this.nativeBusyBinding(b)) return;
+    const label = this.routes.busyLabel(b.threadId!,requestId);
+    const key = "reply:busy-observed-request:" + JSON.stringify([b.threadId,requestId]);
+    if (label && !this.s.get(key)) this.s.put(key,{revision:b.revision,turnId,label} satisfies NativeBusyRequest);
+  }
+  private nativeBusyAccepted(b: Binding, requestId: string, turnId: string, acceptedSeq: number) {
+    const request = this.s.get<NativeBusyRequest>("reply:busy-observed-request:" + JSON.stringify([b.threadId,requestId]));
+    if (!request || request.revision !== b.revision || request.turnId !== turnId || !this.nativeBusyBinding(b)) return;
+    const route = this.routes.busyAnswer(b.threadId!,turnId,request.label);
+    if (!route || route.chatId !== this.d.owner() || route.topicId !== b.topicId || !route.messageId) return;
+    const key = busySourcePrefix + JSON.stringify([b.threadId,turnId,request.label]);
+    if (!this.s.get(key)) this.s.put(key,{
+      revision:b.revision,requestId,label:request.label,acceptedSeq,
+    } satisfies NativeBusySource);
+  }
+  private queueNativeBusy(b: Binding, turnId: string, source: NativeBusySource,
+      text: string, producer: "observer"|"recovery", evidence: BusyExactEvidence) {
+    const route = this.routes.busyAnswer(b.threadId!,turnId,source.label);
+    if (!route || route.chatId !== this.d.owner() || route.topicId !== b.topicId || !route.messageId ||
+        this.albumIsChanged({taskRoute:route})) return;
+    claimBusyExact(this.s,{
+      ownerId:route.chatId,topicId:b.topicId,revision:source.revision,threadId:b.threadId!,
+      taskRoute:{...route,messageId:route.messageId},text,at:Date.now(),retryAt:0,busyExact:"queued",evidence,
+    },producer);
+    this.d.wake?.();
+  }
+  private observeNativeBusyResult(b: Binding, turnId: string, label: string, raw: string, seq: number, completed: boolean) {
+    const key = busySourcePrefix + JSON.stringify([b.threadId,turnId,label]);
+    const source = this.s.get<NativeBusySource>(key);
+    if (!source) return false; // Older in-flight protocol.
+    if (source.closed || source.revision !== b.revision || seq <= source.acceptedSeq ||
+        !this.nativeBusyBinding(b)) return true;
+    if (source.legacy) return false;
+    if (!hasAssistantReply(raw)) {
+      this.s.put(key,{...source,silent:true});
+      return true;
+    }
+    const text = cleanAssistantText(raw).trim();
+    if (!text || /(?:bb-telegram-|telegram-answer:)/.test(text)) return true;
+    // Normal delivery retains its existing handling of artifacts and multipart
+    // text. Recovery never opens files or tries to reconstruct a multipart send.
+    const parts = renderTelegramParts(text);
+    if (localArtifacts(raw,{relative:true}).length || parts.length !== 1) {
+      this.s.put(key,{...source,legacy:true});
+      return false;
+    }
+    if (source.ambiguous || (source.saved && source.saved.text !== parts[0])) {
+      this.s.put(key,{...source,saved:undefined,ambiguous:true});
+      return true;
+    }
+    const saved = source.saved ?? {itemSeq:seq,text:parts[0]};
+    if (!source.saved) this.s.put(key,{...source,saved});
+    // In a batch that already contains completion, send through the recovery
+    // path. For a running turn, preserve immediate addressed delivery.
+    if (!completed) this.queueNativeBusy(b,turnId,source,saved.text,"observer",{
+      requestId:source.requestId,acceptedSeq:source.acceptedSeq,itemSeq:saved.itemSeq,disposition:"saved-result",
+    });
+    return true;
+  }
+  private nativeBusySources(b: Binding, turnId: string) {
+    const prefix = busySourcePrefix + JSON.stringify([b.threadId,turnId]).slice(0,-1) + ",";
+    return this.s.list<NativeBusySource>(prefix);
+  }
+  private recoverNativeBusy(b: Binding, turnId: string, completedSeq: number) {
+    if (!this.nativeBusyBinding(b)) return;
+    for (const {key,value:source} of this.nativeBusySources(b,turnId)) {
+      if (source.closed || source.revision !== b.revision || source.acceptedSeq >= completedSeq) continue;
+      if (!source.legacy) {
+        const saved = source.saved && source.saved.itemSeq < completedSeq ? source.saved : undefined;
+        if (saved || !source.silent) {
+          const text = saved?.text ?? renderTelegramParts(this.tr("Не удалось подтвердить ответ по журналу. Состояние исходной операции неизвестно."))[0];
+          this.queueNativeBusy(b,turnId,source,text,"recovery",{
+            requestId:source.requestId,acceptedSeq:source.acceptedSeq,itemSeq:saved?.itemSeq,completedSeq,
+            disposition:saved?"saved-result":"status-only",
+          });
+        }
+      }
+      this.s.put(key,{...source,saved:undefined,closed:true});
+    }
+  }
+  private async flushNativeBusy(key: string) {
+    const delivery=startBusyExact(this.s,key,row=>!this.albumIsChanged(row));
+    if (!delivery) return;
+    let sentId: number|undefined;
+    try {
+      const receipt=await this.d.tg("sendMessage",{chat_id:delivery.ownerId,text:delivery.text,parse_mode:"HTML",
+        message_thread_id:delivery.topicId||undefined,disable_notification:true,link_preview_options:{is_disabled:true},
+        reply_parameters:{message_id:delivery.taskRoute.messageId,allow_sending_without_reply:false}});
+      if (Number.isSafeInteger(receipt?.message_id) && receipt.message_id>0) sentId=receipt.message_id;
+    } catch { /* It may already have reached Telegram. No second attempt. */ }
+    finishBusyExact(this.s,key,sentId);
+  }
   async observe() {
     let bindingFailed = false;
     let bindingChecked = false;
@@ -2662,6 +2768,9 @@ export class ChatBridge {
         if (current?.revision !== b.revision || current.threadId !== b.threadId)
           continue;
         const observingKey = "reply:observing-turn:" + b.threadId;
+        const completed = new Set(events.flatMap(event =>
+          event.type === "turn/completed" && event.scope.kind === "turn" && event.data.status === "completed" ?
+            [event.scope.turnId] : []));
         for (const event of events) {
           if (event.type === "client/turn/requested") {
             const subject = event.data.systemMessageSubject;
@@ -2675,12 +2784,17 @@ export class ChatBridge {
               if (!this.routes.inheritOutcomes(b.threadId,event.data.requestId,outcomes))
                 this.routes.unroutedNotice(b.threadId,event.data.requestId);
               this.s.put("reply:notification-request:" + b.threadId + ":" + event.data.requestId, true);
-            } else this.routes.requested(b.threadId, event.data);
+            } else if (this.routes.requested(b.threadId,event.data) &&
+                event.data.originPluginId === "telegram-projects" && event.data.target?.kind === "steer" &&
+                event.data.target.expectedTurnId) {
+              this.nativeBusyRequest(b,event.data.requestId,event.data.target.expectedTurnId);
+            }
             b.cursor = event.seq;
             continue;
           }
           if (event.type === "turn/input/accepted" && event.scope.kind === "turn") {
             this.routes.accept(b.threadId, event.scope.turnId, event.data.clientRequestId);
+            this.nativeBusyAccepted(b,event.data.clientRequestId,event.scope.turnId,event.seq);
             if (this.s.get("reply:notification-request:" + b.threadId + ":" + event.data.clientRequestId))
               this.s.put("reply:notification-turn:" + b.threadId + ":" + event.scope.turnId, true);
             this.s.put("reply:active-turn:" + b.threadId, event.scope.turnId);
@@ -2698,10 +2812,19 @@ export class ChatBridge {
               event.data.item.type === "agentMessage" && !event.data.item.parentToolCallId) {
             const text = event.data.item.text.trim();
             if (text.startsWith("[telegram-answer:")) {
-              const reply = /^\[telegram-answer:([a-f0-9-]{36})\][ \t]*\r?\n([\s\S]+?)\r?\n\[\/telegram-answer\]$/.exec(text);
+              const reply = /^\[telegram-answer:([a-f0-9]{8}|[a-f0-9-]{36})\][ \t]*\r?\n([\s\S]+?)\r?\n\[\/telegram-answer\]$/.exec(text);
               const route = reply && this.routes.busyAnswer(b.threadId, event.scope.turnId, reply[1]);
-              if (route && route.chatId === this.d.owner() && route.topicId === b.topicId && hasAssistantReply(reply[2]) &&
+              if (route && route.chatId === this.d.owner() && route.topicId === b.topicId &&
                   !/\[\/?telegram-answer[\]:]/.test(reply[2])) {
+                if (this.observeNativeBusyResult(b,event.scope.turnId,reply[1],reply[2].trim(),event.seq,
+                    completed.has(event.scope.turnId))) {
+                  b.cursor = event.seq;
+                  continue;
+                }
+                if (!hasAssistantReply(reply[2])) {
+                  b.cursor = event.seq;
+                  continue;
+                }
                 const prefix="event:"+b.revision+":";
                 const alreadyQueued=this.s.list<Outbox>("chat:out:"+prefix+"busy:").some(({value})=>{
                   const previous=value.taskRoute;
@@ -2717,6 +2840,8 @@ export class ChatBridge {
             }
           }
           if (event.scope.kind !== "turn" || !this.canDeliver(b, event.scope.turnId)) {
+            if (event.type === "turn/completed" && event.scope.kind === "turn" && event.data.status === "completed")
+              this.recoverNativeBusy(b,event.scope.turnId,event.seq);
             b.cursor = event.seq;
             continue;
           }
@@ -2781,7 +2906,12 @@ export class ChatBridge {
             const writtenAt = this.s.get<number>(timeKey);
             const route = this.routes.destination(b.threadId,event.scope.turnId);
             const legacyKey = "chat:out:event:" + b.revision + ":" + event.seq;
-            if (text?.trim() && route?.kind === "telegram" && !this.s.get(legacyKey)) {
+            const completedTurn = event.scope.turnId;
+            const addressedBusy = route?.kind === "telegram" &&
+              this.nativeBusySources(b,completedTurn).some(({value:source}) =>
+                source.revision === b.revision &&
+                this.routes.sameTask(route,this.routes.busyAnswer(b.threadId!,completedTurn,source.label)));
+            if (text?.trim() && !addressedBusy && route?.kind === "telegram" && !this.s.get(legacyKey)) {
               const {body, claims} = splitChildResultClaims(text);
               const turnId = event.scope.turnId;
               const native = this.routes.nativeOutcomes(b.threadId, turnId);
@@ -2797,6 +2927,7 @@ export class ChatBridge {
             }
             this.s.del(k);
             this.s.del(timeKey);
+            this.recoverNativeBusy(b,event.scope.turnId,event.seq);
           }
           if (
             event.type === "turn/completed" &&
@@ -2897,7 +3028,7 @@ export class ChatBridge {
           ["telegram_400", "message_missing"].includes(error.code)) this.s.del(key);
     }
   }
-  private albumIsChanged(o:Outbox) {
+  private albumIsChanged(o:Pick<Outbox,"taskRoute">) {
     return o.taskRoute?.kind==="telegram" &&
       albumChanged(this.s,this.s.get<Inbox>("chat:in:"+o.taskRoute.updateId)?.input.albumKey);
   }
@@ -3122,6 +3253,11 @@ export class ChatBridge {
       // A final delivered earlier in this batch may have cancelled queued progress.
       const o = this.s.get<Outbox>(key);
       if (!o || o.sentId || o.retryAt > Date.now()) continue;
+      if (key.startsWith(exactOutboxPrefix)) {
+        count++;
+        await this.flushNativeBusy(key);
+        continue;
+      }
       if (this.routes.cancelled(o.taskRoute) || (o.ownerId !== undefined && o.ownerId !== this.d.owner())) {
         this.s.put(key, {...o, sentId: -1, text: "", keys: undefined});
         continue;

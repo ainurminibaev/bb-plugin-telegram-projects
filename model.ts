@@ -63,6 +63,7 @@ export interface Store {
   del(key: string): void;
   list<T>(prefix: string): { key: string; value: T }[];
   atomic(fn: () => void): void;
+  atomicBusyExact?(fn: () => void): void;
 }
 export const escapeHtml = (s: string) =>
   s

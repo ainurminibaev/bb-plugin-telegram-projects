@@ -490,6 +490,9 @@ export default async function plugin(bb: BbPluginApi) {
     atomic(fn) {
       db.transaction(fn)();
     },
+    atomicBusyExact(fn) {
+      db.transaction(fn).immediate();
+    },
   };
   const lifetime = new AbortController();
   let bridge: ChatBridge | undefined;
