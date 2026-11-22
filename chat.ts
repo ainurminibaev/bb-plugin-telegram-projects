@@ -84,8 +84,6 @@ export const FORWARD_COMMENT_MS = 10_000;
 export const FORWARD_FOLLOWUP_MS = 30_000;
 const FORWARD_PREFIX = "[Пересланное сообщение]\n";
 function collectionWindow(input: ChatInput, normalMs: number) {
-  const promise = /(?:жди|подожди|погоди|сейчас (?:пришлю|перешлю|скину|запишу)).{0,40}(?:файл|фото|голосов|аудио|ссылк|пост|сообщени)/iu;
-  if (!input.forwarded && promise.test(input.text ?? "")) return 90_000;
   return input.forwarded && normalMs ? Math.max(normalMs, FORWARD_COMMENT_MS) : normalMs;
 }
 function forwardedWithQuestion(parts: ChatInput[], texts: string[]) {

@@ -6,6 +6,8 @@ import {handleOwnerForumCommand} from "./forum-commands";
 import {topicStateKey} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
+import {archiveQuery,openArchive,type Archive} from "./archive";
+import {conversationOf,readableChats} from "./archive-access";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
 import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
@@ -18,7 +20,7 @@ import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLooku
 import {cleanInbox} from "./inbox-retention";
 import {openTopicSearch,historyPrefix,topicPassages} from "./topic-search";
 import { transcribeWithVoiceRouter } from "./voice-router";
-import {maxRoutedDocumentBytes, saveLocalTelegramFile, telegramApiRoot as checkedApiRoot } from "./telegram-files";
+import {maxRoutedDocumentBytes, safeTelegramFilename, saveLocalTelegramFile, telegramApiRoot as checkedApiRoot } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
 import { translate } from "./locale";
 import {
@@ -51,7 +53,7 @@ import {
   type Events,
 } from "./events";
 import { makeChatControlPublisher, writeJsonAtomic } from "./json-file";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomInt } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -63,6 +65,7 @@ import {
 } from "node:fs";
 import {
   telegram,
+  sentMessages,
   transcribeTelegramVoice, downloadGroupImage, receiveCloudTelegramDocument,
   checkBot,
   runBb,
@@ -450,6 +453,8 @@ export default async function plugin(bb: BbPluginApi) {
   bb.storage.migrate(db, [
     "CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   ]);
+  let archive:Archive|undefined;
+  try { archive=openArchive(db); } catch { archive=undefined; }
   let history:ReturnType<typeof openTopicSearch>|undefined;
   try { history=openTopicSearch(db); } catch(error) {
     if (!String(error).includes("no such module: fts5")) throw error;
@@ -565,6 +570,47 @@ export default async function plugin(bb: BbPluginApi) {
     return code;
   }
   let chatWake: (() => void) | undefined;
+  sentMessages.observe=(message)=>{ const bot=botId(); if (bot) archive?.record(bot,{message}); };
+  // One reading tool for the conversation archive. The calling conversation comes from the thread
+  // BB names for this call; what it may read is decided in archive-access.ts.
+  const archiveToolInput=archiveQuery.extend({
+    file:z.object({chat:z.number().int(),message:z.number().int().positive()}).strict().optional()
+      .describe("Download the file of one found message (chat and message from a search result). Returns a local path; open it with your usual tools."),
+  }).strict();
+  bb.agents.registerTool({
+    name:"telegram_conversation_archive",
+    description:"Read the saved Telegram conversation: earlier messages of this chat and its topics, and of the other chats this conversation may see. "+
+      "Use it whenever someone refers to something said or sent earlier (\"as we discussed\", \"the file from this morning\", \"in the other topic\"), instead of asking to resend. "+
+      "Search by words (case, «ё», small typos and Latin/Cyrillic spelling do not matter), by author, by period with a time zone, the last N messages, or files only; then download a file by chat and message. "+
+      "Other people's private chats are never returned.",
+    parameters:archiveToolInput,
+    async execute(args,{threadId,signal}) {
+      const owner=ownerId(),bot=botId();
+      if (!owner || !bot || !archive) throw Error("archive_unavailable");
+      const conversation=await conversationOf(store,bb.sdk.threads,threadId,signal);
+      if (!conversation) throw Error("telegram_conversation_required");
+      const readable=readableChats(store,archive,bot,owner,conversation);
+      const cfg=await settings.get();
+      if (args.file) {
+        if (!readable(args.file.chat)) throw Error("not_available_in_this_conversation");
+        const f=archive.file(bot,args.file.chat,args.file.message);
+        if (!f?.file_id) throw Error("message_has_no_file");
+        if (!cfg.telegramInboxRoot) throw Error("inbox_not_configured");
+        const info=await telegram(botToken,signal,60_000,undefined,apiRoot)<{file_path?:string}>("getFile",{file_id:f.file_id});
+        if (!info.file_path) throw Error("file_unavailable");
+        const dir=join(cfg.telegramInboxRoot,"archive",String(bot),String(args.file.chat),String(args.file.message));
+        await mkdir(dir,{recursive:true,mode:0o700});
+        const name=safeTelegramFilename(f.file_name || info.file_path.split("/").at(-1) || "file");
+        const res=await fetch(`${checkedApiRoot(await apiRoot())}/file/bot${await botToken()}/${info.file_path}`,{signal});
+        if (!res.ok) throw Error("file_download_failed");
+        const path=join(dir,name);
+        await writeFile(path,Buffer.from(await res.arrayBuffer()),{mode:0o600});
+        return JSON.stringify({path,name,kind:f.file_kind,size:f.file_size});
+      }
+      const {file:_file,...query}=args;
+      return JSON.stringify({messages:archive.find(bot,readable,query,safeTimeZone(cfg.timeZone))});
+    },
+  });
   bb.agents.registerTool({
     name:"telegram_group_reminder",
     description:"Schedule one conditional reminder for an existing Telegram group task from the owner's direct BB conversation.",
@@ -2377,7 +2423,8 @@ export default async function plugin(bb: BbPluginApi) {
           ingressError = null;
           for (const u of updates) {
             const moved=groupMigration(u);
-            if (moved && botId()) migrateGroupChat(store,botId()!,moved.from,moved.to);
+            if (moved && botId()) {migrateGroupChat(store,botId()!,moved.from,moved.to);archive?.moveChat(botId()!,moved.from,moved.to);}
+            try { if (botId()) archive?.record(botId()!,u); } catch { /* the archive never blocks a message */ }
             if (skipExcludedForumUpdate(store, u)) continue;
             const privateOwner=ownerId(),privateBot=botId();
             if (privateOwner && privateBot && cfg.chatEnabled && bridge &&
@@ -2508,7 +2555,7 @@ export default async function plugin(bb: BbPluginApi) {
               // getChat still answers for an upgraded group; a member count names the new chat.
               // The ingress transport is bound to the owner's chat; ask about the old group directly.
               try { await telegram(botToken,signal,15_000,()=>chat,apiRoot)("getChatMemberCount",{chat_id:chat}); }
-              catch (error) { if (error instanceof TelegramFailure && error.migrateTo) migrateGroupChat(store,botId()!,chat,error.migrateTo); }
+              catch (error) { if (error instanceof TelegramFailure && error.migrateTo) {migrateGroupChat(store,botId()!,chat,error.migrateTo);archive?.moveChat(botId()!,chat,error.migrateTo);} }
             }
           }
           if (botId() && ownerId() && store.list("visibility:"+botId()+":group:").length)
