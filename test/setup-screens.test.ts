@@ -4,7 +4,7 @@ import {CODEX_LOCK,groupScreen,handleSetupUpdate,notifyGroupsAdded,welcomeScreen
 import {accessList,defaultGroupSettings,groupSettings,setAccess} from "../rights";
 
 const OWNER=7, BOT=5, CHAT=-1004297046755, LENA=11, STRANGER=99;
-function harness(provider="claude-code",admins=[OWNER]){
+function harness(provider="claude-code",admins=[OWNER],members=2){
   const rows=new Map<string,any>();
   const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
     list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
@@ -15,6 +15,7 @@ function harness(provider="claude-code",admins=[OWNER]){
   const tg=(chat:number)=>(async(method:string,p:any)=>{
     sent.push({chat,method,...p});
     if (method==="getChatMember") return {status:admins.includes(p.user_id)?"administrator":"member"};
+    if (method==="getChatMemberCount") return members;
     return {message_id:sent.length};
   }) as any;
   const ctx={store:store as any,bot:BOT,owner:OWNER,botUsername:"acme_bot",tg,zones:["Проект ERP","Сроки задач","Финансы"],role:"Я — помощник проекта.",
@@ -106,7 +107,7 @@ test("the owner adds people with the Telegram contact picker and removes them by
 });
 
 test("the owner is told once, in plain words, what happens if nothing is changed",async()=>{
-  const h=harness();
+  const h=harness("claude-code",[OWNER],3);
   h.store.put(`privacy:x`,true);
   h.store.put(`visibility:${BOT}:privacy`,true);
   h.store.put(`visibility:${BOT}:group:${CHAT}`,{chat:CHAT,title:"Склад",administrator:false,inviter:STRANGER,event:5});
@@ -167,4 +168,11 @@ test("a personal assistant offers only «you» in step 1 and says why",async()=>
   const screen=h.last("editMessageText");
   assert.deepEqual(screen.reply_markup.inline_keyboard[0].map((b:any)=>b.text),["Только вы"]);
   assert.match(screen.text,/Личный помощник работает с вашими файлами/);
+});
+
+test("shared memory is refused while other people are in the group",async()=>{
+  const h=harness("claude-code",[OWNER],3);
+  await h.tap(OWNER,`rs:a3:${CHAT}:shared`);
+  assert.equal(h.last("answerCallbackQuery").text,"В группе есть другие люди: общая память недоступна.");
+  assert.notEqual(groupSettings(h.store as any,BOT,CHAT)?.memory,"shared");
 });

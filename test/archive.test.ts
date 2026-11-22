@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import {archiveRow,latToCyr,localSeconds,normalize,openArchive,searchText} from "../archive";
-import {conversationOfThread,groupMemory,readableChats} from "../archive-access";
+import {conversationOfThread,groupMemory,guardGroupMemory,readableChats} from "../archive-access";
 
 const OWNER=7, BOT=5, TEAM=-1001, OTHER=-1002, ALICE=21, BOB=22;
 function memoryStore(){
@@ -60,7 +60,7 @@ test("a conversation reads what its memory allows; another person's private chat
   store.put(`rights:${BOT}:group:${TEAM}`,{version:1,who:"all",reply:"mention",members:"propose",zones:[],note:"",memory:"shared"});
   store.put(`rights:${BOT}:group:${OTHER}`,{version:1,who:"all",reply:"mention",members:"propose",zones:[],note:"",memory:"shared"});
   const shared=readableChats(store as any,a,BOT,OWNER,conv("thr_team"));
-  assert.deepEqual([shared(TEAM),shared(OTHER),shared(OWNER),shared(ALICE)],[true,true,false,false]);
+  assert.deepEqual([shared(TEAM),shared(OTHER),shared(OWNER),shared(ALICE)],[true,true,true,false],"only the owner is there: reads like the owner's chat");
   const alice=readableChats(store as any,a,BOT,OWNER,conv("thr_alice"));
   assert.deepEqual([alice(ALICE),alice(TEAM),alice(OWNER),alice(BOB)],[true,true,false,false]);
 });
@@ -73,4 +73,15 @@ test("a voice message keeps the bridge's transcript, and search finds it",()=>{
   const found=a.find(BOT,()=>true,{words:"пятьдесят"},"UTC");
   assert.equal(found.length,1);
   assert.equal(found[0].transcript,"опубликуй выпуск пятьдесят два");
+});
+
+test("the first other person makes a shared group a guest conversation at once, and tells the owner once",()=>{
+  const store=memoryStore(); store.put("rights:install-kind","assistant");
+  const msg=(from:any,extra:any={})=>({update_id:1,message:{message_id:1,date:1,chat:{id:TEAM,type:"supergroup",title:"Команда"},from,text:"x",...extra}});
+  assert.equal(groupMemory(store as any,BOT,TEAM),"shared","an assistant's group starts shared");
+  assert.equal(guardGroupMemory(store as any,BOT,OWNER,msg({id:OWNER})),undefined,"the owner alone changes nothing");
+  assert.equal(guardGroupMemory(store as any,BOT,OWNER,msg({id:99,is_bot:true})),undefined,"another bot changes nothing");
+  assert.deepEqual(guardGroupMemory(store as any,BOT,OWNER,msg({id:OWNER},{new_chat_members:[{id:ALICE,first_name:"Алиса"}]})),{chat:TEAM,title:"Команда"});
+  assert.equal(groupMemory(store as any,BOT,TEAM),"separate");
+  assert.equal(guardGroupMemory(store as any,BOT,OWNER,msg({id:ALICE})),undefined,"told once");
 });

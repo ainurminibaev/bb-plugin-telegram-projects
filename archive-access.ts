@@ -2,7 +2,7 @@ import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import type {Store} from "./model";
 import type {GroupTopicPolicy} from "./ingress";
 import type {Archive} from "./archive";
-import {groupSettings,installKind} from "./rights";
+import {groupSettings,installKind,saveGroupSettings} from "./rights";
 
 // Who may read what in the conversation archive. The calling conversation comes from the thread
 // BB reports for the tool call, never from the agent: a subthread belongs to the conversation of
@@ -10,8 +10,7 @@ import {groupSettings,installKind} from "./rights";
 //
 // - The owner's private chat reads every group and the owner's own chat; never another person's private chat.
 // - A group with its own memory ("separate") reads only itself, all its topics.
-// - A group with shared memory reads every shared group; a personal assistant's shared group
-//   (only the owner is there) also reads the owner's private chat.
+// - A group with shared memory has only the owner in it: it reads like the owner's private chat.
 // - A person's private chat reads itself, the shared groups and the groups that person writes in.
 
 export type Conversation={kind:"owner"}|{kind:"group";chat:number}|{kind:"person";subject:number};
@@ -21,6 +20,23 @@ export type GroupMemory="shared"|"separate";
 export function groupMemory(store:Store,bot:number,chat:number):GroupMemory {
   const saved=(groupSettings(store,bot,chat) as {memory?:GroupMemory}|undefined)?.memory;
   return saved ?? (installKind(store)==="assistant" ? "shared" : "separate");
+}
+
+/**
+ * A group is the owner's own conversation when its memory is shared: only the owner and the agent are
+ * there. The first other person makes it a guest conversation at once (memory becomes "separate").
+ * Returns the group to tell the owner about, once.
+ */
+export function guardGroupMemory(store:Store,bot:number,owner:number,update:any):{chat:number;title:string}|undefined {
+  const m=update?.message;
+  if (!m || !["group","supergroup"].includes(m.chat?.type) || !(m.chat.id<0)) return;
+  const others=(Array.isArray(m.new_chat_members) ? m.new_chat_members : [])
+    .some((u:any)=>u && !u.is_bot && u.id!==owner);
+  const stranger=!!m.sender_chat || (m.from && !m.from.is_bot && m.from.id!==owner);
+  if (!others && !stranger) return;
+  if (groupMemory(store,bot,m.chat.id)!=="shared") return;
+  saveGroupSettings(store,bot,m.chat.id,{memory:"separate"});
+  return {chat:m.chat.id,title:String(m.chat.title??"группа")};
 }
 
 export function conversationOfThread(store:Store,threadId:string):Conversation|undefined {
@@ -47,8 +63,8 @@ export function readableChats(store:Store,archive:Pick<Archive,"groupsOf">,bot:n
   if (c.kind==="owner") return (chat:number)=>chat<0 || chat===owner;
   if (c.kind==="group") {
     if (groupMemory(store,bot,c.chat)==="separate") return (chat:number)=>chat===c.chat;
-    const ownerToo=installKind(store)==="assistant";
-    return (chat:number)=>chat===c.chat || shared(chat) || (ownerToo && chat===owner);
+    // Shared memory: only the owner is there, so it reads like the owner's private chat.
+    return (chat:number)=>chat<0 || chat===owner;
   }
   const member=new Set(archive.groupsOf(bot,c.subject));
   return (chat:number)=>chat===c.subject || shared(chat) || member.has(chat);

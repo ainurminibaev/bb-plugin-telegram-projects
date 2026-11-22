@@ -360,7 +360,17 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
       if (extra === "all" && lock) { await answer(lockText(lock), true); return true; }
       saveGroupSettings(ctx.store, ctx.bot, chat, { who: extra });
     } else if (action === "a2" && (extra === "mention" || extra === "auto")) saveGroupSettings(ctx.store, ctx.bot, chat, { reply: extra });
-    else if (action === "a3" && (extra === "shared" || extra === "separate")) saveGroupSettings(ctx.store, ctx.bot, chat, { memory: extra });
+    else if (action === "a3" && (extra === "shared" || extra === "separate")) {
+      if (extra === "shared") {
+        // Shared memory makes the group the owner's own conversation: only when nobody else is there.
+        const count = await ctx.tg(chat)<number>("getChatMemberCount", { chat_id: chat }).catch(() => undefined);
+        if (typeof count !== "number" || count > 2) {
+          await answer("В группе есть другие люди: общая память недоступна.", true);
+          return true;
+        }
+      }
+      saveGroupSettings(ctx.store, ctx.bot, chat, { memory: extra });
+    }
     else { await answer(); return true; }
     const saved = activeGroupSettings(ctx.store, ctx.bot, chat) ?? defaultGroupSettings();
     if (action === "a3") await show({ text: `Готово. «${title}»: ${summaryLine(ctx, saved, chat)}.`,

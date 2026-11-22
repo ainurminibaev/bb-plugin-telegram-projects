@@ -7,7 +7,7 @@ import {topicStateKey} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
-import {conversationOf,readableChats} from "./archive-access";
+import {conversationOf,guardGroupMemory,readableChats} from "./archive-access";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
 import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
@@ -2426,6 +2426,11 @@ export default async function plugin(bb: BbPluginApi) {
             const moved=groupMigration(u);
             if (moved && botId()) {migrateGroupChat(store,botId()!,moved.from,moved.to);archive?.moveChat(botId()!,moved.from,moved.to);}
             try { if (botId()) archive?.record(botId()!,u); } catch { /* the archive never blocks a message */ }
+            if (botId() && ownerId()) {
+              const closed=guardGroupMemory(store,botId()!,ownerId()!,u);
+              if (closed) await telegram(botToken,signal,15_000,ownerId,apiRoot)("sendMessage",{chat_id:ownerId(),
+                text:`В «${closed.title}» появился другой человек: память группы теперь только этой группы, разговор — гостевой. Общую память можно вернуть, только когда в группе снова останетесь вы одни.`}).catch(()=>{});
+            }
             if (skipExcludedForumUpdate(store, u)) continue;
             const privateOwner=ownerId(),privateBot=botId();
             if (privateOwner && privateBot && cfg.chatEnabled && bridge &&
