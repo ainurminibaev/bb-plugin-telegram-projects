@@ -441,9 +441,10 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       if (!executor && !belongsToGroup(await sdk.threads.get({threadId:r.threadId,signal}))) {finish("revoked");continue;}
       const outputRoot=async()=>{
         const thread=await sdk.threads.get({threadId:r.threadId,signal});
-        if (!belongsToGroup(thread) || !fileHostId || !thread.environmentId) throw Error("missing_environment");
+        if (!belongsToGroup(thread) || !thread.environmentId) throw Error("missing_environment");
         const env=await sdk.environments.get({environmentId:thread.environmentId,signal});
-        if (!env.path || env.hostId!==fileHostId) throw Error("group_export_host_mismatch");
+        // Without a configured file host the thread's own environment is used: the bridge reads it locally.
+        if (!env.path || (fileHostId && env.hostId!==fileHostId)) throw Error("group_export_host_mismatch");
         return env.path;
       };
       let text=stripTelegramMarkers(job.answer!);
