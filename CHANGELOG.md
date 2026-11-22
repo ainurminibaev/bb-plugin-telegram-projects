@@ -1,3 +1,14 @@
+# 0.9.52
+
+- Conversation memory: the bridge keeps an archive of every message it sees (owner's chat, people's chats, groups and topics) and agents read it with `bb telegram-projects search-history` — words with typos and transliteration, author, period, last N, files. Who may read what follows the calling conversation; a person's private chat is never shown to anyone else.
+- Group setup in three short steps with buttons: who may address the employee, when it answers, and the group's memory (shared or only this group). The first other person in a shared group makes it a guest conversation at once.
+- Guest conversations (groups and people's chats) work within their own reach: their thread, its subthreads; schedules for guests stay off until results are delivered back to the topic.
+- `bb telegram-projects send`: the agent writes to a topic of any group or to a person who started the bot, by name; `--targets` lists where it may write; with `--ask` the answer comes back where it was asked. No confirmation card.
+- People's private chats: a person whose request waits for the owner is told so once; after an hour without a decision the owner gets a fresh card.
+- Questions with options from workers reach the owner as buttons, also from a work thread of another project the owner's chat handed a task to; the result reported is the turn after the owner's answer.
+- Any file sent in a group or a private chat reaches the agent as a file (not only PDF and images).
+- Assistant pair switch: the chat moves to the reserve thread when the main one hits its limit.
+
 # 0.9.51
 
 - Ask Telegram about a possibly upgraded basic group on that group's own transport. 0.9.50 asked through the owner's chat transport, which refused the request before Telegram, so a group upgraded while an older bridge ran was not moved.
