@@ -102,6 +102,8 @@ export function localSeconds(value:string,timeZone:string,end:boolean) {
   return Math.floor((utc-zoneOffset(guess,timeZone))/1000);
 }
 
+export const FILE_REMOVED="файл удалён по сроку";
+
 export function openArchive(db:Database) {
   db.exec(`CREATE TABLE IF NOT EXISTS archive(
       bot INTEGER NOT NULL, chat INTEGER NOT NULL, topic INTEGER NOT NULL, message INTEGER NOT NULL, date INTEGER NOT NULL,
@@ -112,6 +114,7 @@ export function openArchive(db:Database) {
     CREATE INDEX IF NOT EXISTS archive_by_sender ON archive(bot,sender,date);`);
   const columns=(db.prepare("PRAGMA table_info(archive)").all() as {name:string}[]).map(c=>c.name);
   if (!columns.includes("transcript")) db.exec("ALTER TABLE archive ADD COLUMN transcript TEXT");
+  if (!columns.includes("file_removed")) db.exec("ALTER TABLE archive ADD COLUMN file_removed INTEGER");
   let fts=true;
   try {
     db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS archive_fts USING fts5(search, content='archive', content_rowid='rowid', tokenize='trigram');
@@ -146,7 +149,7 @@ export function openArchive(db:Database) {
       const zone=q.timeZone||defaultZone||"UTC";
       if (q.from) {where.push("a.date>=?");args.push(localSeconds(q.from,zone,false));}
       if (q.to) {where.push("a.date<=?");args.push(localSeconds(q.to,zone,true));}
-      if (q.files) where.push("a.file_id IS NOT NULL");
+      if (q.files) where.push("(a.file_id IS NOT NULL OR a.file_removed=1)");
       if (q.topic!==undefined) {where.push("a.topic=?");args.push(q.topic);}
       if (q.author) {
         if (/^\d+$/.test(q.author.trim())) {where.push("a.sender=?");args.push(Number(q.author.trim()));}
@@ -178,13 +181,24 @@ export function openArchive(db:Database) {
       const found=(words.length ? rows.filter(matches) : rows).slice(0,q.last ?? 30);
       return found.reverse().map(r=>({chat:r.chat,chatTitle:r.chat_title,topic:r.topic,message:r.message,
         date:new Date(r.date*1000).toISOString(),author:r.sender_name,authorId:r.sender,replyTo:r.reply_to??undefined,
-        album:r.album??undefined,file:r.file_id ? {kind:r.file_kind,name:r.file_name??undefined,size:r.file_size??undefined} : undefined,
+        album:r.album??undefined,file:r.file_id ? {kind:r.file_kind,name:r.file_name??undefined,size:r.file_size??undefined} :
+          r.file_removed ? {kind:r.file_kind,name:r.file_name??undefined,removed:FILE_REMOVED} : undefined,
         text:String(r.text).slice(0,2000),transcript:r.transcript ? String(r.transcript).slice(0,2000) : undefined,
         link:String(r.chat).startsWith("-100") ? `https://t.me/c/${String(r.chat).slice(4)}/${r.topic ? r.topic+"/" : ""}${r.message}` : undefined}));
     },
     file(bot:number,chat:number,message:number) {
-      return db.prepare("SELECT file_id,file_name,file_kind,file_size FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as
-        {file_id:string|null;file_name:string|null;file_kind:string|null;file_size:number|null}|undefined;
+      return db.prepare("SELECT file_id,file_name,file_kind,file_size,file_removed FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as
+        {file_id:string|null;file_name:string|null;file_kind:string|null;file_size:number|null;file_removed:number|null}|undefined;
+    },
+    /**
+     * Retention (В2): texts stay forever; files older than the term are no longer kept. The message keeps
+     * its text and file name with a "removed by term" mark. Returns the messages whose files went.
+     */
+    expireFiles(before:number) {
+      const gone=db.prepare("SELECT bot,chat,message FROM archive WHERE file_id IS NOT NULL AND date<?").all(before) as
+        {bot:number;chat:number;message:number}[];
+      if (gone.length) db.prepare("UPDATE archive SET file_id=NULL,file_removed=1 WHERE file_id IS NOT NULL AND date<?").run(before);
+      return gone;
     },
     /** Groups where a person has written: their memberships as the archive knows them. */
     groupsOf(bot:number,person:number) {

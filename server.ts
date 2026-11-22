@@ -5,7 +5,7 @@ import {handleOwnerForumCommand} from "./forum-commands";
 import {topicStateKey} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
-import {archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
+import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
 import {conversationOf,conversationOfThread,guardGroupMemory,readableChats} from "./archive-access";
 import {closeAsk,findGroup,findPerson,findTopic,rememberAsk,sendRefusal,sendTargets} from "./send-command";
 import {sendOutboundMessage} from "./outbound-message";
@@ -54,7 +54,7 @@ import {
   type Events,
 } from "./events";
 import { makeChatControlPublisher, writeJsonAtomic } from "./json-file";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomInt } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -349,6 +349,11 @@ export default async function plugin(bb: BbPluginApi) {
       options: ["auto", "full"],
       default: "auto",
     },
+    archiveFileDays: {
+      type: "number",
+      label: "Сколько дней хранить файлы в памяти переписки (тексты — всегда; 0 — файлы тоже всегда)",
+      default: 183,
+    },
     consentMinutes: {
       type: "number",
       label: "Сколько минут ждать согласия на действие участника без доступа",
@@ -618,6 +623,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (args.file) {
         if (!readable(args.file.chat)) throw Error("not_available_in_this_conversation");
         const f=archive.file(bot,args.file.chat,args.file.message);
+        if (f?.file_removed) throw Error(FILE_REMOVED);
         if (!f?.file_id) throw Error("message_has_no_file");
         if (!cfg.telegramInboxRoot) throw Error("inbox_not_configured");
         const info=await telegram(botToken,signal,60_000,undefined,apiRoot)<{file_path?:string}>("getFile",{file_id:f.file_id});
@@ -955,12 +961,22 @@ export default async function plugin(bb: BbPluginApi) {
       botId:bot,botUsername,ownerId:owner,revision:crypto.randomUUID()},dm.projectId);
     return true;
   }
+  // Retention of the conversation archive (В2): texts forever, files for archiveFileDays (0 — forever).
+  async function expireArchiveFiles(cfg:{archiveFileDays?:number;telegramInboxRoot?:string}) {
+    const days=Number(cfg.archiveFileDays ?? 183);
+    if (!archive || !(days>0)) return;
+    for (const g of archive.expireFiles(Math.floor(Date.now()/1000-days*86400)))
+      if (cfg.telegramInboxRoot)
+        await rm(join(cfg.telegramInboxRoot,"archive",String(g.bot),String(g.chat),String(g.message)),{recursive:true,force:true});
+  }
+  const firstExpiry=setTimeout(()=>void settings.get().then(expireArchiveFiles).catch(()=>{}),60_000);
   let cleaning=false;
   const inboxTimer=setInterval(async()=>{
     if(cleaning || stateTransferBusy)return;
     cleaning=true;
     try {
       const cfg=await settings.get();
+      await expireArchiveFiles(cfg).catch(()=>{});
       if((!cfg.enabled && !cfg.isolatedGroupProject && !cfg.isolatedPrivateProject) || !cfg.telegramInboxRoot || !existsSync(cfg.telegramInboxRoot))return;
       await cleanInbox(cfg.telegramInboxRoot,async id=>{
         if (id.startsWith("isolated:")) {
@@ -2666,6 +2682,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.onDispose(async () => {
     clearInterval(historyTimer);
     clearInterval(inboxTimer);
+    clearTimeout(firstExpiry);
     lifetime.abort();
     wake?.();
     await flight;

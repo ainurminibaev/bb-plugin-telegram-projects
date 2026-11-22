@@ -85,3 +85,20 @@ test("the first other person makes a shared group a guest conversation at once, 
   assert.equal(groupMemory(store as any,BOT,TEAM),"separate");
   assert.equal(guardGroupMemory(store as any,BOT,OWNER,msg({id:ALICE})),undefined,"told once");
 });
+
+test("retention: a text older than the term is found, its file is removed by term",()=>{
+  const a=openArchive(new Database(":memory:"));
+  const old=1_780_000_000, fresh=1_795_300_000;
+  a.record(BOT,msg(TEAM,ALICE,"Алиса","макет согласован",{date:old,document:{file_id:"OLD",file_name:"Макет.pdf",file_size:10}}));
+  a.record(BOT,msg(TEAM,ALICE,"Алиса","новый вариант",{date:fresh,document:{file_id:"NEW",file_name:"Вариант.pdf",file_size:10}}));
+  const gone=a.expireFiles(fresh-86400);
+  assert.equal(gone.length,1);
+  const [found]=a.find(BOT,()=>true,{words:"макет согласован"},"UTC");
+  assert.equal(found.text,"макет согласован","the text stays");
+  assert.deepEqual(found.file,{kind:"document",name:"Макет.pdf",removed:"файл удалён по сроку"});
+  assert.equal(a.file(BOT,TEAM,found.message)!.file_id,null);
+  assert.equal(a.file(BOT,TEAM,found.message)!.file_removed,1);
+  assert.equal(a.find(BOT,()=>true,{files:true},"UTC").length,2,"files only still lists the removed file with its mark");
+  assert.equal(a.find(BOT,()=>true,{words:"новый вариант"},"UTC")[0].file!.name,"Вариант.pdf");
+  assert.equal(a.expireFiles(fresh-86400).length,0,"once");
+});
