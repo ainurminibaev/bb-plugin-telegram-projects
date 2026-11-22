@@ -556,3 +556,15 @@ test("переключение: работающий подтред переез
   assert.equal(w.threads.get("busy")!.parentThreadId, "codex", "итог работающего подтреда придёт действующему");
   assert.equal(w.threads.get("kid")!.parentThreadId, "claude");
 });
+
+test("снятие пары возвращает тредам прежние названия", async () => {
+  const w = world();
+  const pairs = new ChatPairs(w.deps);
+  await pairs.configure(0, "claude", "codex");
+  assert.notEqual(w.threads.get("claude")!.title, "Личный помощник");
+  await pairs.configure(0, "claude", "codex");
+  assert.equal(await pairs.remove(0), true);
+  assert.equal(w.threads.get("claude")!.title, "Личный помощник");
+  assert.equal(w.threads.get("codex")!.title, "Личный помощник");
+  assert.equal(pairs.get(0), undefined);
+});

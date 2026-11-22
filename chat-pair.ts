@@ -22,6 +22,8 @@ export type ChatPair = {
   fallback: string;
   /** Название без пометки состояния, по треду. */
   titles: Record<string, string>;
+  /** Названия тредов до пары: возвращаются при снятии пары. */
+  original?: Record<string, string>;
   /** Когда у треда истекает лимит (по времени штатного повтора). */
   blockedUntil: Record<string, number>;
   /** Когда тред перестал быть действующим — начало сводки «что было без тебя». */
@@ -143,13 +145,22 @@ export class ChatPairs {
     };
     const pair: ChatPair = {topicId, projectId: b.projectId, primary, fallback,
       titles: {[primary]: base(p), [fallback]: base(f)},
+      original: {[primary]: old?.original?.[primary] ?? baseTitle(p.title ?? ""),
+        [fallback]: old?.original?.[fallback] ?? baseTitle(f.title ?? "")},
       blockedUntil: old?.primary === primary && old.fallback === fallback ? old.blockedUntil : {},
       inactiveSince: old?.inactiveSince ?? {}, waiting: undefined};
     this.put(pair);
     await this.marks(pair);
     return pair;
   }
-  remove(topicId: number) { this.d.store.del(KEY + topicId); return true; }
+  /** Снять пару: треды получают свои прежние названия. */
+  async remove(topicId: number) {
+    const p = this.get(topicId);
+    this.d.store.del(KEY + topicId);
+    for (const [id, title] of Object.entries(p?.original ?? {}))
+      if (title) await this.d.sdk.threads.update({threadId: id, title}).catch(() => undefined);
+    return true;
+  }
   /** Лимит треда снят досрочно (сброс, докупка): возврат на ближайшем такте. */
   clearLimit(topicId: number, threadId: string) {
     const p = this.get(topicId);

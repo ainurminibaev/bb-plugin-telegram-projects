@@ -1,4 +1,4 @@
-import {bbMentionsOn,withoutBB,type BbMentionsSetting} from "./bb-mentions";
+import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
 import {learnTopicName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
 import {handleOwnerForumCommand} from "./forum-commands";
@@ -1039,7 +1039,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function run() {
     const cfg = await settings.get();
     const bbOn = bbMentionsOn(store, cfg.bbMentions as BbMentionsSetting);
-    const tr = (s: string) => translate(cfg.language as "ru" | "en", bbOn ? s : withoutBB(s));
+    const tr = (s: string) => bbText(t => translate(cfg.language as "ru" | "en", t), cfg.language, bbOn, s);
     if (!cfg.enabled || stateTransferBusy) return;
     if ((store.get<number>("retryAt") ?? 0) > Date.now()) return;
     if (!store.get("trackingSince")) store.put("trackingSince", Date.now());
@@ -2433,7 +2433,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   function taskList(topicId: number, language: "ru" | "en", bbOn = true) {
-    const tr = (s: string) => translate(language, bbOn ? s : withoutBB(s));
+    const tr = (s: string) => bbText(t => translate(language, t), language, bbOn, s);
     const projectId =
       store.list<Topic>("topic:").find((x) => x.value.threadId === topicId)
         ?.value.key ??

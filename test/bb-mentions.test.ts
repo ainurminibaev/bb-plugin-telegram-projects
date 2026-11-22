@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {english} from "../locale";
-import {BB_BUTTONS, bbMentionsOn, withoutBB} from "../bb-mentions";
+import {BB_BUTTONS, bbMentionsOn, bbText, withoutBB} from "../bb-mentions";
+import {translate} from "../locale";
 
 const store = (kind?: string) => ({get: (k: string) => k === "rights:install-kind" ? kind : undefined} as any);
 
@@ -36,4 +37,12 @@ test("the setting follows the install kind unless set", () => {
   assert.equal(bbMentionsOn(store(undefined), undefined), true, "an install without a kind is the personal assistant");
   assert.equal(bbMentionsOn(store("employee"), "on"), true);
   assert.equal(bbMentionsOn(store("assistant"), "off"), false);
+});
+
+test("an English bridge without BB mentions has no BB either", () => {
+  for (const [ru, en] of Object.entries(english)) {
+    if (!/\bBB\b/.test(ru) && !/\bBB\b/.test(en)) continue;
+    const out = bbText(t => translate("en", t), "en", false, ru);
+    assert.doesNotMatch(out, /\bBB\b/, en);
+  }
 });

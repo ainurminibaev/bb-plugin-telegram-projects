@@ -14,7 +14,7 @@ import { ChatPairs, OWNER_MESSAGE } from "./chat-pair";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
 import { markdownExcerpt } from "./events";
-import { withoutBB } from "./bb-mentions";
+import { bbText } from "./bb-mentions";
 import { localArtifacts, renderTelegramParts, cleanAssistantText, publicActivity, ARTIFACT_EXTENSIONS } from "./telegram-ux";
 import type { BbPluginApi, MessageDispatchHookContext, MessageDispatchHookDecision } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -208,7 +208,7 @@ const adoptedKey=(parent:string,worker:string)=>"reply:adopted:"+parent+":"+work
 export class ChatBridge {
   /** Links and mentions of BB for the owner: off for an employee by default (see bb-mentions.ts). */
   private bbOn = () => this.d.bbMentions?.() ?? true;
-  private tr = (s: string) => translate(this.d.language?.() ?? "ru", this.bbOn() ? s : withoutBB(s));
+  private tr = (s: string) => bbText(t => translate(this.d.language?.() ?? "ru", t), this.d.language?.() ?? "ru", this.bbOn(), s);
   private linkRows = (threadId: string): Key[][] => this.bbOn() ? [[this.link(threadId)]] : [];
   private navigation = new AsyncLocalStorage<{
     topicId: number;

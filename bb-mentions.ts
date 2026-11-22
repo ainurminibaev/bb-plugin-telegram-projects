@@ -68,3 +68,53 @@ export function withoutBB(text: string) {
   for (const [from, to] of PARTS) out = out.split(from).join(to);
   return out;
 }
+
+const EXACT_EN: Record<string, string> = {
+  "The worker thread finished. Delivery to the assistant has not been confirmed. The task history is available in BB.":
+    "The work on the task finished, but its result has not reached me yet. I will check and write.",
+  "The worker thread finished. BB exhausted its attempts to deliver the result to the assistant. The result is in the worker thread history.":
+    "The work on the task finished, but its result could not be received. It is kept; I can retell it on request.",
+  "✅ The bot is linked to BB. Project topics will appear in this chat within a minute.":
+    "✅ The bot is connected. Project topics will appear in this chat within a minute.",
+  "⚠️ BB restarted while processing the message. The outcome is unconfirmed. Open /chats and check before sending again.":
+    "⚠️ I restarted while processing the message; the outcome is unconfirmed. Check /chats before sending again.",
+  "⚠️ Could not confirm the action. Check /status and /chats before retrying; details are available in BB.":
+    "⚠️ Could not confirm the action. Check /status and /chats before retrying.",
+  "🤖 Agent for the new chat. Models come from BB settings.": "🤖 Agent for the new chat.",
+  "Could not transcribe the recording. Send text or check BB transcription settings. Limit: 10 minutes and 15 MB.":
+    "Could not transcribe the recording. Please send text. Limit: 10 minutes and 15 MB.",
+  "Your message is queued. The assistant will receive it when BB can continue.":
+    "Your message is queued. The assistant will receive it as soon as it can continue.",
+  "Send text or a voice message. Open attachments in BB for now.": "Send text or a voice message.",
+  "The chat has a question. Use a button or reply to its card. Open BB for complex forms.":
+    "The chat has a question. Use a button or reply to its card.",
+  "📨 BB received your message. The reply will arrive here.\n/stop — stop; /menu — current chat.":
+    "📨 Message received. The reply will arrive here.\n/stop — stop; /menu — current chat.",
+  "Stop request sent to BB.": "Stop accepted.",
+  "Choose a button or open BB for this question.": "Choose a button for this question.",
+  "\n\nMultiple questions: open the form in BB.": "\n\nSeveral questions here: please answer each in text.",
+  "Open this form in BB.": "Please answer in text.",
+  "⚠️ The run failed. See details in BB.": "⚠️ The run failed.",
+  " — in BB.": ".",
+  "This machine has no project folder configured in BB yet. Add a project source and select the server again.":
+    "This machine has no project folder configured yet. Add it and select the server again.",
+};
+const PARTS_EN: [string, string][] = [
+  ["🧭 BB workspace", "🧭 Workspace"], ["Project topics hold BB chats", "Project topics hold chats"],
+  ["Project topics contain BB chats", "Project topics contain chats"], ["BB chat controls", "chat controls"],
+  ["BB chats", "chats"], ["BB default", "Default"], ["BB environment", "environment"],
+];
+
+/** The English text without BB, for an English bridge. Buttons that only open BB become empty. */
+export function withoutBBEn(text: string) {
+  if (["Open chat in BB", "Open BB", "Open in BB", "BB chat"].includes(text)) return "";
+  let out = EXACT_EN[text] ?? text;
+  for (const [from, to] of PARTS_EN) out = out.split(from).join(to);
+  return out;
+}
+
+/** The bridge's text function with the BB setting applied. */
+export function bbText(translate: (s: string) => string, language: string, on: boolean, s: string) {
+  if (on) return translate(s);
+  return language === "en" ? withoutBBEn(translate(s)) : translate(withoutBB(s));
+}
