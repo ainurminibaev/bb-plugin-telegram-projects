@@ -1,3 +1,12 @@
+# 0.9.49
+
+- Employee groups: every member may talk to the employee and give it tasks, on mention or reply, including people added later. A group can still be limited to people with access. The former Codex lock is removed.
+- A topic of a group the employee is in gets an ordinary thread in the employee project on its first mention. One group setting covers all topics, including new ones.
+- Private chats of other people with an employee: the owner approves a request with one card; the person then talks to an ordinary employee thread with the same agent, instructions and tools. Revoking access unbinds the chat and keeps its history. The separate isolated private worker is removed.
+- When an employee joins a group open to all members, it says once in the group how to reach it.
+- A basic group that becomes a supergroup (for example when topics are turned on) keeps its binding, thread, settings and saved conversation under the new chat ID.
+- Group file replies use the thread's own environment when no file host is configured.
+
 # 0.9.48
 
 - Recover a saved, addressed text reply from the original BB turn journal on native turn completion. Preserve direct delivery for replies observed earlier in the same turn.
