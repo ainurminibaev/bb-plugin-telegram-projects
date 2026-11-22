@@ -45,7 +45,7 @@ test("cloud download locks origin, disables redirects and reuses the scoped rece
   assert.equal(dirname(dirname(a.path)),root);
   assert.deepEqual(await readFile(a.path),bytes);
   assert.equal(a.sha256,createHash("sha256").update(bytes).digest("hex"));
-  assert.equal((await stat(a.path)).mode & 0o777,0o600);
+  assert.equal((await stat(a.path)).mode & 0o777,0o640,"the inbox group reads it, others cannot");
   const receipt = JSON.parse(await readFile(join(dirname(a.path),".complete.json"),"utf8"));
   assert.equal(receipt.threadId,"isolated:fixture");
   assert.equal((await readdir(root)).length,1);
