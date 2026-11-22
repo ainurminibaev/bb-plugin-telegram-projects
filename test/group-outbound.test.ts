@@ -73,6 +73,8 @@ function fixture(topicId = 0) {
   return {store,adapter,writes,behavior,ownerRoute,callback};
 }
 
+const png=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgqGf4DwACgQF/Y85xKgAAAABJRU5ErkJggg==","base64");
+
 test("private request stages text and exact reply, with one send after the paired owner approves",async()=>{
   const f=fixture();
   assert.deepEqual(await previewOwnerGroupPost(f.ownerRoute,privateThread,ownerInput),{state:"awaiting"});
@@ -180,3 +182,70 @@ test("owner attachment needs its grant and exact bytes from the confirmation car
   assert.equal(f.writes.filter(w=>w.chatId===chat).length,0);
 });
 
+test("ambiguous owner send and missing receipt never trigger another group send",async()=>{
+  for (const fault of ["lost","wrongReceipt","reject"] as const) {
+    const f=fixture();
+    await previewOwnerGroupPost(f.ownerRoute,privateThread,{...ownerInput,reply:undefined});
+    f.behavior[fault]=true;
+    await handleOwnerGroupPost(f.ownerRoute,f.callback(),owner,bot);
+    await handleOwnerGroupPost(f.ownerRoute,f.callback(),owner,bot);
+    assert.equal(f.writes.filter(w=>w.chatId===chat).length,1);
+    assert.match(f.writes.at(-1)!.body.text,fault === "reject" ? /отклонил/ : /не подтверждена/);
+  }
+});
+
+for (const kind of ["document","photo"] as const) {
+  for (const text of [undefined,"Сопроводительный текст <без разметки>"]) {
+    test(`private ${kind} ${text===undefined ? "without" : "with"} caption preserve one upload`,async(t)=>{
+      const directory=mkdtempSync(join(tmpdir(),"ordinary-outbound-"));
+      t.after(()=>rmSync(directory,{recursive:true,force:true}));
+      const name=kind==="photo" ? "image.png" : "report.html";
+      const bytes=kind==="photo" ? png : Buffer.from("<p>Opaque attachment</p>");
+      const path=join(directory,name);
+      writeFileSync(path,bytes);
+      const artifact={path,kind};
+      const ownerSide=fixture(3);
+      const route={...ownerSide.ownerRoute,grants:()=>[{...ownerGrant,directory,maxBytes:1024}]};
+      await previewOwnerGroupPost(route,privateThread,{...ownerInput,text,artifact});
+      assert.match(ownerSide.writes[0].body.text,new RegExp(name));
+      await handleOwnerGroupPost(route,ownerSide.callback(),owner,bot);
+      await handleOwnerGroupPost(route,ownerSide.callback(),owner,bot);
+      const groupCalls=ownerSide.writes.filter(w=>w.chatId===chat);
+      assert.equal(groupCalls.length,1);
+      assert.deepEqual(groupCalls[0].body.reply_parameters,{message_id:validReply.messageId,allow_sending_without_reply:false});
+      assert.equal(groupCalls[0].body.message_thread_id,3);
+      for (const w of [groupCalls[0]]) {
+        assert.equal(w.method,kind==="photo" ? "sendPhoto" : "sendDocument");
+        assert.equal(w.body[kind+"_filename"],name);
+        assert.equal(w.body.caption,text);
+        assert.equal(Object.hasOwn(w.body,"caption"),text!==undefined);
+        const body=w.body[kind] as Blob;
+        assert.equal(body.type,kind==="photo" ? "image/png" : "application/octet-stream");
+        assert.deepEqual(Buffer.from(await body.arrayBuffer()),bytes);
+      }
+    });
+  }
+}
+
+test("an owner post keeps a forum topic busy until its transport settles",async()=>{
+  const topicId=3;
+  const f=fixture(topicId);
+  await previewOwnerGroupPost(f.ownerRoute,privateThread,ownerInput);
+  const started=Promise.withResolvers<void>();
+  const unblock=Promise.withResolvers<void>();
+  f.behavior.onGroupSend=()=>{
+    started.resolve();
+    return unblock.promise;
+  };
+  f.behavior.lost=true;
+  const pending=handleOwnerGroupPost(f.ownerRoute,f.callback(),owner,bot);
+  await started.promise;
+  try {
+    assert.equal(topicHasWork(f.store,bot,chat,topicId),true);
+    assert.equal(topicHasWork(f.store,bot,chat,topicId+1),false);
+  } finally {
+    unblock.resolve();
+    await pending;
+  }
+  assert.equal(topicHasWork(f.store,bot,chat,topicId),false);
+});
