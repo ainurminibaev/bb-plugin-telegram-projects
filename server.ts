@@ -2028,7 +2028,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name:"send",
         summary:"Send a message or file to a group topic or a person with access; --ask remembers the question so the answer comes back",
-        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON | --answer ASK) (--text TEXT | --text-file FILE) [--file PATH] [--ask]",
+        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON | --answer ASK) (--text TEXT | --text-file PATH, not stdin) [--file PATH] [--ask]",
       },
       {
         name:"search-history",
@@ -2102,6 +2102,8 @@ export default async function plugin(bb: BbPluginApi) {
           else return {exitCode:2,stderr:"target_required: --chat, --topic, --person or --answer; see --targets"};
           const refusal=sendRefusal(store,bot,owner,caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer);
           if (refusal) return {exitCode:1,stderr:refusal};
+          // The bridge's command gets no standard input: "-" cannot be read here.
+          if (opt["text-file"]==="-") return {exitCode:2,stderr:"text_file_stdin_unsupported: pass the text with --text '…' (several lines are fine) or write it to a file and pass its path"};
           const text=opt["text-file"] ? await readFile(opt["text-file"],"utf8") : opt.text;
           let file:import("./outbound-message").OutboundFile|undefined;
           if (opt.file) {

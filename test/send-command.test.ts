@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {askNotes,findGroup,findPerson,findTopic,openAsks,rememberAsk,sendRefusal,sendTargets} from "../send-command";
 import {setAccess} from "../rights";
 import {learnTopicName} from "../forum-defaults";
+import {migrateGroupChat} from "../group-migration";
 
 const OWNER=7, BOT=5, TEAM=-1001, OTHER=-1002, ALICE=21, BOB=22;
 function memoryStore(){
@@ -84,4 +85,11 @@ test("topic names are learned from any topic message of any group",()=>{
   learnTopicName(s,BOT,{update_id:8,message:{chat,message_thread_id:65,message_id:73,text:"Стенд: подмена",
     reply_to_message:{message_id:60,text:"Стенд: подмена"}}});
   assert.throws(()=>findTopic(s,BOT,undefined,"подмена"),/topic_unknown/,"text never names a topic");
+});
+
+test("a group named by its number before it became a supergroup is found under the new number",()=>{
+  const s=setup() as any;
+  migrateGroupChat(s,BOT,TEAM,-1009000);
+  s.put(`visibility:${BOT}:group:-1009000`,{chat:-1009000,title:"Штурвал"});
+  assert.equal(findGroup(s,BOT,String(TEAM)),-1009000);
 });

@@ -21,10 +21,19 @@ export function basicGroupChats(store:Store) {
     .filter(chat=>Number.isSafeInteger(chat) && chat<0 && chat>-1_000_000_000_000))];
 }
 
+export const movedGroupKey=(chat:number)=>"group:moved:"+chat;
+/** The current number of a group that became a supergroup. */
+export function currentGroup(store:Store,chat:number) {
+  for (let i=0;i<4;i++) { const next=store.get<number>(movedGroupKey(chat)); if (next===undefined) break; chat=next; }
+  return chat;
+}
+
 export function migrateGroupChat(store:Store,bot:number,from:number,to:number) {
   if (from===to || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from>=0 || to>=0) return false;
   let moved=false;
   store.atomic(()=>{
+    // The old number keeps pointing to the new one: agents may still name a group by its old number.
+    store.put(movedGroupKey(from),to);
     const rekey=(prefix:string,next:string)=>{
       for (const {key,value} of store.list(prefix)) {
         const target=next+key.slice(prefix.length);

@@ -4,6 +4,7 @@ import type {Conversation} from "./archive-access";
 import {accessList,hasAccess} from "./rights";
 import {forumName} from "./forum-defaults";
 import {privatePolicyKey} from "./employee-private";
+import {currentGroup} from "./group-migration";
 
 // The agent's ordinary send: a topic of any group the bot is in, or the private chat of a person
 // with access. No confirmation card: sending is a normal step of the agent's work.
@@ -39,7 +40,7 @@ export function findPerson(store:Store,bot:number,who:string) {
 
 /** A group the bot is in, by chat ID or part of its title. */
 export function findGroup(store:Store,bot:number,what:string) {
-  if (/^-\d+$/.test(what.trim())) return Number(what.trim());
+  if (/^-\d+$/.test(what.trim())) return currentGroup(store,Number(what.trim()));
   const q=norm(what);
   const hits=store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`).map(r=>r.value)
     .filter(g=>norm(String(g.title??"")).includes(q));
