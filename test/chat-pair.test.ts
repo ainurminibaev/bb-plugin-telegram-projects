@@ -282,3 +282,21 @@ test("срочный подтред: handoff reuse на другой прова�
   assert.equal(w.handoffs.length, 1);
   assert.equal(await pairs.continueUrgent("claude"), undefined, "не срочный — не переносится");
 });
+
+test("лимит основного сняли досрочно: возврат по фактическому остатку", async () => {
+  const w = world();
+  let avail: boolean | undefined = false;
+  const pairs = new ChatPairs({...w.deps, available: async () => avail});
+  await pairs.configure(0, "claude", "codex");
+  w.limitTurn("claude", "t1", "Раз", 24 * 3600_000);
+  await pairs.onLimit(w.binding as never, "claude", "t1");
+  w.threads.get("codex")!.status = "idle";
+  await pairs.tick();
+  assert.equal(w.binding.threadId, "codex", "лимит ещё исчерпан — остаёмся");
+  avail = true;
+  await pairs.tick();
+  assert.equal(w.binding.threadId, "codex", "проверка не чаще раза в 5 минут");
+  (pairs as unknown as {probed: Map<string, number>}).probed.clear();
+  await pairs.tick();
+  assert.equal(w.binding.threadId, "claude");
+});

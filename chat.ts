@@ -297,6 +297,17 @@ export class ChatBridge {
       requestIds: (thread, turn) => this.routes.requestIds(thread, turn),
       retryBelongsToTurn: (thread, turn, retryOf) => this.routes.retryBelongsToTurn(thread, turn, retryOf),
       ingress: (thread, route) => this.routes.ingress(thread, route) as never,
+      available: async threadId => {
+        const got = await this.d.sdk.threads.get({threadId});
+        const t = ("thread" in got ? got.thread : got) as {providerId: string; environmentId: string | null};
+        if (!t.environmentId) return undefined;
+        const env = await this.d.sdk.environments.get({environmentId: t.environmentId});
+        const raw = await this.d.sdk.system.usageLimits({hostId: env.hostId, refresh: true, signal: AbortSignal.timeout(20_000)}) as
+          unknown as Record<string, {status?: string; windows?: {usedPercent?: number}[]}>;
+        const entry = raw[t.providerId];
+        if (entry?.status !== "ok" || !entry.windows?.length) return undefined;
+        return entry.windows.every(w => typeof w.usedPercent === "number" && w.usedPercent < 100);
+      },
     });
   }
   private get routes() { return new ReplyRoutes(this.s); }

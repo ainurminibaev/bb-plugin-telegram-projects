@@ -57,6 +57,12 @@ export type PairDeps = {
   destination: (threadId: string, turnId: string) => ReplyRoute | undefined;
   requestIds: (threadId: string, turnId: string) => string[];
   retryBelongsToTurn: (threadId: string, turnId: string, retryOf: string) => boolean;
+  /**
+   * Фактический лимит провайдера треда на его машине: true — есть запас,
+   * false — исчерпан, undefined — неизвестно. Нужен, чтобы вернуться раньше
+   * расчётного времени, если лимит сняли досрочно.
+   */
+  available?: (threadId: string) => Promise<boolean | undefined>;
   ingress: (threadId: string, route: Telegram) => ReturnType<typeof routeMarker>;
 };
 
@@ -227,9 +233,22 @@ export class ChatPairs {
       try { await this.tickPair(p); } catch { /* следующая попытка на следующем такте */ }
     }
   }
+  private probed = new Map<string, number>();
+  /** Лимит мог сняться раньше расчётного времени: проверить фактический остаток. */
+  private async refreshBlocked(p: ChatPair, id: string) {
+    if (this.free(p, id) || !this.d.available) return p;
+    const last = this.probed.get(id) ?? 0;
+    if (Date.now() - last < 5 * 60_000) return p;
+    this.probed.set(id, Date.now());
+    if (await this.d.available(id).catch(() => undefined) !== true) return p;
+    const next = {...p, blockedUntil: {...p.blockedUntil, [id]: 0}};
+    this.put(next);
+    return next;
+  }
   private async tickPair(p: ChatPair) {
     const b = this.d.binding(p.topicId);
     if (!b?.threadId || (b.threadId !== p.primary && b.threadId !== p.fallback)) return;
+    p = await this.refreshBlocked(p, this.other(p, b.threadId));
     const now = Date.now();
     const active = b.threadId, other = this.other(p, active);
     if (p.waiting && p.waiting.threadId === active && this.free(p, other, now) && !this.free(p, active, now)) {
