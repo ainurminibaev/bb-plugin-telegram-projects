@@ -93,3 +93,13 @@ test("a group named by its number before it became a supergroup is found under t
   s.put(`visibility:${BOT}:group:-1009000`,{chat:-1009000,title:"Штурвал"});
   assert.equal(findGroup(s,BOT,String(TEAM)),-1009000);
 });
+
+test("the same question asked again stays one open question",()=>{
+  const s=setup() as any;
+  const a=rememberAsk(s,BOT,ALICE,{chat:OWNER,topic:0},"когда будет смета?");
+  const b=rememberAsk(s,BOT,ALICE,{chat:OWNER,topic:0},"когда будет смета?");
+  assert.equal(a.id,b.id);
+  assert.equal(openAsks(s,BOT,ALICE).length,1);
+  rememberAsk(s,BOT,ALICE,{chat:OWNER,topic:0},"а макет?");
+  assert.equal(openAsks(s,BOT,ALICE).length,2);
+});

@@ -118,6 +118,10 @@ export function sendTargets(store:Store,bot:number,owner:number,caller:Conversat
 }
 
 export function rememberAsk(store:Store,bot:number,target:number,origin:SendTarget,question:string) {
+  // The same question to the same person from the same place stays one open question: one answer comes back once.
+  const same=openAsks(store,bot,target).find(a=>a.origin.chat===origin.chat && a.origin.topic===origin.topic &&
+    a.question===question.slice(0,500));
+  if (same) { store.put(askPrefix(bot)+same.id,{...same,at:Date.now()}); return same; }
   const ask:Ask={id:randomUUID().slice(0,8),target,origin,question:question.slice(0,500),at:Date.now()};
   store.put(askPrefix(bot)+ask.id,ask);
   return ask;

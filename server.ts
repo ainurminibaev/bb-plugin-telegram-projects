@@ -633,9 +633,16 @@ export default async function plugin(bb: BbPluginApi) {
         const dir=join(cfg.telegramInboxRoot,"archive",String(bot),String(args.file.chat),String(args.file.message));
         await mkdir(dir,{recursive:true,mode:0o750});
         const name=safeTelegramFilename(f.file_name || info.file_path.split("/").at(-1) || "file");
+        const path=join(dir,name);
+        if (checkedApiRoot(await apiRoot())!=="https://api.telegram.org") {
+          // A local Telegram server keeps the file on disk and returns its absolute path: copy it with the usual checks.
+          if (!cfg.telegramLocalRoot) throw Error("attachment_local_api_required");
+          const saved=await saveLocalTelegramFile({sourcePath:info.file_path,localRoot:cfg.telegramLocalRoot,inboxRoot:dir,
+            threadId,updateId:args.file.message,fileId:f.file_id,name,expectedBytes:f.file_size||undefined,signal});
+          return JSON.stringify({path:saved.path,name,kind:f.file_kind,size:f.file_size});
+        }
         const res=await fetch(`${checkedApiRoot(await apiRoot())}/file/bot${await botToken()}/${info.file_path}`,{signal});
         if (!res.ok) throw Error("file_download_failed");
-        const path=join(dir,name);
         await writeFile(path,Buffer.from(await res.arrayBuffer()),{mode:0o640});
         return JSON.stringify({path,name,kind:f.file_kind,size:f.file_size});
       }
