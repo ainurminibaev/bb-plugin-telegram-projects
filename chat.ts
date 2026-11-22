@@ -9,7 +9,7 @@ import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interact
 import { splitChildResultClaims, stripTelegramMarkers, ReplyRoutes, type ReplyRoute } from "./reply-routing";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
 import { TelegramHandoff, type HandoffJob } from "./handoff";
-import { ChatPairs } from "./chat-pair";
+import { ChatPairs, OWNER_MESSAGE } from "./chat-pair";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
 import { markdownExcerpt } from "./events";
@@ -278,7 +278,7 @@ export class ChatBridge {
   }
   private async withCatchUp(threadId: string, text: string) {
     const prefix = await this.pairs.catchUpPrefix(threadId).catch(() => "");
-    return prefix ? prefix + "\n\n" + text : text;
+    return prefix ? prefix + "\n\n" + OWNER_MESSAGE + text : text;
   }
   private makePairs() {
     return new ChatPairs({store: this.d.store, sdk: this.d.sdk, signal: this.d.signal,

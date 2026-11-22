@@ -81,6 +81,12 @@ const MARK_WAITING = "⏳ Ждёт лимита";
 const MARKS = [MARK_ACTIVE, MARK_STANDBY, MARK_WAITING];
 const MARKER = /^\[bb-telegram-reply-route:[^\]]+\][\s\S]*$/;
 const SUMMARY_LIMIT = 6000;
+/** Разделитель: всё после него — собственно сообщение владельца, до него — служебная шапка. */
+export const OWNER_MESSAGE = "Сообщение владельца:\n";
+const ownerPart = (text: string) => {
+  const i = text.lastIndexOf(OWNER_MESSAGE);
+  return i >= 0 ? text.slice(i + OWNER_MESSAGE.length) : text;
+};
 
 export const msk = (ms: number) => new Date(ms).toLocaleString("ru-RU", {
   timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"});
@@ -372,7 +378,7 @@ export class ChatPairs {
         "исполнителя закончился лимит модели. Сначала проверь, что из начатого уже сделано, и не повторяй выполненные " +
         "действия с внешним эффектом.";
       await this.d.sdk.threads.send({threadId: to, mode: "queue-if-active", input: [
-        {type: "text", text: [summary, lead, "Сообщение владельца:\n" + text].filter(Boolean).join("\n\n"), mentions: []},
+        {type: "text", text: [summary, lead, OWNER_MESSAGE + ownerPart(text)].filter(Boolean).join("\n\n"), mentions: []},
         this.d.ingress(to, opts.replay.route),
       ]});
       this.d.store.put(REPLAYED + opts.replay.threadId + ":" + opts.replay.turnId, {at: now});
@@ -417,7 +423,7 @@ export class ChatPairs {
         if (e.type === "client/turn/requested") {
           const d = e.data as {originPluginId?: string; input?: {type: string; text?: string}[]};
           if (d.originPluginId !== "telegram-projects") continue;
-          const t = (d.input ?? []).filter(i => i.type === "text" && i.text && !MARKER.test(i.text)).map(i => i.text).join(" ");
+          const t = ownerPart((d.input ?? []).filter(i => i.type === "text" && i.text && !MARKER.test(i.text)).map(i => i.text).join(" "));
           if (t.trim()) lines.push("Владелец: " + t.replace(/\s+/g, " ").slice(0, 600));
         } else {
           const item = (e.data as {item?: {type: string; text?: string}}).item;

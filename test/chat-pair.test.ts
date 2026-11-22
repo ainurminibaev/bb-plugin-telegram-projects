@@ -473,3 +473,13 @@ test("лимит снят вручную: возврат на ближайшем
   assert.equal(w.binding.threadId, "claude");
   assert.ok(pairs.get(0)!.inactiveSince.codex, "сводка пропущенного не потеряна");
 });
+
+test("сводка не вкладывается сама в себя: берётся только сообщение владельца", async () => {
+  const w = world();
+  const pairs = new ChatPairs(w.deps);
+  w.events.set("codex", [{seq: 1, type: "client/turn/requested", createdAt: Date.now(), data: {originPluginId: "telegram-projects",
+    input: [{type: "text", text: "Пока ты был в резерве … длинная старая сводка …\n\nСообщение владельца:\nНовая просьба"}]}}]);
+  const s = await pairs.summary("codex", Date.now() - 60_000);
+  assert.match(s, /Владелец: Новая просьба/);
+  assert.doesNotMatch(s, /старая сводка/);
+});
