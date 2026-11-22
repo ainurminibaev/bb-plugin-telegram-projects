@@ -645,7 +645,7 @@ export class ChatBridge {
     // Files are absolute paths inside the thread's (or its children's)
     // workspaces; delivery applies the same checks as an ordinary answer.
     if ((!text.trim() && !files.length) || text.length > 16000 || files.length > 20 ||
-        files.some(f => !f.startsWith("/") || f.length > 4096 || /[\n<>]/.test(f) || !ARTIFACT_EXTENSIONS.test(f)) ||
+        files.some(f => !f.startsWith("/") || f.length > 4096 || /[\n<>]/.test(f)) ||
         !/^[a-zA-Z0-9_-]{8,100}$/.test(args.deliveryId))
       throw Error("invalid_explicit_delivery");
     const key = "reply:explicit:" + args.deliveryId;
@@ -3305,7 +3305,7 @@ export class ChatBridge {
           const path = realpathSync(link.path);
           if (!roots.some(root => path.startsWith(root + sep))) throw new Error("outside_workspace");
           if (path.split(sep).some(x => x.startsWith("."))) throw new Error("private_path");
-          if (!ARTIFACT_EXTENSIONS.test(path)) throw new Error("unsupported_artifact");
+          // Any file type, as in groups: the size limit and the workspace check decide.
           const stat = statSync(path);
           if (!stat.isFile() || stat.size > uploadLimit()) throw new Error("file_limit");
           const photo = /\.(png|jpe?g|webp|gif)$/i.test(path) && !link.asDocument;

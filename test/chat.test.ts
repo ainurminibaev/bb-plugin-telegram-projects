@@ -2336,7 +2336,8 @@ test("explicit files[] alone form an album; unsafe or unknown paths are refused 
     assert.equal(f.sent.filter(x=>x.method==='sendMessage').length,0);
     assert.throws(()=>f.bridge.sendExplicit({threadId:'thr_one',topicId:100,deliveryId:'explicit_files_002'}),/invalid/);
     assert.throws(()=>f.bridge.sendExplicit({threadId:'thr_one',topicId:100,files:['relative.png'],deliveryId:'explicit_files_003'}),/invalid/);
-    assert.throws(()=>f.bridge.sendExplicit({threadId:'thr_one',topicId:100,files:[join(dir,'run.sh')],deliveryId:'explicit_files_004'}),/invalid/);
+    // Any file type goes as a document; the workspace and size checks decide at delivery.
+    assert.doesNotThrow(()=>f.bridge.sendExplicit({threadId:'thr_one',topicId:100,files:[join(dir,'run.sh')],deliveryId:'explicit_files_004'}));
     f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:'Вот',files:[join(outside,'secret.png')],deliveryId:'explicit_files_005'});
     f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:'И это ![](../'+outside.split('/').pop()+'/secret.png)',deliveryId:'explicit_files_006'});
     await f.bridge.flush();
