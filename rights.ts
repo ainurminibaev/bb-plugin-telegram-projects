@@ -19,6 +19,8 @@ export type GroupSettings = {
   members: MembersMode;
   zones: string[];
   note: string;
+  /** Group memory: "shared" sees the other shared conversations, "separate" only this group. */
+  memory?: "shared" | "separate";
 };
 export type Person = { id: number; name: string };
 export type SenderRole = "access" | "member" | "none";

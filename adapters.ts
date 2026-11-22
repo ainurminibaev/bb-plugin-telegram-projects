@@ -79,6 +79,9 @@ export async function receiveCloudTelegramDocument(token:TokenSource,file:CloudF
   }
 }
 
+/** Sent bot messages, for the conversation archive. Set once by the bridge. */
+export const sentMessages: { observe?: (message: any) => void } = {};
+
 export function telegram(
   token: TokenSource,
   signal: AbortSignal,
@@ -142,6 +145,11 @@ export function telegram(
         Number.isSafeInteger(data.parameters?.migrate_to_chat_id) ? data.parameters.migrate_to_chat_id : undefined,
       );
     }
+    if (sentMessages.observe && (method.startsWith("send") || method.startsWith("edit")))
+      for (const message of Array.isArray(data.result) ? data.result : [data.result])
+        if (message && typeof message === "object" && "message_id" in message) {
+          try { sentMessages.observe(message); } catch { /* the archive never blocks delivery */ }
+        }
     return data.result as T;
   };
 }

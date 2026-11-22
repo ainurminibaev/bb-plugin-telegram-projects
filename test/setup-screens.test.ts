@@ -105,7 +105,7 @@ test("the owner adds people with the Telegram contact picker and removes them by
   assert.match(h.last("answerCallbackQuery").text,/ведёт владелец/);
 });
 
-test("the administrator is told once when the bot joins a group, with the visibility caveat",async()=>{
+test("the owner is told once, in plain words, what happens if nothing is changed",async()=>{
   const h=harness();
   h.store.put(`privacy:x`,true);
   h.store.put(`visibility:${BOT}:privacy`,true);
@@ -115,10 +115,9 @@ test("the administrator is told once when the bot joins a group, with the visibi
   const notes=h.sent.filter(x=>x.method==="sendMessage");
   assert.equal(notes.length,1);
   assert.equal(notes[0].chat_id,OWNER,"the inviter cannot give tasks, so the owner is told");
-  assert.match(notes[0].text,/Меня добавили в «Склад»/);
-  assert.match(notes[0].text,/отметки через @ до меня не доходят/);
-  assert.match(notes[0].text,/ответьте на любое моё сообщение/);
-  assert.deepEqual(notes[0].reply_markup.inline_keyboard[0].map((b:any)=>b.text),["Настроить «Склад»","Оставить так"]);
+  assert.match(notes[0].text,/^Меня добавили в «Склад»\. Если ничего не менять: отвечаю всем участникам, когда меня отметят или ответят мне; память только этой группы\./);
+  assert.match(notes[0].text,/сделайте меня администратором группы/);
+  assert.deepEqual(notes[0].reply_markup.inline_keyboard[0].map((b:any)=>b.text),["Настроить: 3 шага","Оставить как есть"]);
 });
 
 test("the welcome tells the owner what to do next",()=>{
@@ -138,4 +137,34 @@ test("a personal assistant keeps «only who may give tasks» and says why",async
   await h.tap(OWNER,`rs:w:${CHAT}`);
   assert.equal(groupSettings(h.store as any,BOT,CHAT)!.version,1,"nothing is saved");
   assert.equal(h.last("answerCallbackQuery").show_alert,true);
+});
+
+test("three steps with examples, then one line and «Изменить»",async()=>{
+  const h=harness();
+  await h.tap(OWNER,`rs:s1:${CHAT}`);
+  let screen=h.last("editMessageText");
+  assert.match(screen.text,/^Шаг 1 из 3\. Кто может обращаться ко мне в «Склад»\?/);
+  assert.match(screen.text,/например, любой попросит сводку/);
+  await h.tap(OWNER,`rs:a1:${CHAT}:all`);
+  screen=h.last("editMessageText");
+  assert.match(screen.text,/^Шаг 2 из 3/);
+  assert.match(screen.text,/«@acme_bot, какой срок у задачи\?»/);
+  await h.tap(OWNER,`rs:a2:${CHAT}:mention`);
+  screen=h.last("editMessageText");
+  assert.match(screen.text,/^Шаг 3 из 3\. Память в «Склад»/);
+  await h.tap(OWNER,`rs:a3:${CHAT}:shared`);
+  screen=h.last("editMessageText");
+  assert.equal(screen.text,"Готово. «Склад»: отвечаю всем участникам, когда меня отметят или ответят мне; память общая с другими разговорами.");
+  assert.deepEqual(screen.reply_markup.inline_keyboard[0].map((b:any)=>b.text),["Изменить"]);
+  const s=groupSettings(h.store as any,BOT,CHAT)!;
+  assert.deepEqual([s.who,s.reply,s.memory],["all","mention","shared"]);
+});
+
+test("a personal assistant offers only «you» in step 1 and says why",async()=>{
+  const h=harness();
+  h.store.put("rights:install-kind","assistant");
+  await h.tap(OWNER,`rs:s1:${CHAT}`);
+  const screen=h.last("editMessageText");
+  assert.deepEqual(screen.reply_markup.inline_keyboard[0].map((b:any)=>b.text),["Только вы"]);
+  assert.match(screen.text,/Личный помощник работает с вашими файлами/);
 });

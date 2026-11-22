@@ -15,7 +15,7 @@ import {outboundMessagePayload} from "./outbound-message";
 import {routedArtifactKind,routedCaption} from "./routed-message";
 import {splitText} from "./chat";
 import {ReplyRoutes, stripTelegramMarkers} from "./reply-routing";
-import {refersToExamples, promisesExamples, canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumScope, type GroupTopicPolicy, type Ingress} from "./ingress";
+import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumScope, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
@@ -234,15 +234,6 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           r.text=topicPassages(matches,r.chatId)+r.text;
         }
         r.text += "\nГолосовое обращение: " + transcript;
-        const mentionsFiles=refersToExamples(transcript);
-        if (!mentionsFiles) delete r.precedingExamples;
-        if (!promisesExamples(transcript)) {
-          if (mentionsFiles && !r.precedingExamples?.length && !r.examples?.length) {
-            r.waitUntil=Date.now()+4_000;
-          } else {
-            delete r.waitUntil;
-          }
-        }
         delete r.voice;
       } catch {
         if (signal.aborted) return;
@@ -257,24 +248,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       job.state="ready";
     }
     if (job.state==="pending") {
-      if (r.precedingExamples && r.waitUntil===undefined) {
-        const sets=new Set(r.precedingExamples.map(f=>f.album ? "album:"+f.album : "file:"+f.messageId));
-        if (sets.size===1) r.examples=r.precedingExamples;
-        else {
-          job.answer="Вижу несколько наборов примеров. Ответьте на нужный файл или фотоальбом и отметьте бота.";
-          job.state="ready";
-        }
-      }
       delete r.precedingExamples;
-      const bag=store.get<{files:GroupExample[];last:number;closed?:boolean}>(`group:examples:${botId}:${r.updateId}`);
-      if (r.waitUntil!==undefined && Date.now()<r.waitUntil && !bag?.closed &&
-          (!bag || Date.now()<bag.last+4_000)) continue;
-      if (bag?.files.length && r.waitUntil!==undefined) {
-        r.examples=[...(r.examples??[]),...bag.files];
-      } else if (r.waitUntil!==undefined && !r.examples?.length) {
-        job.answer="Пока не вижу примеров для этой правки. Ответьте на это сообщение с материалами и правками.";
-        job.state="ready";
-      }
       if (r.waitUntil!==undefined) {delete r.waitUntil;store.put(key,job);}
     }
     if (visibleProgress && !policy.ownerSharedProject && r.updateId>0 && job.state==="pending" && job.progressId===undefined) {

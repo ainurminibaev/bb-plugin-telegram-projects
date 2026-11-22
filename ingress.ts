@@ -44,14 +44,6 @@ export function canInvokeGroup(policy: GroupTopicPolicy, owner: number, sender: 
 
 type TopicLine = {id:number; sender:number; name:string; date:number; replyTo?:number; text:string};
 
-export function promisesExamples(text:string) {
-  return /(?:сейчас|счас|щас|ещ[её]|потом|следом|тебе|я)?\s*(?:пришлю|скину|отправлю|прикреплю|перешлю|подожди|жди).{0,60}(?:пример|образец|фото|файл|картин|скрин|референс)/iu.test(text);
-}
-
-export function refersToExamples(text:string) {
-  return /(?:^|[^\p{L}])(?:использу[йе]|возьми|прочита[йе]|посмотри|учти|на основе|из|по|как|эти|этом|этой|мо[ий]|присланн|скинул|отправил).{0,40}(?:пример|образц|фото|файл|картин|скрин|референс)|(?:пример|образц|фото|файл|картин|скрин|референс).{0,25}(?:выше|прислал|скинул|отправил)/iu.test(text);
-}
-
 type TelegramPhoto = {file_id: string; width: number; height: number; file_size?: number};
 
 function bestPhoto(photos: TelegramPhoto[] | undefined, maxBytes: number): TelegramPhoto | undefined {
@@ -395,8 +387,6 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     if (guest && (!policy.requireMention || route.kind!=="group" ||
         !message.entities?.some((e:any)=>e.type==="mention" &&
           message.text.slice(e.offset,e.offset+e.length).toLowerCase()==="@"+policy.botUsername.toLowerCase()))) return;
-    if (route.kind==="group" && (route.voice || promisesExamples(message.text ?? message.caption ?? "")))
-      route.waitUntil=Date.now()+90_000;
     const replyId=message.reply_to_message?.message_id;
     if (file && message.document?.mime_type==="application/pdf" && Number.isSafeInteger(replyId) &&
         replyId!==topicId && Number.isSafeInteger(message.from?.id) && !message.from.is_bot &&
@@ -411,10 +401,6 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     type RecentFiles={revision?:string;files:(GroupExample & {at:number})[]};
     const remembered=store.get<RecentFiles>(senderFiles);
     const recent=remembered?.revision===policy.revision ? (remembered?.files??[]).filter(f=>Date.now()-f.at<=120_000) : [];
-    if (route.kind==="group" && !route.examples?.length && recent.length &&
-        (route.voice || refersToExamples(message.text ?? message.caption ?? ""))) {
-      route.precedingExamples=recent.map(({at,...file})=>file);
-    }
     if (route.kind==="group" && recent.length && route.examples?.some(f=>f.album)) {
       const selected=route.examples;
       const albums=new Set(selected.map(f=>f.album).filter(Boolean));
@@ -422,7 +408,8 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       route.examples=[...selected,...recent.filter(f=>f.album && albums.has(f.album) && !ids.has(f.messageId))]
         .sort((a,b)=>a.messageId-b.messageId);
     }
-    const done=!edit && typeof message.text==="string" && /^\s*(?:вс[её][,.! ]+)?(?:готово|делай|начинай)[.! ]*$/iu.test(message.text);
+    // Earlier files are found by the agent in the conversation archive; no phrase decides it here.
+    const done=false;
     if ((file || done) && !message.sender_chat && !message.from?.is_bot &&
         Number.isSafeInteger(message.from?.id) && canInvokeGroup(policy,owner,message.from.id)) {
       type Waiting = {route:Extract<Ingress,{kind:"group"}>;revision?:string;ownerId:number;state:string};

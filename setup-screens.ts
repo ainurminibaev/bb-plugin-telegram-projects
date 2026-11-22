@@ -1,5 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { GroupTopicPolicy } from "./ingress";
+import { groupMemory } from "./archive-access";
 import { privacyKey } from "./group-visibility";
 import type { Store, Telegram } from "./model";
 import {
@@ -153,26 +154,67 @@ export async function notifyGroupsAdded(ctx: SetupContext) {
     const signature = JSON.stringify([g.event, visible]);
     if (ctx.store.get(key) === signature) continue;
     const recipient = g.inviter && hasAccess(ctx.store, ctx.bot, ctx.owner, g.inviter) ? g.inviter : ctx.owner;
-    const s = activeGroupSettings(ctx.store, ctx.bot, g.chat) ?? defaultGroupSettings();
-    const lines = [s.version === 0
-      ? (s.who === "all" && !openGroupLock(ctx.store)
-        ? `Меня добавили в «${g.title}». Отвечаю здесь всем участникам, когда меня отмечают или отвечают на моё сообщение.`
-        : `Меня добавили в «${g.title}». Пока я отвечаю здесь только тем, кто может мне поручать, и только когда обращаются ко мне.`)
-      : `Я в «${g.title}». Сейчас ${shortState(s, openGroupLock(ctx.store) === "assistant")}.`];
-    if (privacy === false && !g.administrator)
-      lines.push(`Режим приватности у меня выключен: я вижу всю переписку «${g.title}». Обрабатываю только то, что разрешают настройки группы.`);
+    let s = activeGroupSettings(ctx.store, ctx.bot, g.chat) ?? defaultGroupSettings();
+    if (!s.memory) {
+      // Only the owner and the bot: one memory with everything else. Other people: this group's own memory.
+      const count = await ctx.tg(g.chat)<number>("getChatMemberCount", { chat_id: g.chat }).catch(() => undefined);
+      s = saveGroupSettings(ctx.store, ctx.bot, g.chat, { memory: typeof count === "number" && count <= 2 ? "shared" : "separate" });
+    }
+    const lines = [`Меня добавили в «${g.title}». Если ничего не менять: ${summaryLine(ctx, s)}.`];
     if (!visible)
-      lines.push(`Пока я обычный участник, Telegram показывает мне в «${g.title}» только ответы на мои сообщения и команды для меня. Обычные сообщения и отметки через @ до меня не доходят: чтобы обратиться, ответьте на любое моё сообщение. Если сделать меня администратором группы (права можно не давать), я увижу обсуждение и меня можно будет просто отметить.`);
+      lines.push("Чтобы я видел обсуждение, а не только обращения ко мне, сделайте меня администратором группы.");
     try {
       await ctx.tg(recipient)("sendMessage", { chat_id: recipient, text: lines.join("\n"), reply_markup: { inline_keyboard: [[
-        { text: `Настроить «${g.title}»`, callback_data: "rs:g:" + g.chat },
-        { text: "Оставить так", callback_data: "rs:k" },
+        { text: "Настроить: 3 шага", callback_data: "rs:s1:" + g.chat },
+        { text: "Оставить как есть", callback_data: "rs:k" },
       ]] } });
       ctx.store.put(key, signature);
     } catch { continue; /* retried on the next pass */ }
     // Only a group the bot has just joined: an update never posts into an existing group.
     if (visible) await announceInGroup(ctx, g.chat, s);
   }
+}
+
+function memoryOf(ctx: Pick<SetupContext, "store" | "bot">, chat: number, s: GroupSettings) {
+  return s.memory ?? groupMemory(ctx.store, ctx.bot, chat);
+}
+
+/** One line: who may talk to me here, when I answer, and the group memory. */
+export function summaryLine(ctx: Pick<SetupContext, "store" | "bot">, s: GroupSettings, chat?: number) {
+  const locked = openGroupLock(ctx.store) === "assistant";
+  const who = s.who === "all" && !locked ? "отвечаю всем участникам" : "отвечаю только вам" + (accessList(ctx.store, ctx.bot).length ? " и людям с доступом" : "");
+  const when = s.reply === "mention" ? "когда меня отметят или ответят мне" : "на всё, что ко мне по делу";
+  const memory = (chat === undefined ? s.memory : memoryOf(ctx, chat, s)) === "shared" ? "память общая с другими разговорами" : "память только этой группы";
+  return `${who}, ${when}; ${memory}`;
+}
+
+/** The three-step setup: who may talk to me, when I answer, the group memory. */
+export function setupStep(ctx: Pick<SetupContext, "store" | "bot" | "botUsername">, step: 1 | 2 | 3, title: string, chat: number) {
+  const assistant = installKind(ctx.store) === "assistant";
+  const others = accessList(ctx.store, ctx.bot).length ? " и люди с доступом" : "";
+  if (step === 1) return {
+    text: [`Шаг 1 из 3. Кто может обращаться ко мне в «${title}»?`,
+      "• Все участники — например, любой попросит сводку или поручит задачу.",
+      `• Только вы${others} — остальным я не отвечаю.`,
+      ...(openGroupLock(ctx.store) === "assistant" ? ["Личный помощник работает с вашими файлами, поэтому в группах отвечает только вам."] : [])].join("\n"),
+    reply_markup: { inline_keyboard: [[
+      ...(openGroupLock(ctx.store) === "assistant" ? [] : [{ text: "Все участники", callback_data: `rs:a1:${chat}:all` }]),
+      { text: `Только вы${others}`, callback_data: `rs:a1:${chat}:access` }]] },
+  };
+  if (step === 2) return {
+    text: [`Шаг 2 из 3. Когда мне отвечать в «${title}»?`,
+      `• Когда отметили или ответили мне — например: «@${ctx.botUsername || "бот"}, какой срок у задачи?»`,
+      "• На всё по делу — сам вступаю, когда вопрос ко мне."].join("\n"),
+    reply_markup: { inline_keyboard: [[{ text: "Когда отметили", callback_data: `rs:a2:${chat}:mention` },
+      { text: "На всё по делу", callback_data: `rs:a2:${chat}:auto` }]] },
+  };
+  return {
+    text: [`Шаг 3 из 3. Память в «${title}».`,
+      `• Общая — здесь я помню и то, что знаю из других групп${assistant ? " и вашей лички" : ""}. Подходит, если в группе только вы.`,
+      "• Только этой группы — здесь я знаю только её переписку. Подходит, если в группе есть другие люди."].join("\n"),
+    reply_markup: { inline_keyboard: [[{ text: "Общая", callback_data: `rs:a3:${chat}:shared` },
+      { text: "Только этой группы", callback_data: `rs:a3:${chat}:separate` }]] },
+  };
 }
 
 /** An employee open to all members says once in the group how to reach it. */
@@ -307,6 +349,26 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
   const title = membership(ctx.store, ctx.bot, chat)?.title ?? "группа";
   const lock = openGroupLock(ctx.store, await providerOf(ctx, chat));
   let s = activeGroupSettings(ctx.store, ctx.bot, chat) ?? defaultGroupSettings();
+  if (action === "s1") {
+    ctx.store.del(awaitKey);
+    await show(setupStep(ctx, 1, title, chat));
+    await answer();
+    return true;
+  }
+  if (action === "a1" || action === "a2" || action === "a3") {
+    if (action === "a1" && (extra === "all" || extra === "access")) {
+      if (extra === "all" && lock) { await answer(lockText(lock), true); return true; }
+      saveGroupSettings(ctx.store, ctx.bot, chat, { who: extra });
+    } else if (action === "a2" && (extra === "mention" || extra === "auto")) saveGroupSettings(ctx.store, ctx.bot, chat, { reply: extra });
+    else if (action === "a3" && (extra === "shared" || extra === "separate")) saveGroupSettings(ctx.store, ctx.bot, chat, { memory: extra });
+    else { await answer(); return true; }
+    const saved = activeGroupSettings(ctx.store, ctx.bot, chat) ?? defaultGroupSettings();
+    if (action === "a3") await show({ text: `Готово. «${title}»: ${summaryLine(ctx, saved, chat)}.`,
+      reply_markup: { inline_keyboard: [[{ text: "Изменить", callback_data: `rs:s1:${chat}` }]] } });
+    else await show(setupStep(ctx, action === "a1" ? 2 : 3, title, chat));
+    await answer();
+    return true;
+  }
   if (action === "w") {
     if (lock) {
       await answer(lockText(lock), true);

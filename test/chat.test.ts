@@ -2031,7 +2031,7 @@ test("photos, files and recorded comment are prepared before a single agent requ
   } finally {f.cleanup();}
 });
 
-for (const explicit of [false,true]) test("minute-late follow-up joins only after an explicit wait: " + explicit, async () => {
+for (const explicit of [false,true]) test("a promise to send a file never holds the next message: " + explicit, async () => {
   const f=fixture(undefined,async()=>"Комментарий к посту",4000);
   try {
     await f.bridge.handle(f.input("start"));
@@ -2041,14 +2041,14 @@ for (const explicit of [false,true]) test("minute-late follow-up joins only afte
     f.store.put(key,{...f.store.get<any>(key),at:Date.now()-65_000});
     await f.bridge.tick();
     await new Promise(resolve=>setImmediate(resolve));
-    assert.equal(f.calls.filter(c=>c[0]==="send").length,explicit ? 0 : 1);
+    assert.equal(f.calls.filter(c=>c[0]==="send").length,1);
     const next={...f.input(""),voice:{fileId:"voice",mime:"audio/ogg",size:20,duration:60},sentAt:160};
     f.bridge.accept(next);
     const nextKey="chat:in:"+next.updateId;
     f.store.put(nextKey,{...f.store.get<any>(nextKey),at:Date.now()-4100});
     await f.bridge.tick(); await f.bridge.dispose();
     const sends=f.calls.filter(c=>c[0]==="send");
-    assert.equal(sends.length,explicit ? 1 : 2);
+    assert.equal(sends.length,2);
     assert.ok(sends.every(s=>s[1].threadId==="thr_one"));
     assert.ok(sends.at(-1)[1].input[0].text.includes("Комментарий к посту"));
   } finally {f.cleanup();}
