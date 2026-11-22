@@ -34,6 +34,10 @@ test("a schedule's result goes to the topic where it was set; silent runs and ot
   ev("turn/input/accepted",{clientRequestId:"c"},"tc");
   ev("item/completed",{item:{type:"agentMessage",text:"NO_REPLY"}},"tc");
   ev("turn/completed",{status:"completed"},"tc");
+  ev("client/turn/requested",{requestId:"d",initiator:"system",systemMessageKind:"child-completed"});
+  ev("turn/input/accepted",{clientRequestId:"d"},"td");
+  ev("item/completed",{item:{type:"agentMessage",text:"Подтред посчитал: 16 файлов"}},"td");
+  ev("turn/completed",{status:"completed"},"td");
   await run(); await run();
-  assert.deepEqual(sent.map(p=>[p.chat_id,p.message_thread_id,p.text]),[[-1001,7,"Статус: всё по плану"]]);
+  assert.deepEqual(sent.map(p=>[p.chat_id,p.message_thread_id,p.text]),[[-1001,7,"Статус: всё по плану"],[-1001,7,"Подтред посчитал: 16 файлов"]]);
 });

@@ -6,8 +6,8 @@ import {stripTelegramMarkers,isBusyAnswer} from "./reply-routing";
 import {sendOutboundMessage} from "./outbound-message";
 import {splitText} from "./chat";
 
-// A schedule set in a group or a person's chat runs as an ordinary turn of that conversation's thread.
-// Its result goes back where the schedule was set: the same topic or private chat. NO_REPLY stays silent.
+// A schedule set in a group or a person's chat runs as an ordinary turn of that conversation's thread; a subthread's
+// outcome wakes it the same way. The result goes back to the same topic or private chat. NO_REPLY stays silent.
 
 type Run={turnId?:string;text?:string};
 type Cursor={seq:number;runs:Record<string,Run>};
@@ -32,7 +32,10 @@ export async function deliverScheduledResults(store:Store,sdk:Pick<BbPluginApi["
     const runs={...cursor.runs};
     const byTurn=(turnId:string)=>Object.entries(runs).find(([,r])=>r.turnId===turnId);
     for (const e of events) {
-      if (e.type==="client/turn/requested" && e.data.originPluginId==="automations") runs[e.data.requestId]={};
+      // Turns no Telegram message started: a schedule's run, or BB waking the thread with its subthread's outcome.
+      const d=e.data as {originPluginId?:string;initiator?:string;systemMessageKind?:string;requestId:string};
+      if (e.type==="client/turn/requested" && (d.originPluginId==="automations" ||
+          (d.initiator==="system" && d.systemMessageKind?.startsWith("child-")))) runs[d.requestId]={};
       if (e.scope.kind==="turn") {
         const turnId=e.scope.turnId;
         if (e.type==="turn/input/accepted" && runs[e.data.clientRequestId]) runs[e.data.clientRequestId].turnId=turnId;
