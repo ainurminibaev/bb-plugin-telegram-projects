@@ -28,6 +28,11 @@ function fixture() {
     assert.equal((payload as any).chat_id??target,target);
     messages.push({target,method,payload,id:++messageId});
     if (failDelivery && (payload as any).reply_parameters) throw Error("uncertain_send");
+    if (method==="sendMediaGroup") return (payload as any).media.map((item:any,index:number)=>({
+      chat:{id:target},message_id:messageId+index,media_group_id:"test-group",
+      ...(index===0 && {reply_to_message:(payload as any).reply_parameters}),
+      ...(item.type==="photo"?{photo:[{file_id:"photo"}]}:{document:{file_id:"doc"}}),
+    })) as T;
     return {message_id:messageId,document:{file_id:"pdf"},photo:[{file_id:"photo"}]} as T;
   };
   const submits:{subject:number;text:string;attachments:any[]}[]=[];
@@ -56,13 +61,13 @@ function fixture() {
     },
     image:async(_token:string,path:string)=>{
       await beforeExport();
-      if (path!=="/own/outputs/result.png") throw Error("export_unavailable");
-      return {name:"result.png",photo:new Blob([new Uint8Array(pixel)])};
+      if (!/^\/own\/outputs\/(?:result|album-[1-3])\.png$/.test(path)) throw Error("export_unavailable");
+      return {name:path.split("/").at(-1)!,photo:new Blob([new Uint8Array(pixel)])};
     },
     document:async(_token:string,path:string)=>{
       await beforeExport();
-      if (path!=="/own/outputs/нейтральный.html") throw Error("export_unavailable");
-      return {name:"нейтральный.html",document:new Blob(["<p>opaque bytes</p>"],{type:"application/octet-stream"})};
+      if (path!=="/own/outputs/нейтральный.html" && !/^\/own\/outputs\/album-[1-3]\.html$/.test(path)) throw Error("export_unavailable");
+      return {name:path.split("/").at(-1)!,document:new Blob(["<p>opaque bytes</p>"],{type:"application/octet-stream"})};
     },
     upload:async(file:any)=>({...file,path:file.path.replace("/bridge/","/receiver/")}),
   }) as never};
@@ -84,7 +89,7 @@ function fixture() {
     }});
   };
   const tick=()=>processPrivateEmployeeInputs(deps,new AbortController().signal,async file=>file.image?imageAttachment(pixel):{
-    path:"/bridge/1-aaaaaaaaaaaaaaaaaaaa/"+file.name,name:file.name,bytes:5,sha256:"a".repeat(64),
+    path:"/bridge/"+(file.sourceUpdateId??1)+"-aaaaaaaaaaaaaaaaaaaa/"+file.name,name:file.name,bytes:5,sha256:"a".repeat(64),
   });
   return {store,post,notice,action,tick,messages,submits,sequence:()=>seq,wait:()=>{waiting=true;},
     fail:()=>{failDelivery=true;},answerNext:(text:string)=>{replyNext=text;}, onExport:(fn:()=>Promise<unknown>)=>{beforeExport=fn;}};
@@ -315,4 +320,39 @@ test("a configured private pilot silently ignores other Telegram users",async()=
     if (previous===undefined) delete process.env[key];
     else process.env[key]=previous;
   }
+});
+
+for (const kind of ["photo","document"] as const) test(`approved private ${kind} album keeps native order and scope`,async t=>{
+  let now=Date.now();
+  t.mock.method(Date,"now",()=>now);
+  const f=fixture();
+  await f.post(alice,"/start");await f.action(alice,"allow");
+  const post=(id:number,updateId:number)=>f.post(alice,undefined,{
+    message_id:id,media_group_id:"bundle",
+    ...(id===21 && {caption:"Album prompt"}),
+    ...(kind==="photo" ? {photo:[{file_id:id===22?"unique":"shared",width:10,height:10}]} :
+      {document:{file_id:id===22?"unique":"shared",file_name:"entry.html",mime_type:"text/html"}}),
+  },updateId);
+  await post(23,203); await post(21,201); await post(23,203);
+  await f.tick(); assert.equal(f.submits.length,0);
+  now+=2700; await post(22,202);
+  now+=3000;
+  const ext=kind==="photo"?"png":"html";
+  f.answerNext([1,2,3].map(i=>`[Caption ${i}](/own/outputs/album-${i}.${ext})`).join("\n")+"\nSeparate text.");
+  await f.tick();await f.tick();
+  assert.equal(f.submits.length,1);
+  assert.equal(f.submits[0].attachments.length,3);
+  assert.equal(f.submits[0].text,"Album prompt");
+  const routes=f.messages.filter(m=>m.payload.reply_parameters);
+  assert.deepEqual(routes.map(m=>m.method),["sendMediaGroup","sendMessage"]);
+  assert.equal(routes[0].payload.reply_parameters.message_id,21);
+  assert.equal(routes[0].target,alice);
+  assert.deepEqual(routes[0].payload.media.map((m:any)=>[m.type,m.caption]),[1,2,3].map(i=>[kind,"Caption "+i]));
+  assert.equal(routes[1].payload.text,"Separate text.");
+  await post(23,203);await post(24,204);
+  await f.tick();await f.tick();
+  const notices=f.messages.filter(m=>m.payload.text?.includes("дополнительный элемент"));
+  assert.equal(notices.length,1);
+  assert.equal(notices[0].payload.reply_parameters.message_id,21);
+  assert.equal(f.submits.length,1);
 });

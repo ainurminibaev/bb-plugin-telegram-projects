@@ -447,3 +447,90 @@ test("addressed group messages preserve text, photo and opaque HTML with optiona
     assert.equal(sent.length,n);
   } finally {await rm(workspace,{recursive:true,force:true});}
 });
+
+for (const kind of ["photo","document"] as const) test(`forum ${kind} album submits once and answers in its source topic`,async t=>{
+  let now=Date.now();
+  t.mock.method(Date,"now",()=>now);
+  const rows=new Map<string,any>();
+  const store={get:<T>(key:string)=>structuredClone(rows.get(key)) as T,
+    put:(key:string,value:unknown)=>{rows.set(key,structuredClone(value));},del:(key:string)=>{rows.delete(key);},
+    atomic:(run:()=>void)=>run(),list:<T>(prefix:string)=>[...rows].filter(([key])=>key.startsWith(prefix))
+      .map(([key,value])=>({key,value:structuredClone(value) as T}))};
+  const chat={id:-111,type:"supergroup"}, bot=5, owner=7, topic=3;
+  bindGroupTopic(store,{chatId:chat.id,topicId:topic,threadId:"t",botId:bot,botUsername:"bot",
+    ownerOnly:true,requireMention:true,includeTopicContext:true,revision:"album-forum"},"group-project");
+  now+=2000;
+  const root=await mkdtemp(join(tmpdir(),"forum-album-"));
+  const output=join(root,"outputs");
+  const downloads:{id:number;file:string}[]=[];
+  const sends:{method:string;body:any}[]=[];
+  const events:any[]=[];
+  const dispatches:any[]=[];
+  const native=new AbortController().signal;
+  try {
+    await mkdir(output);
+    const names=[1,2,3].map(index=>"sample-"+index+(kind==="photo"?".png":".txt"));
+    const bytes=names.map((_,index)=>kind==="photo"?pixel:Buffer.from("synthetic "+index));
+    for (const [index,name] of names.entries()) await writeFile(join(output,name),bytes[index]);
+    const response=names.map((name,index)=>`[${index===1?"":"Caption "+(index+1)}](${join(output,name)})`).join("\n")+"\nSeparate text.";
+    const sdk={threads:{
+      get:async()=>({id:"t",projectId:"group-project",visibility:"visible",environmentId:"env"}),
+      events:{list:async(q:any)=>q.order==="desc"?events.slice(-1):events.filter(e=>e.seq>Number(q.afterSeq??0))},
+      send:async(q:any)=>{
+        dispatches.push(q);
+        const append=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"album-turn"}});
+        append("client/turn/requested",{requestId:"q",originPluginId:"telegram-projects",input:q.input});
+        append("turn/input/accepted",{clientRequestId:"q"});
+        append("item/completed",{item:{type:"agentMessage",text:response}});
+        append("turn/completed",{status:"completed"});
+      }},environments:{get:async()=>({hostId:"test-host",path:root})}};
+    const tick=()=>processGroupInputs(store,sdk as never,owner,bot,id=>async <T>(method:string,body:Record<string,unknown>)=>{
+      assert.equal(id,chat.id);
+      sends.push({method,body});
+      if (method==="sendMediaGroup") return (body.media as any[]).map((item,index)=>({
+        chat:{id},message_id:300+index,message_thread_id:topic,media_group_id:"synthetic-result",
+        ...(index===0 && {reply_to_message:body.reply_parameters}),
+        ...(item.type==="photo"?{photo:[{file_id:"export"}]}:{document:{file_id:"export"}}),
+      })) as T;
+      return {message_id:400+sends.length} as T;
+    },native,undefined,"test-host",async file=>{
+      downloads.push({id:file.messageId,file:file.fileId});
+      if (file.image) return image;
+      return saveLocalTelegramFile({sourcePath:join(output,names[0]),localRoot:output,inboxRoot:join(root,"in"),
+        updateId:file.sourceUpdateId!,fileId:file.fileId,name:file.name,signal:native});
+    });
+    const message=(id:number,updateId:number)=>({update_id:updateId,message:{
+      date:Math.floor(now/1000),message_id:id,chat,message_thread_id:topic,from:{id:owner},
+      media_group_id:"test-album",
+      ...(kind==="photo"?{photo:[{file_id:id===22?"other":"repeat",width:20,height:20}]}:
+        {document:{file_id:id===22?"other":"repeat",file_name:"same.txt",mime_type:"text/plain"}}),
+      ...(id===21 && {caption:"@bot Album prompt",caption_entities:[{type:"mention",offset:0,length:4}]}),
+    }});
+    for (const [id,update] of [[23,103],[21,101],[23,103]]) assert.ok(acceptGroupUpdate(store,message(id,update),owner,bot));
+    await tick();assert.equal(dispatches.length,0);
+    now+=2700;
+    assert.ok(acceptGroupUpdate(store,message(22,102),owner,bot));
+    assert.ok(acceptGroupUpdate(store,{update_id:111,message:{date:Math.floor(now/1000),message_id:30,
+      chat,message_thread_id:topic,from:{id:owner},text:"Adjacent text"}},owner,bot));
+    now+=3000;
+    await tick();await tick();await tick();
+    assert.equal(dispatches.length,1);
+    assert.deepEqual(downloads,[{id:21,file:"repeat"},{id:22,file:"other"},{id:23,file:"repeat"}]);
+    assert.doesNotMatch(dispatches[0].input[0].text,/Adjacent text/);
+    assert.deepEqual(sends.map(event=>event.method),["sendMediaGroup","sendMessage"]);
+    assert.equal(sends[0].body.message_thread_id,topic);
+    assert.equal(sends[0].body.reply_parameters.message_id,21);
+    assert.deepEqual(sends[0].body.media.map((item:any)=>[item.type,item.caption]),
+      [[kind,"Caption 1"],[kind,undefined],[kind,"Caption 3"]]);
+    for (const [index,data] of bytes.entries())
+      assert.deepEqual(Buffer.from(await sends[0].body["media"+index].arrayBuffer()),data);
+    assert.equal(sends[1].body.text,"Separate text.");
+    assert.ok(acceptGroupUpdate(store,message(23,103),owner,bot));
+    assert.ok(acceptGroupUpdate(store,message(24,112),owner,bot));
+    await tick();await tick();
+    assert.equal(dispatches.length,1);
+    assert.equal(sends.length,3);
+    assert.match(sends[2].body.text,/дополнительный элемент/);
+    assert.equal(sends[2].body.reply_parameters.message_id,21);
+  } finally {await rm(root,{recursive:true,force:true});}
+});

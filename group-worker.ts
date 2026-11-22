@@ -1,4 +1,5 @@
-import {isTopicPaused} from "./topic-lifecycle";
+import {albumCaption,albumChanged,albumKind,deliverAlbumWarnings,sendAlbum,type AlbumMedia} from "./media-album";
+import {beginTopicSend,isTopicPaused} from "./topic-lifecycle";
 import {groupThreadMatches,isSharedOwnerPolicy,sharedGroupScopeKey,sharedGroupThreadKey} from "./group-binding";
 import {isolatedFile,localFileInput,maxEncodedImages,maxGroupAttachments,readSavedImage,opaqueAttachmentInput,opaqueFileReference,readOpaqueAttachment,type ImageAttachment,type IsolatedAttachment} from "./group-attachments";
 import {awaitProjectProposal} from "./owner-selection";
@@ -14,7 +15,7 @@ import {outboundMessagePayload} from "./outbound-message";
 import {routedArtifactKind,routedCaption} from "./routed-message";
 import {splitText} from "./chat";
 import {ReplyRoutes, stripTelegramMarkers} from "./reply-routing";
-import {refersToExamples, promisesExamples, canInvokeGroup, contextMediaPrefix, type GroupTopicPolicy, type Ingress} from "./ingress";
+import {refersToExamples, promisesExamples, canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumScope, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
@@ -27,6 +28,7 @@ type Job = {
   taskId?:string; progressId?:number|null;
   executionToken?:string; executorRetryAt?:number;
   pdfIndex?:number; failedPdfs?:string[];
+  albumSent?:number[];
   imageIndex?:number; failedImages?:string[];
   opaqueFiles?:SavedTelegramFile[]; captionSent?:true;
   cursor?:number; turnId?:string; answer?:string; part?:number;
@@ -165,6 +167,19 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       else store.put(key,{...value,retryAt:Date.now()+1000*(error instanceof TelegramFailure ? error.retryAfter : 30)});
     }
   }
+  releaseGroupAlbums(store,owner,botId);
+  await deliverAlbumWarnings<GroupAlbumScope>(store,`group:album-warning:${botId}:${owner}:`,
+    chatId=>async (method,body)=>{
+      const end=beginTopicSend(store,botId,chatId,Number(body.message_thread_id??0));
+      try {return await transport(chatId)(method,body);} finally {end();}
+    },async (scope,target)=>{
+    const policy=store.get<GroupTopicPolicy>(`group:policy:${target.chatId}:${target.topicId}`);
+    return !!policy && policy.botId===botId && policy.revision===scope.revision &&
+      (policy.ownerId===undefined || policy.ownerId===owner) &&
+      !isTopicPaused(store,botId,target.chatId,target.topicId) &&
+      canInvokeGroup(policy,owner,scope.senderId) &&
+      (!policy.ownerSharedProject || !!await verifyOwnerForum?.(policy));
+  },signal);
   const pending=store.list<Job>(`group:in:${botId}:`);
   pending.sort((a,b)=>a.value.route.updateId-b.value.route.updateId);
   for (const {key,value:job} of pending) {
@@ -177,7 +192,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         const receiptKey=`group:receipt:${botId}:${r.updateId}`;
         // An interrupted Telegram send requires the original payload for reconciliation.
         store.put(receiptKey,state==="sending"?job:{state,...(sourceDenied && {reason:"source_unavailable"}),chatId:r.chatId,topicId:r.topicId,
-          messageId:r.messageId,threadId:r.threadId,turnId:job.turnId,sentId});
+          messageId:r.messageId,threadId:r.threadId,turnId:job.turnId,sentId,...(job.albumSent && {albumMessageIds:job.albumSent})});
         if (job.progressId) store.put(`group:cleanup:${botId}:${r.updateId}`,{chatId:r.chatId,messageId:job.progressId});
         store.del(`group:examples:${botId}:${r.updateId}`);
         store.del(key);
@@ -190,7 +205,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     const allowed=()=>{
       const p=store.get<GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`);
       sourceDenied=!sourcesVisible(p?.deliverySources,botId,r.chatId,r.topicId);
-      return !sourceDenied && p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && p.threadId===r.threadId &&
+      return !isTopicPaused(store,botId,r.chatId,r.topicId) && !albumChanged(store,r.albumKey) && !sourceDenied && p?.botId===botId && p.revision===job.revision && (p.ownerId===undefined || p.ownerId===owner) && p.chatId===r.chatId && p.topicId===r.topicId && p.threadId===r.threadId &&
         owner===job.ownerId && (p.isolated===true || p.ownerTopic || p.ownerSharedProject ? canInvokeGroup(p,owner,r.senderId) : senderRole(store,botId,owner,r.chatId,r.senderId)!=="none");
     };
     if (!allowed()) {finish("revoked");continue;}
@@ -208,7 +223,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         !!binding && (!binding.ownerSharedProject || !thread.parentThreadId) &&
         groupThreadMatches(store,binding,thread.projectId);
     };
-    const dest={kind:"telegram" as const,chatId:r.chatId,topicId:r.topicId,updateId:r.updateId};
+    const dest={kind:"telegram" as const,chatId:r.chatId,topicId:r.topicId,updateId:r.updateId,messageId:r.messageId};
     if (job.state==="pending" && r.voice) {
       try {
         const transcript = (await transcribe?.(r.voice))?.trim();
@@ -438,7 +453,46 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const links=artifacts.filter(link=>routedArtifactKind(byPath.get(link.path)!)!=="image");
       const paths=[...unique.filter(link=>routedArtifactKind(link)==="pdf"),
         ...unique.filter(link=>routedArtifactKind(link)==="document").slice(0,3)].map(link=>link.path);
-      for (let i=job.pdfIndex??0;i<paths.length;i++) {
+      const albumType=albumKind(unique,link=>routedArtifactKind(link)==="image"?"photo":"document");
+      if (albumType && (job.albumSent || (!job.pdfIndex && !job.imageIndex))) {
+        if (!job.albumSent) {
+          const files:AlbumMedia[]=[];
+          try {
+            const workspace=executor ? undefined : await outputRoot();
+            for (const link of unique) {
+              if (!allowed()) break;
+              const kind=routedArtifactKind(link);
+              const path=link.path;
+              const source=kind==="document" ? job.opaqueFiles?.find(file=>opaqueFileReference(file)===path) : undefined;
+              const result=executor ? await executor[kind](job.executionToken!,path,signal) :
+                kind==="image" ? await readGroupImage(workspace!,path) :
+                kind==="pdf" ? await readGroupPdf(workspace!,path) :
+                source ? {name:source.name,document:new Blob([new Uint8Array((await readOpaqueAttachment(source)).bytes)],
+                  {type:"application/octet-stream"})} : await readGroupDocument(workspace!,path);
+              files.push({kind:albumType,name:result.name,data:"photo" in result ? result.photo : result.document,
+                caption:albumCaption(link.label,result.name)});
+            }
+          } catch {
+            if (signal.aborted) return;
+          }
+          if (!allowed() || !await safeToSend()) {finish("revoked");continue;}
+          if (files.length!==unique.length) {
+            job.answer="Не удалось подготовить все вложения альбома.";
+            store.put(key,job);
+            continue;
+          }
+          const end=beginTopicSend(store,botId,r.chatId,r.topicId);
+          try {
+            store.put(key,{...job,state:"sending"});
+            const sent=await sendAlbum(transport(r.chatId),reply,files);
+            job.albumSent=sent.messageIds;
+            store.put(key,job);
+          } finally {end();}
+        }
+        text=artifacts.reduce((body,link)=>body.replace(link.markdown,""),text).trim();
+        if (!text) {finish("done",job.albumSent.at(-1));continue;}
+      }
+      for (let i=job.albumSent ? paths.length : job.pdfIndex??0;i<paths.length;i++) {
         let document;
         const path=paths[i];
         const kind=routedArtifactKind(byPath.get(path)!);
@@ -483,7 +537,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         !paths.includes(link.path) || job.failedPdfs?.includes(link.path) ? "Вложение недоступно для отправки." : "");
       const imageLinks=artifacts.filter(link=>routedArtifactKind(byPath.get(link.path)!)==="image");
       const images=[...new Set(imageLinks.map(link=>link.path))];
-      for (let i=job.imageIndex??0;i<images.length;i++) {
+      for (let i=job.albumSent ? images.length : job.imageIndex??0;i<images.length;i++) {
         let image;
         try {
           if (executor) {

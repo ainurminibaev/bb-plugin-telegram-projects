@@ -192,3 +192,32 @@ The administrator can call `setForumTopicDefaults` with `confirm: true`, the exa
 An admitted manager can enter `/topic_create@bot_username Title` in a bound forum topic. In a private chat, use `/topic_create Title | Exact forum name or link | First message`. The first message is optional. Delegated private requests require a forum selection. A paired owner can omit the forum if exactly one eligible configured forum exists. The bridge checks current admission, delegation, forum membership and the Telegram rights of both the owner and the bot. A verified request creates the topic without a second confirmation. `/topic_close@bot_username` and `/topic_reopen@bot_username` target the current topic. In private, use the exact topic link. `/topic_delete@bot_username https://t.me/c/123456/42` requires one exact topic link, explicit delete delegation and current Telegram delete rights. The same exact-link requirement applies in private. A direct, authorized Telegram command is sufficient. Old confirmation cards expire when this behavior first goes live.
 
 Each receiving bridge instance uses one bot token. To address multiple bots in the same work group, give each bot its own receiving instance, group policy and isolated executor. With mention mode enabled, a reply to a bot is addressed to that bot even if it also mentions a different bot. Telegram has to deliver an update before a bot can route it or collect its context. See the [Telegram delivery rules](https://core.telegram.org/bots/faq#what-messages-will-my-bot-get).
+
+### Telegram albums
+
+Photo and document albums are collected by bot, chat, topic, sender and
+`media_group_id`. The bridge sorts elements by `message_id` and submits one
+BB request. A replay of one Telegram update leaves the request unchanged. Two
+messages that contain the same Telegram file remain two positions. A nearby
+text message follows the ordinary text route. The existing trigger and access
+policy still applies to group albums.
+
+Telegram supplies no final-element marker. The bridge waits for 2.5 seconds
+of inactivity, for up to 8 seconds from the first item. A new item received
+before the worker actually takes the album is still included. If a new item
+arrives after handoff, the bridge sends one warning in the original route,
+withholds any result it has yet to send, and never opens a second task.
+Already delivered results remain in the chat. Send the complete album as a
+new message if the warning appears.
+
+An addressed answer with a homogeneous set of files uses `sendMediaGroup`
+with the original reply address. Put per-file captions in the Markdown link
+labels. Any prose outside those links stays a separate reply. Telegram
+requires document albums to contain only documents.
+
+In the paired owner's chat, reply to a recent album item with `/copyalbum`
+to copy that album as-is within the same topic. Telegram preserves the album
+but the copy has no native reply address. Use `/replyalbum` to resend the same
+bot's files as an addressed reply instead. Protected media cannot be re-sent
+through these commands. They use up to 24 hours of scoped album metadata.
+A partial or uncertain copy does not retry automatically.

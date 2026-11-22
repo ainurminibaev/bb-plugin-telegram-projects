@@ -27,9 +27,9 @@ import { markdownExcerpt } from "./events";
 export const ARTIFACT_EXTENSIONS = /\.(pdf|png|jpe?g|webp|gif|mp4|mov|txt|md|csv|xlsx|docx|pptx|html|json|zip)$/i;
 export function localArtifacts(text: string, options: {relative?: boolean} = {}): {markdown: string; path: string; label: string; asDocument?: boolean; relative?: boolean}[] {
   const found: {markdown: string; path: string; label: string; asDocument?: boolean; relative?: boolean}[] = [];
-  // With options.relative an empty label (![](shot.jpg)) and a relative file
-  // name with a known artifact extension also count; the caller resolves them.
-  const pattern = options.relative ? /!?\[([^\]]*)\]\((<[^>]+>|[^\n)]+)\)/g : /!?\[([^\]]+)\]\((<[^>]+>|[^\n)]+)\)/g;
+  // Empty labels allow a file without a caption. Relative paths are an
+  // opt-in; the caller resolves them inside the permitted workspace.
+  const pattern = /!?\[([^\]]*)\]\((<[^>]+>|[^\n)]+)\)/g;
   for (const m of text.matchAll(pattern)) {
     const titled = m[2].match(/^(.*?)\s+"telegram:document"$/);
     let path = (titled ? titled[1] : m[2]).replace(/^<|>$/g, "").replace(/^file:\/\//, "");

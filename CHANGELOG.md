@@ -1,3 +1,9 @@
+# 0.9.47
+
+- Collect Telegram photo and document albums into one ordered BB request, preserve captions and the original reply address, and warn when a new album item arrives after dispatch.
+- Send addressed photo or document albums without merging neighboring text into the album. Keep repeat updates and uncertain deliveries from producing duplicates.
+- Suppress empty and standalone `NO_REPLY` finishes in the paired chat while preserving substantive text and addressed file replies.
+
 # 0.9.46
 
 - Choose the highest-resolution incoming photo within the existing route limit, regardless of variant order.

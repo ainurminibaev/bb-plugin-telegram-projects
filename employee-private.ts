@@ -1,3 +1,4 @@
+import {albumChanged,albumKey,collectAlbum,deliverAlbumWarnings,queueAlbumWarning,releaseAlbums,sendAlbum,albumCaption,albumKind,type AlbumMedia} from "./media-album";
 import {randomUUID} from "node:crypto";
 import {groupExample,type GroupExample} from "./ingress";
 import {isolatedFile,maxEncodedImages,readSavedImage,type ImageAttachment,type IsolatedAttachment} from "./group-attachments";
@@ -14,7 +15,9 @@ type Access={owner:number;bot:number;subject:number;nonce:string;state:"pending"
   noticeId?:number;approvalUpdate?:number;unavailableNotified?:true};
 export type PrivateJob={owner:number;bot:number;subject:number;messageId:number;updateId:number;
   nonce:string;token:string;binding:string;state:"pending"|"submitted"|"ready"|"sending";
-  text?:string;file?:GroupExample;answer?:string;part?:number;artifactIndex?:number;failedArtifacts?:string[];captionSent?:true};
+  text?:string;file?:GroupExample;files?:GroupExample[];albumKey?:string;answer?:string;part?:number;artifactIndex?:number;failedArtifacts?:string[];albumSent?:number[];captionSent?:true};
+type PrivateAlbumScope={subject:number;nonce:string;binding:string};
+type PrivateAlbumItem={messageId:number;updateId:number;subject:number;nonce:string;binding:string;file:GroupExample;text:string};
 type Executor=typeof privateExecutor;
 type Dependencies={store:Store;owner:number;bot:number;transport:(chatId:number)=>Telegram;current:()=>boolean;
   executor?:Executor};
@@ -99,6 +102,18 @@ export async function acceptPrivateEmployeeUpdate(d:Dependencies,update:any) {
     }
     return true;
   }
+  if (file?.album) {
+    const key=albumKey(`private:album:${bot}:${owner}:`,[subject],file.album);
+    const scope={subject,nonce:existing.nonce,binding:worker.binding};
+    store.atomic(()=>{
+      const late=collectAlbum(store,key,{
+        ...scope,messageId:message.message_id,updateId:update.update_id,text,file:{...file,sourceUpdateId:update.update_id},
+      } satisfies PrivateAlbumItem);
+      if (late) queueAlbumWarning(store,`private:album-warning:${bot}:${owner}:`+key,
+        {chatId:subject,topicId:0,replyTo:late},scope);
+    });
+    return true;
+  }
   const jobKey=inboxPrefix(bot,owner)+subject+":"+message.message_id;
   const receipt=jobKey.replace(":in:",":receipt:");
   if (!store.get(jobKey) && !store.get(receipt))
@@ -110,6 +125,30 @@ export async function acceptPrivateEmployeeUpdate(d:Dependencies,update:any) {
 export async function processPrivateEmployeeInputs(d:Dependencies,signal:AbortSignal,
   receive:(file:GroupExample,job:PrivateJob)=>Promise<SavedTelegramFile|ImageAttachment>) {
   const {store,bot,owner,transport}=d;
+  releaseAlbums<PrivateAlbumItem>(store,`private:album:${bot}:${owner}:`,(parts,albumKey,changed)=>{
+    const first=parts[0];
+    const access=store.get<Access>(accessKey(bot,owner,first.subject));
+    const worker=executorFor(d,first.subject);
+    if (!d.current() || access?.state!=="approved" || access.nonce!==first.nonce ||
+        worker?.binding!==first.binding || parts.some(part=>part.nonce!==first.nonce || part.binding!==first.binding)) return;
+    if (changed || parts.some(part=>part.file.document!==first.file.document)) {
+      queueAlbumWarning(store,`private:album-warning:${bot}:${owner}:`+albumKey,
+        {chatId:first.subject,topicId:0,replyTo:first.messageId},
+        {subject:first.subject,nonce:first.nonce,binding:first.binding} satisfies PrivateAlbumScope);
+      return first.messageId;
+    }
+    const jobKey=inboxPrefix(bot,owner)+first.subject+":"+first.messageId;
+    if (!store.get(jobKey) && !store.get(jobKey.replace(":in:",":receipt:")))
+      store.put(jobKey,{owner,bot,subject:first.subject,messageId:first.messageId,updateId:first.updateId,
+        nonce:first.nonce,binding:first.binding,token:randomUUID(),state:"pending",albumKey,
+        text:parts.map(part=>part.text).filter(Boolean).join("\n"),files:parts.map(part=>part.file)} satisfies PrivateJob);
+    return first.messageId;
+  });
+  await deliverAlbumWarnings<PrivateAlbumScope>(store,`private:album-warning:${bot}:${owner}:`,transport,scope=>{
+    const access=store.get<Access>(accessKey(bot,owner,scope.subject));
+    return d.current() && access?.state==="approved" && access.nonce===scope.nonce &&
+      executorFor(d,scope.subject)?.binding===scope.binding;
+  },signal);
   const seen=new Set<number>();
   const jobs=store.list<PrivateJob>(inboxPrefix(bot,owner)).sort((a,b)=>a.value.updateId-b.value.updateId);
   for (const {key,value:job} of jobs) {
@@ -117,13 +156,13 @@ export async function processPrivateEmployeeInputs(d:Dependencies,signal:AbortSi
     if (seen.has(job.subject)) continue;
     seen.add(job.subject);
     const finish=(state:"done"|"revoked"|"unknown")=>store.atomic(()=>{
-      store.put(key.replace(":in:",":receipt:"),{state,at:Date.now()});
+      store.put(key.replace(":in:",":receipt:"),{state,at:Date.now(),...(job.albumSent && {albumMessageIds:job.albumSent})});
       store.del(key);
     });
     const worker=executorFor(d,job.subject);
     const allowed=()=>{
       const access=store.get<Access>(accessKey(bot,owner,job.subject));
-      return !signal.aborted && d.current() && job.owner===owner && job.bot===bot &&
+      return !albumChanged(store,job.albumKey) && !signal.aborted && d.current() && job.owner===owner && job.bot===bot &&
         !!worker && access?.state==="approved" && access.nonce===job.nonce &&
         executorFor(d,job.subject)?.binding===job.binding;
     };
@@ -135,31 +174,34 @@ export async function processPrivateEmployeeInputs(d:Dependencies,signal:AbortSi
         if (!allowed()) {finish("revoked");continue;}
         if (prior.state==="missing") {
           const attachments:IsolatedAttachment[]=[];
-          if (job.file) {
-            try {
-              const received=await receive(job.file,job);
-              if (!allowed()) {finish("revoked");continue;}
-              const image="type" in received ? received : job.file.image
-                ? await readSavedImage(received,signal).catch(err=>{if (!job.file?.document) throw err;})
+          try {
+            let imageSize=0;
+            for (const file of job.files ?? (job.file ? [job.file] : [])) {
+              const received=await receive(file,job);
+              if (!allowed()) break;
+              const image="type" in received ? received : file.image
+                ? await readSavedImage(received,signal).catch(err=>{if (!file.document) throw err;})
                 : undefined;
               if (image) {
-                if (image.url.length>maxEncodedImages) throw Error("private_image_too_large");
+                imageSize+=image.url.length;
+                if (imageSize>maxEncodedImages) throw Error("private_image_too_large");
                 attachments.push(image);
               }
-              if (!("type" in received) && (!image || job.file.document)) {
-                attachments.push(isolatedFile(await worker.upload(received,signal),!job.file.pdf));
+              if (!("type" in received) && (!image || file.document)) {
+                attachments.push(isolatedFile(await worker.upload(received,signal),!file.pdf));
               }
-            } catch {
-              if (signal.aborted) return;
-              job.answer="Не удалось получить вложение. Попробуйте приложить файл ещё раз.";
-              job.state="ready";
             }
+          } catch {
+            if (signal.aborted) return;
+            job.answer="Не удалось получить вложение. Попробуйте приложить файл ещё раз.";
+            job.state="ready";
           }
           if (!allowed()) {finish("revoked");continue;}
           if (job.state==="pending") await worker.submit(job.token,job.text||"Посмотри приложенный файл.",signal,attachments);
         }
         delete job.text;
         delete job.file;
+        delete job.files;
         if (job.state==="pending") job.state="submitted";
         store.put(key,job);
       }
@@ -175,7 +217,31 @@ export async function processPrivateEmployeeInputs(d:Dependencies,signal:AbortSi
       const artifacts=[...new Map(links.map(link=>[link.path,link])).values()].slice(0,3);
       const caption=routedCaption(text,links);
       const reply={chatId:job.subject,topicId:0,replyTo:job.messageId};
-      for (let i=job.artifactIndex??0;i<artifacts.length;i++) {
+      const albumType=albumKind(artifacts,link=>routedArtifactKind(link)==="image"?"photo":"document");
+      if (albumType && (job.albumSent || !job.artifactIndex)) {
+        if (!job.albumSent) {
+          const files:AlbumMedia[]=[];
+          for (const link of artifacts) {
+            if (!allowed()) break;
+            const file=await worker[routedArtifactKind(link)](job.token,link.path,signal).catch(()=>undefined);
+            if (!file) break;
+            files.push({kind:albumType,name:file.name,data:"document" in file ? file.document : file.photo,
+              caption:albumCaption(link.label,file.name)});
+          }
+          if (!allowed()) {if (!signal.aborted) finish("revoked");continue;}
+          if (files.length!==artifacts.length) {
+            job.answer="Не удалось подготовить все вложения альбома.";
+            store.put(key,job);
+            continue;
+          }
+          store.put(key,{...job,state:"sending"});
+          const sent=await sendAlbum(transport(job.subject),reply,files);
+          job.albumSent=sent.messageIds;
+          store.put(key,job);
+        }
+        text=links.reduce((body,link)=>body.replace(link.markdown,""),text).trim();
+      }
+      for (let i=job.albumSent ? artifacts.length : job.artifactIndex??0;i<artifacts.length;i++) {
         if (!allowed()) break;
         const link=artifacts[i];
         const {path}=link;

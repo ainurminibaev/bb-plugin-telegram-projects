@@ -29,6 +29,8 @@ export function topicHasWork(store:Store,bot:number,chatId:number,topicId:number
     row?.chatId===chatId && row.topicId===topicId && (row.bot===undefined || row.bot===bot);
   return activeTopicSends.get(store)?.has(topicStateKey(bot,chatId,topicId)) === true ||
     store.list<{route:{chatId:number;topicId:number}}>(`group:in:${bot}:`).some(({value})=>matches(value.route)) ||
+    store.list<{items?:{chatId:number;topicId:number}[]}>(`group:album:${bot}:`).some(({value})=>
+      value.items?.some(matches)) ||
     ["group:result-queue:","group:reminder-queue:"].some(prefix=>store.list(prefix).some(({key})=>
       matches(store.get("group:origin:"+key.slice(prefix.length)))));
 }

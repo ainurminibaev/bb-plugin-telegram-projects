@@ -1,5 +1,8 @@
+import {maxEncodedImages,readSavedImage,type ImageAttachment} from "./group-attachments";
+import {albumCaption,albumKind,albumKey,albumChanged,albumChangedNotice,collectAlbum,copyAlbum,releaseAlbums,sendAlbum, type AlbumMedia} from "./media-album";
 import {sharedGroupThreads} from "./group-binding";
-import {outboundMessagePayload} from "./outbound-message";
+import {NO_REPLY} from "./group-result";
+import {maxOutboundDocumentBytes,outboundMessagePayload} from "./outbound-message";
 import {routedCaption} from "./routed-message";
 import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interactionOpen } from "./codex-async-question";
 import { splitChildResultClaims, stripTelegramMarkers, ReplyRoutes, type ReplyRoute } from "./reply-routing";
@@ -29,6 +32,11 @@ import {
   TelegramFailure,
 } from "./model";
 
+function hasAssistantReply(text: string) {
+  const body = stripTelegramMarkers(text).trim();
+  return body !== "" && body !== NO_REPLY;
+}
+
 type PendingInteraction = Awaited<
   ReturnType<BbPluginApi["sdk"]["threads"]["interactions"]["get"]>
 >;
@@ -42,6 +50,8 @@ export const inputSchema = z.object({
   topicId: z.number().int().nonnegative(),
   messageId: z.number().int(),
   text: z.string().max(16000).optional(),
+  albumId: z.string().regex(/^[^\p{C}\s]{1,128}$/u).optional(),
+  protectedContent: z.literal(true).optional(),
   sentAt: z.number().int().nonnegative().optional(),
   forwarded: z.boolean().optional(),
   originalText: z.literal(true).optional(),
@@ -64,7 +74,7 @@ export const inputSchema = z.object({
     })
     .optional(),
 });
-export type ChatInput = z.infer<typeof inputSchema>;
+export type ChatInput = z.infer<typeof inputSchema> & {albumKey?:string};
 // After a forwarded message the owner usually types a question about it. The
 // question takes longer than the 4 s used for ordinary consecutive messages.
 export const FORWARD_COMMENT_MS = 10_000;
@@ -122,6 +132,8 @@ type Inbox = {
   attachmentThreadId?: string;
   at: number;
 };
+type PairedAlbumItem = ChatInput & {bindingRevision?:string};
+type PairedAlbumSource = {messageIds:number[];files:AlbumMedia[];expires:number;albumKey:string};
 type QuestionDelivery = {
   threadId: string;
   interactionId: string;
@@ -223,6 +235,8 @@ export class ChatBridge {
     this.handoffs = new TelegramHandoff({store: d.store, sdk: d.sdk,
       binding: topic => this.binding(topic),
       assertDeliveryDrained: (_source, topic) => {
+        if (this.s.list<{items?:PairedAlbumItem[]}>("paired:album:").some(row=>
+          row.value.items?.some(part=>part.topicId===topic))) throw Error("handoff_delivery_pending");
         if (this.s.list<Outbox>("chat:out:").some(r => r.value.topicId === topic && !r.value.sentId && !r.key.startsWith("chat:out:handoff:")))
           throw Error("handoff_delivery_pending");
       },
@@ -729,10 +743,22 @@ export class ChatBridge {
   }
   // Every update enters durable storage before the companion's spool file is removed.
   accept(raw: unknown) {
-    const input = inputSchema.parse(raw);
+    const input:ChatInput = inputSchema.parse(raw);
     const owner = this.d.owner();
     if (!owner || input.ownerId !== owner || input.chatId !== owner)
       throw Error("foreign_identity");
+    if (input.albumId && input.attachment && !input.callback) {
+      const bot=this.s.get<number>("bot:id");
+      if (!bot) return;
+      const bindingRevision=this.binding(input.topicId)?.revision;
+      const key=albumKey(`paired:album:${bot}:${owner}:`,[input.topicId],input.albumId);
+      this.s.atomic(()=>{
+        const late=collectAlbum(this.s,key,{...input,bindingRevision} satisfies PairedAlbumItem);
+        if (late) this.enqueue(input.topicId,this.tr(albumChangedNotice),undefined,"album-late:"+key,false,undefined,
+          {kind:"telegram",chatId:owner,topicId:input.topicId,updateId:input.updateId,messageId:late});
+      });
+      return;
+    }
     const k = "chat:in:" + input.updateId;
     if (!this.s.get(k))
       this.s.put(k, {
@@ -786,6 +812,33 @@ export class ChatBridge {
   async tick() {
     if (this.disposed || this.d.signal.aborted) return;
     this.ingestFiles();
+    const bot=this.s.get<number>("bot:id");
+    const owner=this.d.owner();
+    if (bot && owner) for (const prefix of ["paired:album-copy:","paired:album-resend:"])
+      for (const row of this.s.list<{expires:number}>(`${prefix}${bot}:${owner}:`))
+        if (row.value.expires<=Date.now()) this.s.del(row.key);
+    if (bot && owner) releaseAlbums<PairedAlbumItem>(this.s,`paired:album:${bot}:${owner}:`,(parts,albumKey,changed)=>{
+      const {bindingRevision,...input}=parts[0];
+      const binding=this.binding(input.topicId);
+      if (bindingRevision!==binding?.revision || parts.some(part=>part.bindingRevision!==bindingRevision)) return;
+      if (changed || parts.some(part=>part.attachment?.kind!==input.attachment?.kind)) {
+        this.enqueue(input.topicId,this.tr(albumChangedNotice),undefined,"album-late:"+albumKey,false,undefined,
+          {kind:"telegram",chatId:owner,topicId:input.topicId,updateId:input.updateId,messageId:input.messageId});
+        return input.messageId;
+      }
+      const key="chat:in:"+input.updateId;
+      if (!this.s.get(key))
+        this.s.put(key,{input:{...input,albumKey},parts,state:"pending",at:Date.now(),attachmentThreadId:binding?.threadId??undefined} satisfies Inbox);
+      const kind=albumKind(parts,part=>part.attachment?.kind==="photo" || part.attachment?.kind==="document"
+        ? part.attachment.kind : undefined);
+      if (kind && binding && parts.every(part=>!part.protectedContent)) {
+        this.s.put(`paired:album-copy:${bot}:${owner}:${input.topicId}:${binding.revision}:${input.messageId}`,{
+          messageIds:parts.map(part=>part.messageId),expires:Date.now()+24*60*60*1000,
+          files:parts.map(part=>({kind,data:part.attachment!.fileId,caption:part.text})),albumKey,
+        } satisfies PairedAlbumSource);
+      }
+      return input.messageId;
+    });
     if (!this.handoffPolling && Date.now() >= this.nextHandoffPoll && this.handoffs.needsPolling()) {
       this.nextHandoffPoll = Date.now() + 2000;
       this.handoffPolling = true;
@@ -816,14 +869,14 @@ export class ChatBridge {
       const window = this.d.collectMs ?? 0;
       const isMessage = (i: ChatInput) => !i.callback && (i.forwarded || !i.text?.trimStart().startsWith("/")) &&
         !(i.replyTo && this.s.get("chat:question:" + i.topicId + ":" + i.replyTo));
-      if (window && !r.parts && isMessage(r.input)) {
+      if (window && !r.parts && !r.input.albumId && isMessage(r.input)) {
         let boundary = false;
         for (const {value: next} of pending.slice(index+1)) {
           if (next.input.topicId !== r.input.topicId) continue;
           const last = batch[batch.length-1];
           const gap = next.input.sentAt !== undefined && last.input.sentAt !== undefined
             ? (next.input.sentAt-last.input.sentAt)*1000 : next.at-last.at;
-          if (next.parts || next.input.ownerId !== r.input.ownerId || !isMessage(next.input) ||
+          if (next.parts || next.input.albumId || next.input.ownerId !== r.input.ownerId || !isMessage(next.input) ||
               (next.input.replyTo && next.input.replyTo !== r.input.replyTo &&
                !batch.some(part => part.input.messageId === next.input.replyTo)) ||
               gap > collectionWindow(last.input,window) || batch.length >= 32) {
@@ -841,7 +894,7 @@ export class ChatBridge {
       this.lanes.add(r.input.topicId);
       const parts = r.parts ?? batch.map(part => part.input);
       this.s.atomic(() => {
-        this.s.put(key, { ...r, parts:parts.length > 1 ? parts : undefined, state:"claimed",
+        this.s.put(key, { ...r, parts:(parts.length > 1 || r.input.albumId) ? parts : undefined, state:"claimed",
           attachmentThreadId:r.attachmentThreadId ?? (parts.length > 1 ? this.binding(r.input.topicId)?.threadId : undefined),
           phase:parts.length > 1 ? "preparing" : r.phase });
         for (const part of batch.slice(1)) this.s.put("chat:in:" + part.input.updateId, {
@@ -1472,7 +1525,7 @@ export class ChatBridge {
     if (!input.replyTo || !input.replyExcerpt) return text;
     return text + "\n\n[Цитата из сообщения Telegram № " + input.replyTo + "]\n" + input.replyExcerpt;
   }
-  private async preparePart(input: ChatInput, b: Binding, text: string, batched: boolean): Promise<string | undefined> {
+  private async preparePart(input: ChatInput, b: Binding, text: string, batched: boolean, albumImages?:ImageAttachment[]): Promise<string | undefined> {
     if (input.voice) {
       if (!this.d.transcribe) {
         this.enqueue(
@@ -1529,6 +1582,12 @@ export class ChatBridge {
           this.enqueue(input.topicId, this.tr(
             "Голосовое сохранено целиком как файл. Автоматическое распознавание доступно для записей до 10 минут и 15 МБ.",
           ), undefined, "voice-file:" + input.updateId);
+        if (albumImages && input.attachment.kind==="photo") {
+          const image=await readSavedImage(saved,this.d.signal);
+          if (albumImages.reduce((size,item)=>size+item.url.length,image.url.length)>maxEncodedImages)
+            throw Error("attachment_too_large");
+          albumImages.push(image);
+        }
         const metadata = JSON.stringify({ path: saved.path, name: saved.name,
           bytes: saved.bytes, sha256: saved.sha256, kind: input.attachment.kind });
         text = (text || (batched ? "Вложение" : "Получено вложение. Уточни задачу, если она не следует из текущего разговора.")) +
@@ -1630,7 +1689,37 @@ export class ChatBridge {
     if (known) return this.routes.sameTask(known, route);
     return ids.length > 0 && ids.every(id => this.routes.sameTask(this.routes.routeOf(threadId, id), route));
   }
+  private async resendAlbum(input:ChatInput,binding:Binding,asReply:boolean) {
+    const bot=this.s.get<number>("bot:id"),owner=this.d.owner();
+    if (!bot || input.ownerId!==owner || input.chatId!==owner || !input.replyTo ||
+        input.forwarded || input.attachment || this.handoffs.active(input.topicId)) return;
+    const prefix=`paired:album-copy:${bot}:${owner}:${input.topicId}:${binding.revision}:`;
+    const match=this.s.list<PairedAlbumSource>(prefix).find(row=>
+      row.value.expires>Date.now() && row.value.messageIds.includes(input.replyTo!));
+    const key=`paired:album-resend:${bot}:${owner}:${input.updateId}`;
+    if (!match || albumChanged(this.s,match.value.albumKey)) {
+      this.enqueue(input.topicId,this.tr("Ответь командой на элемент недавнего альбома в этой теме."));
+      return;
+    }
+    if (this.s.get(key)) return;
+    this.s.put(key,{state:"uncertain",expires:match.value.expires});
+    const target={chatId:owner,topicId:input.topicId};
+    try {
+      if (asReply) {
+        const sent=await sendAlbum(this.d.tg,{...target,replyTo:input.replyTo},match.value.files);
+        this.s.put(key,{state:"done",messageIds:sent.messageIds,expires:match.value.expires});
+      } else {
+        const sent=await copyAlbum(this.d.tg,target,{chatId:owner,messageIds:match.value.messageIds});
+        this.s.put(key,{state:sent.complete?"done":"partial",messageIds:sent.messageIds,expires:match.value.expires});
+        if (!sent.complete) this.enqueue(input.topicId,this.tr("Telegram скопировал только часть альбома. Автоматического повтора не будет."));
+      }
+    } catch {
+      if (!this.d.signal.aborted)
+        this.enqueue(input.topicId,this.tr("Telegram не подтвердил доставку альбома."));
+    }
+  }
   private async handleInput(input: ChatInput, parts?: ChatInput[]) {
+    if (albumChanged(this.s,input.albumKey)) return;
     let b = this.binding(input.topicId);
     const moving = this.handoffs.active(input.topicId);
     if (moving && /^\/(status|menu)(?:@\w+)?$/.test(input.text?.trim() ?? "")) {
@@ -1701,7 +1790,7 @@ export class ChatBridge {
     }
     let text = input.text?.trim() ?? "";
     const [raw, ...args] = text.split(/\s+/);
-    const cmd = input.forwarded ? "" : raw?.split("@")[0].toLowerCase();
+    const cmd = input.forwarded || input.albumId ? "" : raw?.split("@")[0].toLowerCase();
     if (["/start", "/help", "/menu", "/status"].includes(cmd)) {
       if (b) await this.menu(b);
       else await this.projects(input.topicId);
@@ -1783,8 +1872,13 @@ export class ChatBridge {
       });
       return;
     }
+    if (cmd === "/copyalbum" || cmd === "/replyalbum") {
+      if (!args.length && input.replyTo && !input.attachment) await this.resendAlbum(input,b,cmd==="/replyalbum");
+      else this.enqueue(input.topicId,this.tr("Ответь командой на элемент недавнего альбома в этой теме."));
+      return;
+    }
     if (cmd === "/say") text = args.join(" ");
-    else if (!input.forwarded && text.startsWith("/")) {
+    else if (!input.forwarded && !input.albumId && text.startsWith("/")) {
       this.enqueue(
         input.topicId,
         this.tr(
@@ -1793,15 +1887,17 @@ export class ChatBridge {
       );
       return;
     }
+    const albumImages:ImageAttachment[]|undefined=input.albumId ? [] : undefined;
     if (parts) {
       const prior = this.s.get<Inbox>("chat:in:" + input.updateId)?.attachmentThreadId;
       if (prior && prior !== b.threadId) throw Error("batch_binding_changed");
       const texts: string[] = [];
-      for (const part of parts) {
-        const prepared = await this.preparePart(part,b,part.text?.trim() ?? "",true);
+      for (const [index,part] of parts.entries()) {
+        const prepared = await this.preparePart(part,b,part.text?.trim() ?? "",true,albumImages);
         if (prepared === undefined || this.d.signal.aborted) return;
         const includesOriginal = parts.some(other => other.messageId === part.replyTo);
-        texts.push(!includesOriginal ? this.withReplyContext(part,prepared) : prepared);
+        const body=!includesOriginal ? this.withReplyContext(part,prepared) : prepared;
+        texts.push(input.albumId ? `Элемент ${index+1} из ${parts.length} в порядке альбома Telegram:\n${body}` : body);
       }
       text = parts.some(p => p.forwarded) && parts.some(p => !p.forwarded)
         ? forwardedWithQuestion(parts, texts) : texts.join("\n\n");
@@ -1809,10 +1905,11 @@ export class ChatBridge {
       const inbox = this.s.get<Inbox>(key);
       if (inbox) this.s.put(key,{...inbox,phase:undefined});
     } else {
-      const prepared = await this.preparePart(input,b,text,false);
+      const prepared = await this.preparePart(input,b,text,false,albumImages);
       if (prepared === undefined) return;
       text = prepared;
     }
+    if (albumChanged(this.s,input.albumKey)) return;
     if (!text) {
       this.enqueue(
         input.topicId,
@@ -1854,20 +1951,21 @@ export class ChatBridge {
       const thread = await this.validThread(b, b.threadId);
       this.watchInput(b);
       const own = {kind: "telegram" as const, chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId};
-      const followUp = await this.forwardFollowUp(b, parts ?? [input]);
+      const followUp = input.albumId ? undefined : await this.forwardFollowUp(b, parts ?? [input]);
       const busy = thread.status === "active" && !followUp;
       const metadata = busy ? this.routes.busyIngress(b.threadId, own, originalDigest) :
         [this.routes.ingress(b.threadId, followUp?.route ?? own, undefined, undefined, followUp ? undefined : originalDigest)];
+      if (albumChanged(this.s,input.albumKey)) return;
       const dispatched = await this.d.sdk.threads.send({
         threadId: b.threadId,
         mode: busy || followUp ? "steer-if-active" : "queue-if-active",
         input: [{ type: "text", text: followUp ? followUp.prefix + text : text, mentions: [] },
-          ...metadata],
+          ...(albumImages??[]),...metadata],
       });
       if (dispatched?.delivery === "queued")
         this.enqueue(b.topicId, this.tr("Сообщение в очереди. Помощник получит его, когда BB разрешит продолжить."),
           undefined, "event:" + b.revision + ":queued:" + input.updateId, false, undefined, own);
-      this.rememberDispatch(b.threadId, parts ?? [input], followUp?.route ?? own);
+      if (!input.albumId) this.rememberDispatch(b.threadId, parts ?? [input], followUp?.route ?? own);
     } else {
       if (!b.ready) {
         await this.menu(b);
@@ -1898,17 +1996,18 @@ export class ChatBridge {
       const marker = this.routes.ingress(null,
         {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId},
         undefined,undefined,prompt===text ? originalDigest : undefined);
+      if (albumChanged(this.s,input.albumKey)) return;
       const t = await this.d.sdk.threads.spawn({
         projectId: b.projectId,
         environment,
-        input: [{type: "text", text: prompt, mentions: []}, marker],
+        input: [{type: "text", text: prompt, mentions: []}, ...(albumImages??[]),marker],
         title: label(text, 85),
         visibility: "visible",
         ...(b.providerId ? { providerId: b.providerId } : {}),
         ...(b.model ? { model: b.model } : {}),
       });
       this.routes.bindIngress(marker, t.id);
-      this.rememberDispatch(t.id, parts ?? [input], {kind: "telegram", chatId: input.chatId, topicId: input.topicId,
+      if (!input.albumId) this.rememberDispatch(t.id, parts ?? [input], {kind: "telegram", chatId: input.chatId, topicId: input.topicId,
         updateId: input.updateId, messageId: input.messageId});
       b = { ...b, threadId: t.id, cursor: 0, ready: false };
       this.save(b);
@@ -2601,7 +2700,7 @@ export class ChatBridge {
             if (text.startsWith("[telegram-answer:")) {
               const reply = /^\[telegram-answer:([a-f0-9-]{36})\][ \t]*\r?\n([\s\S]+?)\r?\n\[\/telegram-answer\]$/.exec(text);
               const route = reply && this.routes.busyAnswer(b.threadId, event.scope.turnId, reply[1]);
-              if (route && route.chatId === this.d.owner() && route.topicId === b.topicId && reply[2].trim() &&
+              if (route && route.chatId === this.d.owner() && route.topicId === b.topicId && hasAssistantReply(reply[2]) &&
                   !/\[\/?telegram-answer[\]:]/.test(reply[2])) {
                 const prefix="event:"+b.revision+":";
                 const alreadyQueued=this.s.list<Outbox>("chat:out:"+prefix+"busy:").some(({value})=>{
@@ -2662,7 +2761,7 @@ export class ChatBridge {
           ) {
             // agentMessage is public assistant output, never a reasoning item.
             const text = event.data.item.text;
-            b.activity = cleanAssistantText(splitChildResultClaims(text).body).slice(0, 600);
+            b.activity = hasAssistantReply(text) ? cleanAssistantText(splitChildResultClaims(text).body).slice(0, 600) : undefined;
             const candidate = b.revision + ":" + event.scope.turnId;
             this.s.atomic(() => {
               this.s.put("chat:candidate:" + candidate, text);
@@ -2688,7 +2787,7 @@ export class ChatBridge {
               const native = this.routes.nativeOutcomes(b.threadId, turnId);
               const id = "event:" + b.revision + ":turn-" + turnId;
               const outboxKey = "chat:out:" + id;
-              if (body) {
+              if (hasAssistantReply(body)) {
                 this.s.atomic(() => {
                   this.routes.claimFinal(b.threadId!, turnId, claims, {route, outboxKey, writtenAt});
                   this.routes.claimFinal(b.threadId!, turnId, native, {route, outboxKey, native:true});
@@ -2798,6 +2897,10 @@ export class ChatBridge {
           ["telegram_400", "message_missing"].includes(error.code)) this.s.del(key);
     }
   }
+  private albumIsChanged(o:Outbox) {
+    return o.taskRoute?.kind==="telegram" &&
+      albumChanged(this.s,this.s.get<Inbox>("chat:in:"+o.taskRoute.updateId)?.input.albumKey);
+  }
   private replyTarget(o: Outbox) {
     const route=o.taskRoute;
     if (route?.kind==="telegram" && route.chatId===this.d.owner() && route.topicId===o.topicId &&
@@ -2837,7 +2940,9 @@ export class ChatBridge {
       return matches.length === 1 ? [{...link, path: matches[0]}] : [];
     });
     if (!links.length) return {text, lastMediaId};
-    const addressedSingle=new Set(links.map(link=>link.path)).size===1 ? this.replyTarget(o) : undefined;
+    const target=this.replyTarget(o);
+    const distinct=[...new Map(links.map(link=>[link.path,link])).values()];
+    const addressedSingle=distinct.length===1 ? target : undefined;
     const bodyCaption=addressedSingle?routedCaption(text,links):undefined;
     const imagePaths = [...new Set(links.filter(link => /\.(png|jpe?g|webp|gif)$/i.test(link.path)).map(link => link.path))];
     const receiptFor = (path: string) => "chat:file:" + key + ":" + path;
@@ -2855,10 +2960,51 @@ export class ChatBridge {
       if (!stat.isFile() || stat.size > 10 * 1024 * 1024) throw new Error("photo_limit");
       return new Blob([new Uint8Array(readFileSync(path))], {type: ({".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".webp":"image/webp", ".gif":"image/gif"} as Record<string,string>)[extname(path).toLowerCase()]});
     };
+    const kind=albumKind(distinct,link=>link.asDocument || !/\.(mp4|mov|png|jpe?g|webp|gif)$/i.test(link.path)
+      ? "document" : imagePaths.includes(link.path) ? "photo" : undefined);
+    const addressedAlbumKey="chat:album:"+key+":addressed";
+    const recorded=this.s.get<{state:"uncertain"|"delivered";messageIds?:number[]}>(addressedAlbumKey);
+    if (target && kind && (recorded || distinct.every(link=>!this.s.get(receiptFor(link.path))))) {
+      let receipt=recorded;
+      if (!receipt) {
+        let totalBytes=0;
+        const files:AlbumMedia[]=distinct.map(link=>{
+          const path=realpathSync(link.path);
+          if (!roots.some(root=>path.startsWith(root+sep)) || path.split(sep).some(part=>part.startsWith(".")) ||
+              !ARTIFACT_EXTENSIONS.test(path)) throw Error("invalid_album_artifact");
+          const stat=statSync(path);
+          totalBytes+=stat.size;
+          if (!stat.isFile() || totalBytes>maxOutboundDocumentBytes) throw Error("file_limit");
+          const name=basename(path);
+          const data=kind==="photo" ? photoData(link) : new Blob([new Uint8Array(readFileSync(path))],
+            {type:"application/octet-stream"});
+          return {kind,name,data,caption:albumCaption(cleanAssistantText(link.label),name)};
+        });
+        if (this.albumIsChanged(o)) return {text:"",lastMediaId:0};
+        this.s.put(addressedAlbumKey,{state:"uncertain"});
+        try {
+          const sent=await sendAlbum(this.d.tg,target,files);
+          receipt={state:"delivered",messageIds:sent.messageIds};
+          this.s.atomic(()=>{
+            this.s.put(addressedAlbumKey,receipt);
+            distinct.forEach((link,index)=>this.s.put(receiptFor(link.path),sent.messageIds[index]));
+          });
+        } catch (error) {
+          if (error instanceof TelegramFailure && !error.ambiguous && error.code==="telegram_429") {
+            this.s.del(addressedAlbumKey);
+            throw error;
+          }
+        }
+      }
+      if (receipt?.state==="delivered") lastMediaId=receipt.messageIds?.at(-1)??0;
+      const rest=links.reduce((body,link)=>body.replace(link.markdown,""),text).trim();
+      return {text:receipt?.state==="delivered" ? rest : [rest,"Не удалось подтвердить доставку альбома."].filter(Boolean).join("\n"),
+        lastMediaId};
+    }
     for (const [linkIndex, link] of links.entries()) {
       // Group only contiguous photos, preserving the position of explicit documents.
       // A receipt on any item is a boundary: never regroup an uncertain prior send.
-      if (!this.s.get(receiptFor(link.path)) && !link.asDocument && imagePaths.includes(link.path)) {
+      if (!target && !this.s.get(receiptFor(link.path)) && !link.asDocument && imagePaths.includes(link.path)) {
         const group: typeof links = [];
         const seen = new Set<string>();
         for (const candidate of links.slice(linkIndex)) {
@@ -2911,7 +3057,7 @@ export class ChatBridge {
       const isVideo = /\.(mp4|mov)$/i.test(link.path) && !link.asDocument;
       const plainLabel = cleanAssistantText(link.label).replace(/[*_`\[\]]/g, "").trim();
       const meaningfulLabel = /[а-яё]/i.test(plainLabel) && plainLabel !== basename(link.path) && !/^(картинка|изображение|фото|видео)$/i.test(plainLabel);
-      const addressedFile=isVideo?undefined:addressedSingle;
+      const addressedFile=isVideo?undefined:target;
       const labelIsCaption=plainLabel && plainLabel!==basename(link.path) &&
         !/^(картинка|изображение|фото|файл|документ|image|photo|file|document)$/i.test(plainLabel);
       const caption = addressedFile
@@ -2940,6 +3086,7 @@ export class ChatBridge {
                 message_thread_id:o.topicId||undefined,[field]:blob,[field+"_filename"]:basename(path),
                 ...(caption && {caption}),...(isVideo && {supports_streaming:true}),
               }};
+          if (this.albumIsChanged(o)) return {text:"",lastMediaId:0};
           this.s.put(receipt, "uncertain");
           const result=await this.d.tg(outgoing.method,outgoing.body);
           if (addressedFile && (!Number.isSafeInteger(result?.message_id) || result.message_id<=0 ||
@@ -2979,6 +3126,10 @@ export class ChatBridge {
         this.s.put(key, {...o, sentId: -1, text: "", keys: undefined});
         continue;
       }
+      if (!key.startsWith("chat:out:album-late:") && this.albumIsChanged(o)) {
+        this.s.put(key,{...o,sentId:-1,text:"",keys:undefined});
+        continue;
+      }
       if (o.revision && this.deliveryBinding(o.topicId, o.revision)?.revision !== o.revision) {
         this.s.put(key, { ...o, sentId: -1, text: "", keys: undefined });
         continue;
@@ -3002,11 +3153,16 @@ export class ChatBridge {
         }
         const assistantOutput = key.startsWith("chat:out:event:") || key.startsWith("chat:out:explicit:");
         const delivered = assistantOutput ? await this.deliverArtifacts(stripTelegramMarkers(o.text), key, o) : {text: o.text, lastMediaId: 0};
+        if (!key.startsWith("chat:out:album-late:") && this.albumIsChanged(o)) {
+          this.s.put(key,{...o,sentId:-1,text:"",keys:undefined});
+          continue;
+        }
         const chunks = assistantOutput ? renderTelegramParts(cleanAssistantText(delivered.text).trim()) : splitText(stripTelegramMarkers(delivered.text), 1800);
         // Keep formatted HTML below Telegram's limit even after escaping.
         // Durable per-part receipts prevent already-confirmed parts from replaying.
         let last = delivered.lastMediaId;
         for (let index = 0; index < chunks.length; index++) {
+          if (!key.startsWith("chat:out:album-late:") && this.albumIsChanged(o)) break;
           const partKey = "chat:receipt:" + key + ":" + index;
           const old = this.s.get<number>(partKey);
           if (old) {
@@ -3109,7 +3265,8 @@ export class ChatBridge {
       })),
       pending: this.s
         .list<Inbox>("chat:in:")
-        .filter((x) => x.value.state !== "done").length,
+        .filter((x) => x.value.state !== "done").length +
+        this.s.list<{items?:PairedAlbumItem[]}>("paired:album:").filter(row=>row.value.items?.length).length,
       outgoing: this.s
         .list<Outbox>("chat:out:")
         .filter((x) => !x.key.includes(":part:") && !x.value.sentId).length,

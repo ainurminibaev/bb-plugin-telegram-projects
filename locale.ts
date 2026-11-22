@@ -1,6 +1,12 @@
 // Telegram texts are written in Russian; English replaces them through this table.
 export type Language = "ru" | "en";
 export const english: Record<string, string> = {
+  "Ответь командой на элемент недавнего альбома в этой теме.": "Reply with the command to an item from a recent album in this topic.",
+  "Telegram скопировал только часть альбома. Автоматического повтора не будет.": "Telegram copied only part of the album. No automatic retry is scheduled.",
+  "Telegram не подтвердил доставку альбома.": "Telegram did not confirm album delivery.",
+  "Не удалось подтвердить доставку альбома.": "Album delivery could not be confirmed.",
+  "Получен дополнительный элемент уже принятого альбома. Порядок мог измениться. Пришлите полный альбом новым сообщением.": "An extra item arrived after the album was accepted. The order may have changed. Send the complete album in a new message.",
+
   "Сначала выбери чат в /chats.": "Select a chat with /chats first.",
   "В очереди": "Queued",
   "Запускается": "Starting",

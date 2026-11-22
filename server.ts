@@ -455,7 +455,12 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const forgetExamples=db.prepare("DELETE FROM state WHERE (key GLOB 'group:recent-files:*' OR key GLOB 'group:context-media:*') AND json_extract(value,'$.expiresAt')<=?");
   const forgetCommands=db.prepare("DELETE FROM state WHERE key GLOB 'group:topic-command:*' AND json_extract(value,'$.expires')<=?");
-  const purgeHistory=()=>{history?.prune();forgetExamples.run(Date.now());forgetCommands.run(Date.now()-7*86400_000);};
+  const forgetAlbums=db.prepare(`DELETE FROM state
+    WHERE (key GLOB 'paired:album:*' OR key GLOB 'paired:album-copy:*' OR key GLOB 'paired:album-resend:*'
+        OR key GLOB 'group:album:*' OR key GLOB 'group:album-warning:*'
+        OR key GLOB 'private:album:*' OR key GLOB 'private:album-warning:*')
+      AND json_extract(value,'$.expires')<=?`);
+  const purgeHistory=()=>{history?.prune();forgetExamples.run(Date.now());forgetAlbums.run(Date.now());forgetCommands.run(Date.now()-7*86400_000);};
   purgeHistory();
   const historyTimer=setInterval(purgeHistory,3600_000);
   const store: Store = {
@@ -854,9 +859,9 @@ export default async function plugin(bb: BbPluginApi) {
     const scope=["groups",String(bot),String(route.chatId),String(route.topicId),String(route.senderId)];
     if (file.pdf && policy?.isolated!==true)
       await assertTelegramThreadHost(route.threadId,(await settings.get()).telegramFileHostId);
-    const document=await receiveCloudDocument(file,route.updateId,route.threadId,scope,signal);
+    const document=await receiveCloudDocument(file,file.sourceUpdateId??route.updateId,route.threadId,scope,signal);
     if (document) return document;
-    return receiveLocalFile(file,route.updateId,route.threadId,signal,scope,
+    return receiveLocalFile(file,file.sourceUpdateId??route.updateId,route.threadId,signal,scope,
       policy?.isolated===true,file.image && !file.document ? maxImageBytes : maxRoutedDocumentBytes);
   }
   async function receivePrivateFile(file:import("./ingress").GroupExample,job:PrivateJob,signal:AbortSignal) {
@@ -864,9 +869,9 @@ export default async function plugin(bb: BbPluginApi) {
     if (cloud) return cloud;
     const threadId="employee-private:"+job.subject;
     const scope=["employee-private",String(job.bot),String(job.owner),String(job.subject)];
-    const document=await receiveCloudDocument(file,job.updateId,threadId,scope,signal);
+    const document=await receiveCloudDocument(file,file.sourceUpdateId??job.updateId,threadId,scope,signal);
     if (document) return document;
-    return receiveLocalFile(file,job.updateId,threadId,signal,scope,true,file.image&&!file.document?maxImageBytes:maxRoutedDocumentBytes);
+    return receiveLocalFile(file,file.sourceUpdateId??job.updateId,threadId,signal,scope,true,file.image&&!file.document?maxImageBytes:maxRoutedDocumentBytes);
   }
   let cleaning=false;
   const inboxTimer=setInterval(async()=>{

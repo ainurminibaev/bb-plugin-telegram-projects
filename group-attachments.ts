@@ -60,7 +60,7 @@ export function imageAttachment(bytes:Buffer): ImageAttachment {
   return {type:"image",url:`data:image/${mime};base64,${bytes.toString("base64")}`};
 }
 
-export async function readSavedImage(file:SavedTelegramFile, signal:AbortSignal) {
+export async function readSavedImage(file:Pick<SavedTelegramFile,"path"|"bytes"|"sha256">, signal:AbortSignal) {
   if (!Number.isSafeInteger(file.bytes) || file.bytes<1 || file.bytes>maxImageBytes) throw Error("attachment_too_large");
   const handle=await open(file.path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
   try {

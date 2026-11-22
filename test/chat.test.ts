@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto";
 import {bindGroupTopic} from "../group-worker";
 import { ReplyRoutes } from "../reply-routing";
 import { routeUpdate } from "../ingress";
@@ -122,10 +123,14 @@ function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Pro
         throw deliveryFailure;
       }
       sent.push({ method, ...payload });
+      if (method === "copyMessages") return [{message_id:++message},{message_id:++message}] as any;
       if (method === "sendMediaGroup") {
         if (albumFailure) { const error = albumFailure; albumFailure = undefined; throw error; }
         if (malformedAlbum) return [{message_id: ++message}] as any;
-        return (payload.media as any[]).map(() => ({message_id: ++message, media_group_id: "album-" + sent.length})) as any;
+        return (payload.media as any[]).map((item) => ({message_id: ++message, media_group_id: "album-" + sent.length,
+          chat:{id:payload.chat_id},message_thread_id:payload.message_thread_id,
+          reply_to_message:payload.reply_parameters,
+          ...(item.type==="photo" ? {photo:[{file_id:"synthetic"}]} : {document:{file_id:"synthetic"}})})) as any;
       }
       return { message_id: ++message } as any;
     },
@@ -2558,6 +2563,86 @@ for (const primary of ["bb", "telegram"]) test("busy owner can receive a reply d
   } finally { f.cleanup(); }
 });
 
+for (const final of ["NO_REPLY", " \nNO_REPLY\t ", "\n \t"]) {
+  test(`paired busy reply survives a silent final and restart: ${JSON.stringify(final)}`, async () => {
+    const f = fixture();
+    try {
+      f.store.put("chat:binding:0", {topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"paired",ready:true,cursor:0});
+      f.thread.status = "active";
+      const question = f.input("Как продвигается работа?", 0);
+      await f.bridge.handle(question);
+      const dispatch = f.calls.filter(c => c[0] === "send").at(-1)?.[1];
+      assert.equal(dispatch.mode, "steer-if-active");
+      const label = /\[telegram-answer:([a-f0-9-]+)\]/.exec(dispatch.input.at(-1).text)![1];
+      const scope = {kind:"turn",turnId:"busy-final"};
+      const assistant = (seq:number, text:string) => ({seq,type:"item/completed",scope,data:{item:{type:"agentMessage",text}}});
+      const wrapped = (body:string) => `[telegram-answer:${label}]\n${body}\n[/telegram-answer]`;
+      const answer = "Последняя проверка закончилась.";
+      f.thread.status = "idle";
+      f.setEvents([
+        {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"busy-check",originPluginId:"telegram-projects",input:dispatch.input}},
+        {seq:2,type:"turn/input/accepted",scope,data:{clientRequestId:"busy-check"}},
+        ...(!final.trim() ? [assistant(3, wrapped(" NO_REPLY "))] : []),
+        assistant(4, wrapped(answer)),
+      ]);
+      await f.bridge.observe();
+      await f.bridge.flush();
+
+      f.setEvents([
+        assistant(5, final),
+        {seq:6,type:"turn/completed",scope,data:{status:"completed"}},
+      ]);
+      const restarted = f.restart();
+      await restarted.observe();
+      await restarted.flush();
+      await restarted.observe();
+      await restarted.flush();
+      const sent = f.sent.filter(m => m.method === "sendMessage");
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].text, answer);
+      const outbox = f.store.list<{taskRoute?:{chatId:number;messageId?:number};sentId?:number}>("chat:out:event:paired:");
+      assert.equal(outbox.length, 1);
+      assert.ok(outbox[0].value.sentId);
+      assert.equal(outbox[0].value.taskRoute?.chatId, OWNER_ID);
+      assert.equal(outbox[0].value.taskRoute?.messageId, question.messageId);
+      assert.equal(sent[0].message_thread_id, undefined);
+      assert.equal(sent[0].reply_parameters?.message_id, question.messageId);
+    } finally { f.cleanup(); }
+  });
+}
+
+for (const final of ["NO_REPLY", " \nNO_REPLY\t ", "\n \t", "В логе указан NO_REPLY."]) {
+  test(`paired idle reply preserves meaningful text only: ${JSON.stringify(final)}`, async () => {
+    const f = fixture();
+    try {
+      f.store.put("chat:binding:0", {topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"paired",ready:true,cursor:0});
+      const input = f.input("NO_REPLY", 0);
+      await f.bridge.handle(input);
+      const dispatch = f.calls.filter(c => c[0] === "send").at(-1)?.[1];
+      assert.equal(dispatch.mode, "queue-if-active");
+      assert.ok(dispatch.input.some((block: {text?:string}) => block.text === input.text));
+      const scope = {kind:"turn",turnId:"ordinary-final"};
+      f.setEvents([
+        {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"idle-check",originPluginId:"telegram-projects",input:dispatch.input}},
+        {seq:2,type:"turn/input/accepted",scope,data:{clientRequestId:"idle-check"}},
+        {seq:3,type:"item/completed",scope,data:{item:{type:"agentMessage",text:final}}},
+      ]);
+      await f.bridge.observe();
+      f.setEvents([{seq:4,type:"turn/completed",scope,data:{status:"completed"}}]);
+      const restarted = f.restart();
+      await restarted.observe();
+      await restarted.flush();
+      await restarted.observe();
+      await restarted.flush();
+      const sent = f.sent.filter(m => m.method === "sendMessage");
+      const expected = final.startsWith("В логе") ? [final] : [];
+      assert.deepEqual(sent.map(m => m.text), expected);
+      if (expected.length)
+        assert.equal(sent[0].reply_parameters?.message_id, input.messageId);
+    } finally { f.cleanup(); }
+  });
+}
+
 for (const busy of [false,true]) for (const kind of ["html","photo-caption","photo-bare"] as const) {
   test(`one addressed private artifact (${busy?"busy":"ordinary"}, ${kind}) keeps reply and caption`,async()=>{
     const f=fixture();
@@ -2672,5 +2757,173 @@ test("a configured private thread captures only original owner input for group p
     assert.equal(proof.text,"Предложи ответ в рабочей группе.");
     const forwarded=await handle(original(121,{forward_origin:{type:"user",sender_user:{id:8},date:1}}));
     await assert.rejects(f.bridge.proveOwnerForumRequest("thr_one",forwarded,OWNER_ID),/original_owner_text_required/);
+  } finally {f.cleanup();}
+});
+
+for (const busy of [false,true]) for (const kind of ["photo","document"] as const) {
+  test(`paired ${kind} album in ${busy?"busy":"ordinary"} turn has three ordered positions and one addressed result`,async t=>{
+    let now=Date.now();
+    t.mock.method(Date,"now",()=>now);
+    const root=mkdtempSync(join(tmpdir(),"paired-album-"));
+    const pixel=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==","base64");
+    const bytesFor=(index:number)=>kind==="photo" ? pixel : Buffer.from("inert fixture "+index);
+    const ext=kind==="photo"?"png":"txt";
+    const receives:number[]=[];
+    const f=fixture(async input=>{
+      const bytes=bytesFor(input.messageId);
+      const name="asset-"+input.messageId+"."+ext;
+      const path=join(root,name);
+      writeFileSync(path,bytes);
+      receives.push(input.messageId);
+      return {name,path,bytes:bytes.length,sha256:createHash("sha256").update(bytes).digest("hex")};
+    });
+    try {
+      f.store.put("bot:id",5);
+      f.store.put("chat:binding:0",{topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"paired",ready:true,cursor:0});
+      f.sdk.environments.get=async()=>({path:root});
+      const scope={kind:"turn",turnId:"current"};
+      const routes=new ReplyRoutes(f.store);
+      if (busy) {
+        f.thread.status="active";
+        const original=routes.ingress("thr_one",{
+          kind:"telegram",chatId:OWNER_ID,topicId:0,messageId:8,updateId:8,
+        });
+        routes.requested("thr_one",{requestId:"prior",originPluginId:"telegram-projects",input:[original]});
+        routes.accept("thr_one",scope.turnId,"prior");
+      }
+      const message=(id:number,updateId:number)=>({
+        update_id:updateId,message:{chat:{type:"private",id:OWNER_ID},from:{id:OWNER_ID},message_id:id,
+          media_group_id:"demo-album",...(id===11 && {caption:"Compare the three items."}),
+          ...(kind==="photo" ? {photo:[{file_id:id===12?"distinct":"same",width:40,height:30}]} :
+            {document:{file_id:id===12?"distinct":"same",file_name:"input.txt",file_size:5}})},
+      });
+      const accept=(id:number,updateId:number)=>{
+        const parsed=routeUpdate(message(id,updateId),OWNER_ID);
+        assert.equal(parsed.kind,"chat");
+        f.bridge.accept(parsed.input);
+      };
+      accept(13,103);accept(11,101);accept(13,103);
+      now+=2700; // No consumer has run, so the album remains open.
+      accept(12,102);
+      const ordinary=f.input("Adjacent stand-alone message",0);
+      f.bridge.accept(ordinary);
+      await f.bridge.tick();
+      await new Promise(resolve=>setImmediate(resolve));
+      assert.equal(f.calls.filter(c=>c[0]==="send").length,1);
+      now+=3000;
+      await f.bridge.tick();
+      for(let attempt=0;attempt<30 && f.calls.filter(c=>c[0]==="send").length<2;attempt++)
+        await new Promise(resolve=>setTimeout(resolve,5));
+      const dispatches=f.calls.filter(c=>c[0]==="send").map(c=>c[1]);
+      assert.equal(dispatches.length,2);
+      assert.deepEqual(receives,[11,12,13]);
+      const dispatch=dispatches[1];
+      assert.equal(dispatch.mode,busy?"steer-if-active":"queue-if-active");
+      assert.match(dispatch.input[0].text,/Элемент 1[\s\S]*asset-11[\s\S]*Элемент 2[\s\S]*asset-12[\s\S]*Элемент 3[\s\S]*asset-13/);
+      assert.equal(dispatch.input.filter((block:any)=>block.type==="image").length,kind==="photo"?3:0);
+      assert.doesNotMatch(dispatch.input[0].text,/Adjacent/);
+
+      // In the fixture the model's answer is injected as a BB event. Actual model
+      // acceptance and ordinal reasoning are checked separately on the local stand.
+      const markdown=[11,12,13].map(id=>`[Caption ${id}](${root}/asset-${id}.${ext})`).join("\n")+"\nNeighboring text.";
+      const label=busy ? dispatch.input.at(-1).text.match(/telegram-answer:([a-f0-9-]+)/)?.[1] : undefined;
+      const text=label?`[telegram-answer:${label}]\n${markdown}\n[/telegram-answer]`:markdown;
+      f.setEvents([
+        {seq:1,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"album-request",originPluginId:"telegram-projects",input:dispatch.input}},
+        {seq:2,type:"turn/input/accepted",scope,data:{clientRequestId:"album-request"}},
+        {seq:3,type:"item/completed",scope,data:{item:{type:"agentMessage",text}}},
+        ...(busy ? [{seq:4,type:"item/completed",scope,data:{item:{type:"agentMessage",text}}}]
+          : [{seq:4,type:"turn/completed",scope,data:{status:"completed"}}]),
+      ]);
+      await f.bridge.observe();await f.bridge.flush();
+      const restarted=f.restart();
+      if (busy) {
+        // The album response is already confirmed when the original turn finishes.
+        f.thread.status="idle";
+        const final=kind==="photo" ? " \nNO_REPLY\t " : "\n \t";
+        f.setEvents([
+          {seq:5,type:"item/completed",scope,data:{item:{type:"agentMessage",text:final}}},
+          {seq:6,type:"turn/completed",scope,data:{status:"completed"}},
+        ]);
+        await restarted.observe();
+      }
+      await restarted.flush();
+      const sends=f.sent.filter(event=>["sendMediaGroup","sendMessage"].includes(event.method));
+      assert.equal(sends.length,2);
+      const [album,neighbor]=sends;
+      assert.equal(album.method,"sendMediaGroup");
+      assert.equal(album.chat_id,OWNER_ID);
+      assert.deepEqual(album.reply_parameters,{message_id:11,allow_sending_without_reply:false});
+      assert.deepEqual(album.media.map((m:any)=>[m.type,m.caption]),[11,12,13].map(id=>[kind,"Caption "+id]));
+      for(const [index,id] of [11,12,13].entries())
+        assert.deepEqual(Buffer.from(await album["media"+index].arrayBuffer()),bytesFor(id));
+      assert.equal(neighbor.text,"Neighboring text.");
+      accept(13,103);accept(14,104);
+      await f.bridge.tick(); await f.bridge.flush(); await f.restart().flush();
+      assert.equal(f.sent.filter(event=>event.method==="sendMediaGroup").length,1);
+      const warning=f.sent.filter(event=>event.text?.includes("дополнительный элемент"));
+      assert.equal(warning.length,1);
+      assert.equal(warning[0].reply_parameters?.message_id,11);
+    } finally {f.cleanup();rmSync(root,{recursive:true,force:true});}
+  });
+}
+
+test("paired copy commands pin the source topic and never replay a partial copy",async()=>{
+  const f=fixture();
+  try {
+    f.store.put("bot:id",5);
+    f.store.put("chat:binding:100",{topicId:100,projectId:"proj_one",threadId:"thr_one",revision:"r",cursor:0,ready:true});
+    const at=Date.now();
+    f.store.put(`paired:album-copy:5:${OWNER_ID}:100:r:11`,{
+      messageIds:[11,12,13],albumKey:"sealed-album",expires:at+60_000,
+      files:[{kind:"photo",data:"same",caption:"First"},{kind:"photo",data:"other"},{kind:"photo",data:"same"}],
+    });
+    const cmd={...f.input("/copyalbum",100),replyTo:12};
+    await f.bridge.handle(cmd);
+    await f.restart().handle({...cmd});
+    await f.bridge.flush();
+    const copies=f.sent.filter(row=>row.method==="copyMessages");
+    assert.equal(copies.length,1);
+    assert.equal(copies[0].from_chat_id,OWNER_ID);
+    assert.equal(copies[0].chat_id,OWNER_ID);
+    assert.equal(copies[0].message_thread_id,100);
+    assert.deepEqual(copies[0].message_ids,[11,12,13]);
+    assert.equal(copies[0].reply_parameters,undefined);
+    assert.match(f.sent.find(row=>row.method==="sendMessage").text,/только часть/);
+    const addressed={...f.input("/replyalbum",100),replyTo:12};
+    await f.bridge.handle(addressed); await f.bridge.handle(addressed);
+    const replies=f.sent.filter(row=>row.method==="sendMediaGroup");
+    assert.equal(replies.length,1);
+    assert.deepEqual(replies[0].media.map((item:any)=>item.media),["same","other","same"]);
+    assert.equal(replies[0].reply_parameters.message_id,12);
+    assert.equal(replies[0].message_thread_id,100);
+    f.store.put("chat:binding:101",{topicId:101,projectId:"proj_one",threadId:"thr_one",revision:"r",cursor:0,ready:true});
+    await f.bridge.handle({...f.input("/replyalbum",101),replyTo:12});
+    assert.equal(f.sent.filter(row=>row.method==="sendMediaGroup").length,1);
+  } finally {f.cleanup();}
+});
+
+test("late unique occurrence suppresses an album result still waiting in the outbox",async t=>{
+  let now=Date.now();
+  t.mock.method(Date,"now",()=>now);
+  const f=fixture();
+  try {
+    f.store.put("bot:id",5);
+    f.store.put("chat:binding:0",{topicId:0,projectId:"proj_one",threadId:"thr_one",revision:"scope",ready:true,cursor:0});
+    const part=(id:number):ChatInput=>({ownerId:OWNER_ID,chatId:OWNER_ID,topicId:0,messageId:id,updateId:id,
+      albumId:"source-album",attachment:{fileId:"same",mime:"text/plain",name:"input.txt",kind:"document",size:2}});
+    f.bridge.accept(part(31));f.bridge.accept(part(32));
+    now+=2700;
+    await f.bridge.tick();
+    f.store.put("chat:out:event:scope:completed",{ownerId:OWNER_ID,topicId:0,text:"Apparently already finished",at:now,retryAt:0,
+      taskRoute:{kind:"telegram",chatId:OWNER_ID,topicId:0,updateId:31,messageId:31}});
+    f.bridge.accept(part(32)); // Ordinary replay.
+    f.bridge.accept(part(33)); // A new occurrence; the file ID is deliberately unchanged.
+    await f.bridge.flush();await f.restart().flush();
+    assert.ok(!f.sent.some(event=>event.text==="Apparently already finished"));
+    const warning=f.sent.filter(row=>row.text?.includes("дополнительный элемент"));
+    assert.equal(warning.length,1);
+    assert.equal(warning[0].reply_parameters.message_id,31);
+    assert.equal(f.calls.filter(c=>c[0]==="send").length,0);
   } finally {f.cleanup();}
 });
