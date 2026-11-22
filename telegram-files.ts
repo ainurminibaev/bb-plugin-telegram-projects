@@ -83,10 +83,11 @@ export async function saveLocalTelegramFile(input: {
     if (info.size > max) throw Error("attachment_too_large");
     if (input.expectedBytes && info.size !== input.expectedBytes)
       throw Error("attachment_size_mismatch");
-    await mkdir(input.inboxRoot, { recursive: true, mode: 0o700 });
+    // Группа папки входящих может читать файлы (агент под своей учёткой); чужим — нет.
+    await mkdir(input.inboxRoot, { recursive: true, mode: 0o750 });
     const inbox = await realpath(input.inboxRoot);
     const directory = join(inbox, key);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await mkdir(directory, { recursive: true, mode: 0o750 });
     if (!inside(inbox, await realpath(directory))) throw Error("attachment_inbox_invalid");
     const destination = join(directory, name);
     const receiptPath = join(directory, ".complete.json");
@@ -122,7 +123,7 @@ export async function saveLocalTelegramFile(input: {
     await pipeline(
       createReadStream(source, { fd: handle.fd, autoClose: false, highWaterMark: 256 * 1024 }),
       meter,
-      createWriteStream(temporary, { flags: "wx", mode: 0o600 }),
+      createWriteStream(temporary, { flags: "wx", mode: 0o640 }),
       { signal: input.signal },
     );
     if (bytes !== info.size) throw Error("attachment_size_mismatch");
