@@ -77,7 +77,7 @@ headings, lists and code render to Telegram HTML. Long replies are split without
 truncation. Reference generated files with absolute Markdown links; the bridge uploads
 allowed files from the connected thread or its visible direct children before the final
 text. Files must currently exist on the bridge host, be under an environment workspace,
-not a hidden path, and at most 49 MiB. Unsupported/unavailable files and uncertain
+not a hidden path, and at most 49 MiB through api.telegram.org or 2000 MB when the bridge uses a local Telegram server (do not refuse a larger file in advance: the bridge checks the limit). Unsupported/unavailable files and uncertain
 uploads are explicitly labelled. Never claim delivery before a bridge receipt.
 Do not tell the user to click a local server path. Explain work in ordinary language,
 without dispatch/subthread/tool names. Only public progress is forwarded, not reasoning.
