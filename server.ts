@@ -237,9 +237,31 @@ export const rpcContract = defineRpcContract({
     input:z.object({parentThreadId:z.string().min(1),routeToken:z.string().uuid(),projectId:z.string().min(1),
       environmentId:z.string().min(1).optional(),projectSource:z.object({hostId:z.string().min(1),path:z.string().min(1)}).strict().optional(),
       text:z.string().min(1).max(100000),title:z.string().min(1).max(200),
-      deliveryId:z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/),providerId:z.string().min(1).optional(),model:z.string().min(1).optional()}).strict(),
+      deliveryId:z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/),providerId:z.string().min(1).optional(),model:z.string().min(1).optional(),
+      urgent:z.boolean().optional()}).strict(),
     output:z.object({threadId:z.string()}),
   },
+  /** Постоянная пара тредов чата: основной и резервный, переключение по лимиту. */
+  configureChatPair: {
+    input: z.object({topicId: z.number().int().nonnegative(), primaryThreadId: z.string().min(1),
+      fallbackThreadId: z.string().min(1)}).strict(),
+    output: z.object({configured: z.literal(true)}),
+  },
+  removeChatPair: {input: z.object({topicId: z.number().int().nonnegative()}).strict(), output: z.boolean()},
+  chatPairStatus: {input: z.object({topicId: z.number().int().nonnegative()}).strict(), output: z.unknown()},
+  switchChatThread: {
+    input: z.object({topicId: z.number().int().nonnegative(), fromThreadId: z.string().min(1),
+      toThreadId: z.string().min(1)}).strict(),
+    output: z.unknown(),
+  },
+  setChildUrgency: {input: z.object({threadId: z.string().min(1), urgent: z.boolean()}).strict(), output: z.boolean()},
+  clearChatPairLimit: {input: z.object({topicId: z.number().int().nonnegative(), threadId: z.string().min(1)}).strict(), output: z.boolean()},
+  /** Решение владельца по треду, созданному помощником: перенести на действующую модель. */
+  continueChildOnActive: {input: z.object({threadId: z.string().min(1), topicId: z.number().int().nonnegative().optional()}).strict(),
+    output: z.object({threadId: z.string()})},
+  /** Решение владельца «закрыть»: архив треда, созданного помощником (не удаление). */
+  archiveAssistantThread: {input: z.object({threadId: z.string().min(1), topicId: z.number().int().nonnegative().optional()}).strict(),
+    output: z.boolean()},
   sendToTelegram: {
     input: z.object({threadId: z.string().min(1), topicId: z.number().int().nonnegative(),
       text: z.string().max(16000).optional(), files: z.array(z.string().min(2).max(4096)).max(20).optional(),
@@ -1859,6 +1881,43 @@ export default async function plugin(bb: BbPluginApi) {
     spawnDelegated: async args => {
       if (!bridge) throw Error("telegram_chat_unavailable");
       return bridge.spawnDelegated(args);
+    },
+    configureChatPair: async ({topicId, primaryThreadId, fallbackThreadId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      await bridge.pairs.configure(topicId, primaryThreadId, fallbackThreadId);
+      return {configured: true as const};
+    },
+    removeChatPair: async ({topicId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      return bridge.pairs.remove(topicId);
+    },
+    chatPairStatus: async ({topicId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      return bridge.pairs.status(topicId);
+    },
+    switchChatThread: async ({topicId, fromThreadId, toThreadId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      return bridge.pairs.manualSwitch(topicId, fromThreadId, toThreadId);
+    },
+    continueChildOnActive: async ({threadId, topicId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      const pair = await bridge.pairs.pairFor(threadId, topicId);
+      if (!pair) throw Error("pair_missing");
+      return {threadId: await bridge.pairs.continueOnActive(pair.topicId, threadId)};
+    },
+    archiveAssistantThread: async ({threadId, topicId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      const pair = await bridge.pairs.pairFor(threadId, topicId);
+      if (!pair) throw Error("pair_missing");
+      return bridge.pairs.archiveCreated(pair.topicId, threadId);
+    },
+    clearChatPairLimit: async ({topicId, threadId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      return bridge.pairs.clearLimit(topicId, threadId);
+    },
+    setChildUrgency: async ({threadId, urgent}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      return bridge.pairs.setUrgent(threadId, urgent);
     },
     sendToTelegram: async (args) => {
       if (!bridge) throw Error("telegram_chat_unavailable");
