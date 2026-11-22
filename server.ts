@@ -2433,7 +2433,7 @@ export default async function plugin(bb: BbPluginApi) {
                 transcribe: async (v) => {
                   const {voiceRouterPath} = await settings.get();
                   return transcribeTelegramVoice(botToken, bb.sdk, v, bridgeSignal, apiRoot, localFiles,
-                    voiceRouterPath ? audio => transcribeWithVoiceRouter(voiceRouterPath, audio, bridgeSignal) : undefined);
+                    voiceRouterPath ? audio => transcribeWithVoiceRouter(voiceRouterPath, audio, bridgeSignal) : undefined, language);
                 },
                 receiveAttachment: async (input, threadId) => {
                   return receiveLocalFile(input.attachment!,input.updateId,threadId,bridgeSignal);
@@ -2461,7 +2461,7 @@ export default async function plugin(bb: BbPluginApi) {
                 await processGroupInputs(store,bb.sdk,owner,bot,
                   groupTransport,signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
-                    cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined),cfg.telegramFileHostId,
+                    cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined,cfg.language as "ru"|"en"),cfg.telegramFileHostId,
                   (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum);
                 await deliverScheduledResults(store,bb.sdk,groupTransport,signal,
                   ()=>ownerId()===owner && botId()===bot && !stateTransferBusy);

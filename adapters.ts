@@ -256,6 +256,7 @@ export async function transcribeTelegramVoice(
   apiRoot: ApiRootSource = async () => "https://api.telegram.org",
   localFiles?: () => Promise<{ localRoot: string; inboxRoot: string }>,
   transcribe?: (audio: File) => Promise<string>,
+  language?: "ru" | "en",
 ): Promise<string> {
   if (voice.size > 15_000_000 || voice.duration > 600)
     throw Error("voice_too_large");
@@ -277,7 +278,9 @@ export async function transcribeTelegramVoice(
     const bytes = await readFile(saved.path);
     if (bytes.length === 0 || bytes.length !== saved.bytes) throw Error("voice_download_failed");
     const audio = new File([bytes], "voice.ogg", {type: voice.mime});
-    const result = transcribe ? {text: await transcribe(audio)} : await sdk.system.transcribeVoice({ file: audio, signal });
+    const result = transcribe ? {text: await transcribe(audio)} : await sdk.system.transcribeVoice({ file: audio, signal,
+      // Without a hint the service guesses the language and may take Russian speech for Polish.
+      ...(language && { prompt: language === "ru" ? "Речь на русском языке." : "Speech in English." }) });
     const text = (result as {text?:string}).text;
     if (!text?.trim() || text.length > 16000) throw Error("voice_transcription_empty");
     return text;
