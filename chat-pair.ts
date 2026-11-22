@@ -530,10 +530,21 @@ export class ChatPairs {
    */
   private async handoffTo(child: ThreadRow, providerOf: string, parent: string): Promise<string> {
     const doneKey = URGENT + "done:" + child.id;
-    const done = this.d.store.get<{target?: string}>(doneKey);
+    const done = this.d.store.get<{target?: string; at: number}>(doneKey);
+    if (done?.target) return done.target;
     if (done) {
-      if (done.target) return done.target;
-      throw Error("handoff_outcome_uncertain_check_threads");
+      // Прошлая попытка не дала ответа: новый тред ищем в истории самого handoff.
+      const history = await this.d.sdk.plugins.callRpc({pluginId: "handoff", method: "history", input: null,
+        outputSchema: z.object({handoffs: z.array(z.object({sourceThreadId: z.string(), targetThreadId: z.string(), at: z.number()}).passthrough())}),
+      }).catch(() => undefined);
+      if (!history) throw Error("handoff_outcome_uncertain_check_threads");
+      const made = history.handoffs.find(h => h.sourceThreadId === child.id && h.at >= (done as {at: number}).at - 60_000);
+      if (made) {
+        this.d.store.put(doneKey, {at: Date.now(), target: made.targetThreadId});
+        await this.d.sdk.threads.update({threadId: made.targetThreadId, parentThreadId: parent}).catch(() => undefined);
+        return made.targetThreadId;
+      }
+      this.d.store.del(doneKey);
     }
     const target = await this.thread(providerOf);
     const options = await this.d.sdk.threads.defaultExecutionOptions({threadId: target.id}).catch(() => null);

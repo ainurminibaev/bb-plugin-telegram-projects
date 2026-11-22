@@ -36,6 +36,8 @@ function world() {
   const handoffs: unknown[] = [];
   const archived: string[] = [];
   let handoffInstalled = true;
+  let failHandoff = false;
+  const madeHandoffs: {sourceThreadId: string; targetThreadId: string; at: number}[] = [];
   let schedules: {enabled: boolean; execution: {targetThreadId?: string | null}}[] = [];
   let spawned = 0;
   const store = memStore();
@@ -79,6 +81,8 @@ function world() {
       list: async () => ({plugins: handoffInstalled ? [{id: "handoff", enabled: true}] : []}),
       callRpc: async (a: {pluginId: string; method: string; input: {threadId: string}}) => {
         if (a.method === "automations_list") return schedules;
+        if (a.method === "history") return {handoffs: madeHandoffs};
+        if (failHandoff) { failHandoff = false; throw Error("network"); }
         handoffs.push(a);
         threads.set("kid2", {...threads.get(a.input.threadId)!, id: "kid2", parentThreadId: null, providerId: "codex"});
         return {newThreadId: "kid2"};
@@ -130,6 +134,8 @@ function world() {
   return {threads, queues, events, sent, notices, handoffs, store, deps, limitTurn, now0, archived, child, pairDigested,
     setSchedules: (v: typeof schedules) => { schedules = v; },
     setHandoff: (v: boolean) => { handoffInstalled = v; },
+    failNextHandoff: () => { failHandoff = true; },
+    recordHandoff: (h: {sourceThreadId: string; targetThreadId: string; at: number}) => madeHandoffs.push(h),
     get binding() { return binding; }, get spawned() { return spawned; }};
 }
 
@@ -500,4 +506,25 @@ test("нет плагина handoff: «перенести» отказывает
   await assert.rejects(() => pairs.continueOnActive(0, "stuck"), /handoff_plugin_missing/);
   w.setHandoff(true);
   assert.equal(await pairs.continueOnActive(0, "stuck"), "kid2");
+});
+
+
+test("неизвестный исход переноса: по истории handoff — без второго треда; если треда нет — повтор", async () => {
+  const w = world();
+  w.threads.delete("kid");
+  const pairs = new ChatPairs(w.deps);
+  await pairs.configure(0, "claude", "codex");
+  w.child("a", {originPluginId: "telegram-projects"}, "failed");
+  w.child("b", {originPluginId: "telegram-projects"}, "failed");
+  w.threads.get("claude")!.status = "idle";
+  await pairs.manualSwitch(0, "claude", "codex");
+  w.failNextHandoff();
+  await assert.rejects(() => pairs.continueOnActive(0, "a"));
+  w.recordHandoff({sourceThreadId: "a", targetThreadId: "a2", at: Date.now()});
+  w.threads.set("a2", {...w.threads.get("a")!, id: "a2", parentThreadId: null});
+  assert.equal(await pairs.continueOnActive(0, "a"), "a2", "тред уже создан — второй не делаем");
+  assert.equal(w.threads.get("a2")!.parentThreadId, "codex");
+  w.failNextHandoff();
+  await assert.rejects(() => pairs.continueOnActive(0, "b"));
+  assert.equal(await pairs.continueOnActive(0, "b"), "kid2", "треда не было — повтор");
 });
