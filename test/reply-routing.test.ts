@@ -261,3 +261,26 @@ test("a mixed delegated turn is reported to its coordinator explicitly instead o
   c.routes.cancel(tg); c.routes.complete("child","turn","completed");
   assert.equal(c.routes.reserveChildReports("parent",tg.chatId,tg.topicId).length,0);
 });
+
+test("a worker turn waiting for the owner's answer is not its result; the turn after the answer is", () => {
+  const {store,routes} = fixture();
+  const marker = routes.ingress("parent",tg);
+  const token = marker.text.match(/route:([^\]]+)/)![1];
+  routes.requested("parent",{requestId:"original",originPluginId:"telegram-projects",input:[marker]});
+  const forwarded = routes.delegatedIngress("parent",token,"child");
+  routes.requested("child",{requestId:"work",originPluginId:"telegram-projects",input:[forwarded]});
+  routes.accept("child","ask-turn","work");
+  routes.questionAsked("child","ask-turn");
+  routes.questionAnswered("child","ask-turn");
+  routes.complete("child","ask-turn","completed");
+  const pending = () => store.list<{turnId: string}>("reply:pending-child:").map(r => r.value.turnId);
+  assert.deepEqual(pending(),[],"the asking turn ends without the answer: no report");
+  routes.requested("child",{requestId:"answer",originPluginId:"provider-codex",initiator:"user",input:[{type:"text",text:"> Создать?\n\nда"}]});
+  routes.accept("child","answer-turn","answer");
+  assert.deepEqual(routes.destination("child","answer-turn"),tg);
+  routes.complete("child","answer-turn","completed");
+  assert.deepEqual(pending(),["answer-turn"]);
+  routes.requested("child",{requestId:"later",originPluginId:"provider-codex",initiator:"user",input:[{type:"text",text:"x"}]});
+  routes.accept("child","later-turn","later");
+  assert.deepEqual(routes.destination("child","later-turn"),{kind:"bb"},"only the one answer continues the task");
+});

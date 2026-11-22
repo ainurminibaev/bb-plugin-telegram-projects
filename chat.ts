@@ -2415,6 +2415,7 @@ export class ChatBridge {
       const value = codexAsyncAnswer(asyncQuestions, {option: a.extra ?? ""});
       if (!value) throw Error("unsupported_question");
       await this.d.sdk.threads.interactions.respond({threadId:b.threadId, interactionId:interaction.id, value});
+      this.routes.questionAnswered(b.threadId, delivery.turnId!);
     } else if (
       payload.kind === "approval" &&
       (a.extra === "allow_once" || a.extra === "deny") &&
@@ -2477,6 +2478,7 @@ export class ChatBridge {
       const value = codexAsyncAnswer(asyncQuestions, {text});
       if (value) {
         await this.d.sdk.threads.interactions.respond({threadId:q.threadId, interactionId:q.interactionId, value});
+        this.routes.questionAnswered(q.threadId, q.turnId!);
         this.enqueue(b.topicId, this.tr("Ответ передан BB."));
         return;
       }
@@ -2528,7 +2530,7 @@ export class ChatBridge {
       this.s.atomic(() => {
         if (asyncQuestions && this.s.get(asyncKey)) return;
         this.question(b, interaction, asyncQuestions ? {turnId, route} : undefined);
-        if (asyncQuestions) this.s.put(asyncKey, {at:Date.now()});
+        if (asyncQuestions) { this.s.put(asyncKey, {at:Date.now()}); this.routes.questionAsked(threadId, turnId); }
       });
     }
   }

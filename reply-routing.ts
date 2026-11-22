@@ -137,8 +137,19 @@ export class ReplyRoutes {
     if (!parent || parent.threadId !== parentThreadId || !this.sameTask(parent.route,current))
       throw Error("route_token_does_not_match_current_request");
   }
+  /** A Codex question of this turn went to the owner; its answer arrives as the next turn. */
+  questionAsked(threadId: string, turnId: string) {
+    this.store.put(this.questionKey(threadId), {turnId});
+  }
+  questionAnswered(threadId: string, turnId: string) {
+    const asked = this.store.get<{turnId: string}>(this.questionKey(threadId));
+    if (asked?.turnId === turnId) this.store.put(this.questionKey(threadId), {turnId, answered: true});
+  }
+  private questionKey(threadId: string) { return "reply:question-turn:" + threadId; }
   complete(threadId: string, turnId: string, status: string, completedAt?: number) {
     const route = this.destination(threadId, turnId);
+    // A turn that ends waiting for the owner's answer is not the result: the turn after the answer is.
+    const waiting = this.store.get<{turnId: string}>(this.questionKey(threadId))?.turnId === turnId;
     // Retain BB outcomes too: an ambiguous reused worker must never inherit
     // an older Telegram task just because only that task has a destination.
     const key = "reply:outcome:" + JSON.stringify([threadId, turnId]);
@@ -159,6 +170,7 @@ export class ReplyRoutes {
       }) ? first : undefined;
     this.store.atomic(() => {
       this.store.put(key, {threadId, turnId, status, route, consumedBy: null, completedAt, parent: delegatedBy ?? mixedParent});
+      if (waiting) return;
       if (route?.kind === "telegram" && delegatedBy)
         this.store.put("reply:pending-child:" + JSON.stringify([delegatedBy,threadId,turnId]),
           {parent:delegatedBy, threadId, turnId, status, route});
@@ -300,6 +312,13 @@ export class ReplyRoutes {
     input?: readonly {type: string; text?: string; visibility?: string}[];
   }) {
     if (data.retryOfRequestId) return this.retry(threadId, data.requestId, data.retryOfRequestId);
+    // Codex delivers the owner's answer to its question as a new turn: that turn continues the asking task.
+    const asked = this.store.get<{turnId: string; answered?: true}>(this.questionKey(threadId));
+    if (asked?.answered && data.originPluginId === "provider-codex" && data.initiator === "user") {
+      this.store.del(this.questionKey(threadId));
+      const first = this.store.get<TurnRoutes>(this.turnKey(threadId, asked.turnId))?.requestIds[0];
+      if (first && this.retry(threadId, data.requestId, first)) return true;
+    }
     if (data.originPluginId !== "telegram-projects") {
       this.record(threadId, data.requestId, {kind: "bb"});
       if (data.initiator === "system" && data.systemMessageKind?.startsWith("child-"))
