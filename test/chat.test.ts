@@ -2453,7 +2453,7 @@ test("Codex async forms reach the owner from the root, worker and nested worker"
     aboutToClose.status = "resolved";
     willExpire.expiresAt = Date.now() - 1;
     await f.bridge.flush();
-    const cards = f.sent.filter(x => x.text?.includes("BB ждёт ответа"));
+    const cards = f.sent.filter(x => x.text?.includes("❓ Вопрос"));
     assert.equal(cards.length, 3);
     for (const card of cards) {
       assert.equal(card.message_thread_id, original.topicId);
@@ -2462,7 +2462,7 @@ test("Codex async forms reach the owner from the root, worker and nested worker"
     const restarted = f.restart();
     await restarted.observe();
     await restarted.flush();
-    assert.equal(f.sent.filter(x => x.text?.includes("BB ждёт ответа")).length, 3);
+    assert.equal(f.sent.filter(x => x.text?.includes("❓ Вопрос")).length, 3);
 
     // An ordinary Telegram message is still accepted while the root form is open.
     await restarted.handle(f.input("A separate message"));

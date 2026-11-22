@@ -118,14 +118,13 @@ export const english: Record<string, string> = {
   "Да, остановить": "Yes, stop",
   Назад: "Back",
   "Команда остановки отправлена BB.": "Stop request sent to BB.",
-  "Этот вопрос уже закрыт в BB.": "This question is already closed in BB.",
-  "Ответ передан BB.": "Answer sent to BB.",
+  "Ответ принят.": "Answer received.",
   "Вопрос относится к прежнему подключению. Открой /menu.":
     "This question belongs to a previous connection. Open /menu.",
   "Этот вопрос уже закрыт.": "This question is already closed.",
   "Для этого вопроса выбери кнопку или открой BB.":
     "Choose a button or open BB for this question.",
-  "❓ BB ждёт ответа\n": "❓ BB needs your answer\n",
+  "❓ Вопрос\n": "❓ Question\n",
   "Требуется разрешение\n": "Permission required\n",
   "Разрешить один раз": "Allow once",
   Отказать: "Deny",

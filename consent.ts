@@ -69,7 +69,7 @@ function cardText(c: Consent, now: number) {
   if (c.state === "allowed") return `${head}\nРазрешил ${c.decidedBy}, ${time} UTC.`;
   if (c.state === "denied") return `${head}\nОтказал ${c.decidedBy}, ${time} UTC.`;
   if (c.state === "expired") return `${head}\nНикто не ответил — запрос закрыт.`;
-  return `${head}\nЗапрос уже решён в BB.`;
+  return `${head}\nЗапрос уже решён.`;
 }
 
 async function approversFor(ctx: ConsentContext, chat: number) {

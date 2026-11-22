@@ -19,7 +19,7 @@ const help="Команды: /topic_create Название | Форум | Пер
 const describeError=(error:unknown)=>{
   const code=error instanceof Error?error.message:"";
   if (code==="forum_command_expired") return "Отправьте новую команду для этой операции.";
-  if (code==="forum_private_binding_required") return "Откройте исходную личку, связанную с BB.";
+  if (code==="forum_private_binding_required") return "Откройте исходную личку владельца.";
   if (code==="forum_command_syntax") return help;
   if (code==="explicit_private_forum_selection_required" || code==="private_forum_selection_unavailable")
     return "Укажите точное название подключённого форума или ссылку. При одинаковых названиях нужна ссылка.";

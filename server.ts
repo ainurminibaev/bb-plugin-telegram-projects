@@ -1,3 +1,4 @@
+import {bbMentionsOn,withoutBB,type BbMentionsSetting} from "./bb-mentions";
 import {learnTopicName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
 import {handleOwnerForumCommand} from "./forum-commands";
@@ -335,6 +336,12 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Кто это: личный помощник или цифровой сотрудник",
       options: ["assistant", "employee"],
       default: "assistant",
+    },
+    bbMentions: {
+      type: "select",
+      label: "Ссылки и упоминания BB в Telegram (auto — по виду установки: помощник — да, сотрудник — нет)",
+      options: ["auto", "on", "off"],
+      default: "auto",
     },
     accessPermissionMode: {
       type: "select",
@@ -1015,7 +1022,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function run() {
     const cfg = await settings.get();
-    const tr = (s: string) => translate(cfg.language as "ru" | "en", s);
+    const bbOn = bbMentionsOn(store, cfg.bbMentions as BbMentionsSetting);
+    const tr = (s: string) => translate(cfg.language as "ru" | "en", bbOn ? s : withoutBB(s));
     if (!cfg.enabled || stateTransferBusy) return;
     if ((store.get<number>("retryAt") ?? 0) > Date.now()) return;
     if (!store.get("trackingSince")) store.put("trackingSince", Date.now());
@@ -1208,9 +1216,9 @@ export default async function plugin(bb: BbPluginApi) {
         text,
         parse_mode: "HTML",
         link_preview_options: { is_disabled: true },
-        reply_markup: {
+        ...(bbOn && {reply_markup: {
           inline_keyboard: [[{ text: tr("Открыть BB"), url: open }]],
-        },
+        }}),
       };
       if (topic.introId)
         await tg("editMessageText", { message_id: topic.introId, ...payload });
@@ -1263,7 +1271,8 @@ export default async function plugin(bb: BbPluginApi) {
                     (k) => k !== undefined,
                   )
                 : []),
-              {
+              // Every link here opens BB: without BB mentions there is no button.
+              ...(bbOn ? [{
                 text: e.thread
                   ? tr("Открыть в BB")
                   : e.kind === "test"
@@ -1281,7 +1290,7 @@ export default async function plugin(bb: BbPluginApi) {
                       : agency
                         ? "/plugins/agency/overview/jobs/" + encodeURIComponent(e.key)
                         : "/plugins/tasks/tasks/task/" + encodeURIComponent(e.key)),
-              },
+              }] : []),
             ],
           ],
         },
@@ -2292,6 +2301,7 @@ export default async function plugin(bb: BbPluginApi) {
       let rich = true;
       let currentUrl = "";
       let language: "ru" | "en" = "ru";
+      let bbMentions: BbMentionsSetting = "auto";
       let typing:(()=>Promise<void>)|undefined;
       let activeAbort: AbortController | undefined;
       let pendingWake = false;
@@ -2315,6 +2325,7 @@ export default async function plugin(bb: BbPluginApi) {
             rich = cfg.richReplies;
             currentUrl = new URL(cfg.appUrl).origin;
             language = cfg.language as "ru" | "en";
+            bbMentions = cfg.bbMentions as BbMentionsSetting;
             if (!bridge) {
               if (spool) await mkdir(spool, { recursive: true, mode: 0o700 });
               activeAbort = new AbortController();
@@ -2337,6 +2348,7 @@ export default async function plugin(bb: BbPluginApi) {
                 signal: bridgeSignal,
                 rich: () => rich,
                 language: () => language,
+                bbMentions: () => bbMentionsOn(store, bbMentions),
                 wake: wakeChat,
                 transcribe: async (v) => {
                   const {voiceRouterPath} = await settings.get();
@@ -2404,8 +2416,8 @@ export default async function plugin(bb: BbPluginApi) {
       }
     },
   });
-  function taskList(topicId: number, language: "ru" | "en") {
-    const tr = (s: string) => translate(language, s);
+  function taskList(topicId: number, language: "ru" | "en", bbOn = true) {
+    const tr = (s: string) => translate(language, bbOn ? s : withoutBB(s));
     const projectId =
       store.list<Topic>("topic:").find((x) => x.value.threadId === topicId)
         ?.value.key ??
@@ -2622,7 +2634,7 @@ export default async function plugin(bb: BbPluginApi) {
             } else if (route.kind === "tasks")
               await tg("sendMessage", {
                 message_thread_id: route.topicId || undefined,
-                text: taskList(route.topicId, cfg.language as "ru" | "en"),
+                text: taskList(route.topicId, cfg.language as "ru" | "en", bbMentionsOn(store, cfg.bbMentions as BbMentionsSetting)),
               });
             if ("callbackId" in route && route.callbackId)
               await tg("answerCallbackQuery", {

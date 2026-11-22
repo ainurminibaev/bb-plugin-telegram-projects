@@ -14,6 +14,7 @@ import { ChatPairs, OWNER_MESSAGE } from "./chat-pair";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
 import { markdownExcerpt } from "./events";
+import { withoutBB } from "./bb-mentions";
 import { localArtifacts, renderTelegramParts, cleanAssistantText, publicActivity, ARTIFACT_EXTENSIONS } from "./telegram-ux";
 import type { BbPluginApi, MessageDispatchHookContext, MessageDispatchHookDecision } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -205,7 +206,10 @@ const states: Record<string, string> = {
 const adoptedKey=(parent:string,worker:string)=>"reply:adopted:"+parent+":"+worker;
 
 export class ChatBridge {
-  private tr = (s: string) => translate(this.d.language?.() ?? "ru", s);
+  /** Links and mentions of BB for the owner: off for an employee by default (see bb-mentions.ts). */
+  private bbOn = () => this.d.bbMentions?.() ?? true;
+  private tr = (s: string) => translate(this.d.language?.() ?? "ru", this.bbOn() ? s : withoutBB(s));
+  private linkRows = (threadId: string): Key[][] => this.bbOn() ? [[this.link(threadId)]] : [];
   private navigation = new AsyncLocalStorage<{
     topicId: number;
     messageId: number;
@@ -238,6 +242,7 @@ export class ChatBridge {
       signal: AbortSignal;
       wake?: () => void;
       language?: () => Language;
+      bbMentions?: () => boolean;
       rich: () => boolean;
       transcribe?: (v: NonNullable<ChatInput["voice"]>) => Promise<string>;
       receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{
@@ -1169,7 +1174,7 @@ export class ChatBridge {
         this.tr("Напиши первое сообщение, чтобы начать.");
     } else text += this.tr("Чат отключён. Выбери «Новый чат» или «Чаты».");
     const keys = this.nav(b);
-    if (b.threadId) keys.unshift([this.link(b.threadId)]);
+    if (b.threadId) keys.unshift(...this.linkRows(b.threadId));
     this.enqueue(b.topicId, text, keys);
   }
   private async validThread(b: Binding, id: string) {
@@ -2034,7 +2039,7 @@ export class ChatBridge {
           this.tr(
             "В чате есть вопрос. Ответь через кнопку или ответом на его карточку. Если форма сложная — открой BB.",
           ),
-          [[this.link(b.threadId)]],
+          this.linkRows(b.threadId),
         );
         return;
       }
@@ -2178,7 +2183,7 @@ export class ChatBridge {
           [
             [this.button(b, "connect", this.tr("Подключиться"), t.id)],
             [this.button(b, "peek", this.tr("Последний ответ"), t.id)],
-            [this.link(t.id)],
+            ...this.linkRows(t.id),
             [this.button(b, "sessions", this.tr("← Чаты"))],
           ],
         );
@@ -2379,7 +2384,7 @@ export class ChatBridge {
           b.topicId,
           this.tr("📖 Последний ответ\n\n") +
             (result.output ?? this.tr("В этом чате ещё нет ответа.")),
-          [[this.link(id)]],
+          this.linkRows(id),
           fresh(),
           this.d.rich(),
         );
@@ -2425,7 +2430,7 @@ export class ChatBridge {
     });
     const delivery = this.s.get<QuestionDelivery>("chat:question-out:question:" + b.revision + ":" + interaction.id);
     if (!interactionOpen(interaction) || (delivery && !this.questionRouteCurrent(delivery))) {
-      this.enqueue(b.topicId, this.tr("Этот вопрос уже закрыт в BB."));
+      this.enqueue(b.topicId, this.tr("Этот вопрос уже закрыт."));
       return;
     }
     const payload = interaction.payload;
@@ -2470,7 +2475,7 @@ export class ChatBridge {
         },
       });
     } else throw Error("unsupported_question");
-    this.enqueue(b.topicId, this.tr("Ответ передан BB."));
+    this.enqueue(b.topicId, this.tr("Ответ принят."));
   }
   private async answerText(
     b: Binding,
@@ -2498,7 +2503,7 @@ export class ChatBridge {
       if (value) {
         await this.d.sdk.threads.interactions.respond({threadId:q.threadId, interactionId:q.interactionId, value});
         this.routes.questionAnswered(q.threadId, q.turnId!);
-        this.enqueue(b.topicId, this.tr("Ответ передан BB."));
+        this.enqueue(b.topicId, this.tr("Ответ принят."));
         return;
       }
     }
@@ -2522,7 +2527,7 @@ export class ChatBridge {
         answers: { [question.id]: { selected: [], freeText: text } },
       },
     });
-    this.enqueue(b.topicId, this.tr("Ответ передан BB."));
+    this.enqueue(b.topicId, this.tr("Ответ принят."));
   }
   private questionRouteCurrent(delivery: QuestionDelivery) {
     return !delivery.turnId || this.routes.sameTask(delivery.route,
@@ -2556,7 +2561,7 @@ export class ChatBridge {
   private question(b: Binding, i: PendingInteraction, asyncDelivery?: {turnId: string; route?: ReplyRoute}) {
     const id = "question:" + b.revision + ":" + i.id;
     if (this.s.get("chat:out:" + id)) return;
-    let text = this.tr("❓ BB ждёт ответа\n");
+    let text = this.tr("❓ Вопрос\n");
     const keys: Key[][] = [];
     const asyncQuestions = asyncDelivery && codexAsyncQuestions(i);
     if (asyncQuestions) {
@@ -2604,7 +2609,7 @@ export class ChatBridge {
           );
       } else text += this.tr("\n\nНесколько вопросов: открой форму в BB.");
     } else text += this.tr("Эта форма открывается в BB.");
-    keys.push([this.link(b.threadId!)]);
+    keys.push(...this.linkRows(b.threadId!));
     this.s.put("chat:question-out:" + id, {
       threadId: b.threadId!,
       interactionId: i.id,
