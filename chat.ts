@@ -9,6 +9,7 @@ import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interact
 import { splitChildResultClaims, stripTelegramMarkers, ReplyRoutes, type ReplyRoute } from "./reply-routing";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
 import { TelegramHandoff, type HandoffJob } from "./handoff";
+import { ChatPairs } from "./chat-pair";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
 import { markdownExcerpt } from "./events";
@@ -218,6 +219,9 @@ export class ChatBridge {
   private handoffPolling = false;
   private nextHandoffPoll = 0;
   private readonly handoffs: TelegramHandoff;
+  readonly pairs: ChatPairs;
+  private nextPairTick = 0;
+  private pairTicking = false;
   constructor(
     private d: {
       store: Store;
@@ -267,9 +271,33 @@ export class ChatBridge {
       },
       sourceIsBound: threadId => this.bindings().some(b => b.threadId === threadId),
     });
+    this.pairs = this.makePairs();
   }
   private get s() {
     return this.d.store;
+  }
+  private async withCatchUp(threadId: string, text: string) {
+    const prefix = await this.pairs.catchUpPrefix(threadId).catch(() => "");
+    return prefix ? prefix + "\n\n" + text : text;
+  }
+  private makePairs() {
+    return new ChatPairs({store: this.d.store, sdk: this.d.sdk, signal: this.d.signal,
+      binding: topic => this.binding(topic) as never,
+      save: b => this.save(b as unknown as Binding),
+      fresh,
+      busy: topic => this.lanes.has(topic) ||
+        this.s.list<Inbox>("chat:in:").some(r => r.value.state !== "done" && r.value.input.topicId === topic) ||
+        Boolean(this.handoffs.active(topic)),
+      notify: (topic, text, id) => {
+        const b = this.binding(topic);
+        if (!b) return;
+        this.enqueue(topic, text, undefined, id, false);
+      },
+      destination: (thread, turn) => this.routes.destination(thread, turn),
+      requestIds: (thread, turn) => this.routes.requestIds(thread, turn),
+      retryBelongsToTurn: (thread, turn, retryOf) => this.routes.retryBelongsToTurn(thread, turn, retryOf),
+      ingress: (thread, route) => this.routes.ingress(thread, route) as never,
+    });
   }
   private get routes() { return new ReplyRoutes(this.s); }
   providerHandoffStatus(topicId: number) {
@@ -292,6 +320,10 @@ export class ChatBridge {
   async admitDispatch(ctx: MessageDispatchHookContext): Promise<MessageDispatchHookDecision> {
     const handoff = this.handoffs.dispatch(ctx);
     if (handoff) return handoff;
+    if (ctx.initiator === "system" && this.pairs.list().length) {
+      const held = await this.pairs.admitChildNotice(ctx).catch(() => undefined);
+      if (held) return held;
+    }
     const managed = ctx.originPluginId === "telegram-projects" ||
       this.deliveryWatches().some(w => w.threadId === ctx.thread.id) ||
       this.bindings().some(b => b.threadId === ctx.thread.id);
@@ -409,7 +441,7 @@ export class ChatBridge {
     return {accepted:true as const};
   }
   async spawnDelegated(args: {parentThreadId: string; routeToken: string; projectId: string;
-    environmentId?: string; projectSource?: {hostId:string; path:string}; text: string; title: string; deliveryId: string; providerId?: string; model?: string}): Promise<{threadId:string}> {
+    environmentId?: string; projectSource?: {hostId:string; path:string}; text: string; title: string; deliveryId: string; providerId?: string; model?: string; urgent?: boolean}): Promise<{threadId:string}> {
     const key = "reply:delegation-spawn:" + args.deliveryId;
     const old = this.s.get<{args: typeof args; state: string; threadId?: string}>(key);
     if (old) {
@@ -434,13 +466,23 @@ export class ChatBridge {
     // The caller chooses the project/environment using the ordinary BB registry.
     // Native spawn validates that pair and handles execution, limits and retries.
     this.s.put(key,{args,state:"sending"});
+    // Пара тредов: без явного выбора подтред создаётся на провайдере действующего треда.
+    let inherited: {providerId: string; model?: string} | undefined;
+    if (!args.providerId && this.pairs.of(args.parentThreadId)) {
+      const parent = await this.d.sdk.threads.get({threadId: args.parentThreadId});
+      const row = ("thread" in parent ? parent.thread : parent) as {providerId: string};
+      const options = await this.d.sdk.threads.defaultExecutionOptions({threadId: args.parentThreadId}).catch(() => null);
+      inherited = {providerId: row.providerId, ...(options?.model ? {model: options.model} : {})};
+    }
     const child = await this.d.sdk.threads.spawn({projectId:args.projectId,
+      ...(inherited ?? {}),
       environment,parentThreadId:args.parentThreadId,
       parentNotifications:"auto",title:args.title,visibility:"visible",
       ...(args.providerId ? {providerId:args.providerId}:{}),...(args.model ? {model:args.model}:{}),
       input:[{type:"text",text:args.text,mentions:[]},marker]});
     this.routes.bindIngress(marker,child.id);
     this.s.put("reply:child-cursor:"+child.id,0);
+    if (args.urgent) this.pairs.setUrgent(child.id, true);
     this.s.put(key,{args,state:"accepted",threadId:child.id});
     return {threadId:child.id};
   }
@@ -935,6 +977,15 @@ export class ChatBridge {
           this.work.delete(p);
           this.d.wake?.();
         });
+      this.work.add(p);
+    }
+    if (!this.pairTicking && Date.now() >= this.nextPairTick) {
+      this.nextPairTick = Date.now() + 15000;
+      this.pairTicking = true;
+      const p = this.pairs.tick().catch(() => {}).finally(() => {
+        this.pairTicking = false;
+        this.work.delete(p);
+      });
       this.work.add(p);
     }
     if (!this.observed && Date.now() >= this.nextObserve) {
@@ -1967,7 +2018,7 @@ export class ChatBridge {
       const dispatched = await this.d.sdk.threads.send({
         threadId: b.threadId,
         mode: busy || followUp ? "steer-if-active" : "queue-if-active",
-        input: [{ type: "text", text: followUp ? followUp.prefix + text : text, mentions: [] },
+        input: [{ type: "text", text: followUp ? followUp.prefix + text : await this.withCatchUp(b.threadId, text), mentions: [] },
           ...(albumImages??[]),...metadata],
       });
       if (dispatched?.delivery === "queued")
@@ -2541,6 +2592,15 @@ export class ChatBridge {
       const start = sorted.find(e => e.type === "turn/started");
       const error = sorted.find(e => e.type === "provider/error" && (!start || e.seq > start.seq));
       const category = error?.type === "provider/error" ? error.data.errorInfo?.category : undefined;
+      if (category === "rate-limit") {
+        // Пара тредов: лимит действующего — переключение без «⚠️».
+        if (t.id === b.threadId && await this.pairs.onLimit(b, t.id, end.scope.turnId)) continue;
+        // Подтред: срочный продолжается на другом провайдере, остальные ждут штатного повтора.
+        if (t.id !== b.threadId) {
+          if (await this.pairs.continueUrgent(t.id).catch(() => undefined)) continue;
+          if ((await this.pairs.childLimit(t.id).catch(() => undefined))?.state === "waiting") continue;
+        }
+      }
       await this.reportFailure(b,t.id,t.title,end.scope.turnId,end.seq,category);
     }
   }

@@ -424,6 +424,10 @@ export class ReplyRoutes {
     }
     return true;
   }
+  /** Запросы, из которых состоит ход (первый — исходное сообщение). */
+  requestIds(threadId: string, turnId: string) {
+    return this.store.get<TurnRoutes>(this.turnKey(threadId, turnId))?.requestIds ?? [];
+  }
   routeOf(threadId: string, requestId: string) {
     return this.store.get<ReplyRoute>(this.requestKey(threadId, requestId));
   }
