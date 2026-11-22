@@ -1,3 +1,4 @@
+import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
 import {learnTopicName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
@@ -2417,6 +2418,8 @@ export default async function plugin(bb: BbPluginApi) {
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined),cfg.telegramFileHostId,
                   (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum);
+                await deliverScheduledResults(store,bb.sdk,groupTransport,signal,
+                  ()=>ownerId()===owner && botId()===bot && !stateTransferBusy);
               } catch (error) { ingressError = safeError(error); }
             }
           } else {
