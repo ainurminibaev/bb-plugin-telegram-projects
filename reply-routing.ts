@@ -8,7 +8,8 @@ export type ReplyRoute = { kind: "bb" } | {
 const ownerResultInstructions = "\nIf your final answer includes the completed result of a delegated BB turn, append " +
   "one Markdown comment on its own line for each such result: <!-- bb-telegram-child-result:CHILD_THREAD_ID:CHILD_TURN_ID -->. " +
   "Use the exact turn ID from the child's BB event log. Omit this comment for launch acknowledgements, " +
-  "progress updates, or results you did not include. The bridge removes the comment from Telegram.";
+  "progress updates, or results you did not include. The bridge removes the comment from Telegram." +
+  "\nEarlier Telegram messages and files: run `bb telegram-projects search-history [words] [--author A] [--from D] [--to D] [--last N] [--files] [--file CHAT:MESSAGE]` instead of asking to resend.";
 
 export type ChildResult = {threadId: string; turnId: string};
 

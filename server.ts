@@ -598,14 +598,9 @@ export default async function plugin(bb: BbPluginApi) {
     file:z.object({chat:z.number().int(),message:z.number().int().positive()}).strict().optional()
       .describe("Download the file of one found message (chat and message from a search result). Returns a local path; open it with your usual tools."),
   }).strict();
-  bb.agents.registerTool({
-    name:"telegram_conversation_archive",
-    description:"Read the saved Telegram conversation: earlier messages of this chat and its topics, and of the other chats this conversation may see. "+
-      "Use it whenever someone refers to something said or sent earlier (\"as we discussed\", \"the file from this morning\", \"in the other topic\"), instead of asking to resend. "+
-      "Search by words (case, «ё», small typos and Latin/Cyrillic spelling do not matter), by author, by period with a time zone, the last N messages, or files only; then download a file by chat and message. "+
-      "Other people's private chats are never returned.",
-    parameters:archiveToolInput,
-    async execute(args,{threadId,signal}) {
+  // The same reading for the agent tool and for the plugin command: a thread started before an
+  // update does not get new agent tools, but every thread can run the command.
+  async function readArchive(args:z.infer<typeof archiveToolInput>,threadId:string,signal:AbortSignal) {
       const owner=ownerId(),bot=botId();
       if (!owner || !bot || !archive) throw Error("archive_unavailable");
       const conversation=await conversationOf(store,bb.sdk.threads,threadId,signal);
@@ -630,7 +625,15 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const {file:_file,...query}=args;
       return JSON.stringify({messages:archive.find(bot,readable,query,safeTimeZone(cfg.timeZone))});
-    },
+  }
+  bb.agents.registerTool({
+    name:"telegram_conversation_archive",
+    description:"Read the saved Telegram conversation: earlier messages of this chat and its topics, and of the other chats this conversation may see. "+
+      "Use it whenever someone refers to something said or sent earlier (\"as we discussed\", \"the file from this morning\", \"in the other topic\"), instead of asking to resend. "+
+      "Search by words (case, «ё», small typos and Latin/Cyrillic spelling do not matter), by author, by period with a time zone, the last N messages, or files only; then download a file by chat and message. "+
+      "Other people's private chats are never returned.",
+    parameters:archiveToolInput,
+    async execute(args,{threadId,signal}) { return readArchive(args,threadId,signal); },
   });
   // A schedule set up in a group or a person's private chat runs only while that conversation still has access.
   scheduleAccess=async ctx=>{
@@ -2033,8 +2036,8 @@ export default async function plugin(bb: BbPluginApi) {
     commands: [
       {
         name:"search-history",
-        summary:"Search messages received in the current bound group or topic",
-        usage:"bb telegram-projects search-history <words>",
+        summary:"Read the conversation archive this conversation may see: words, author, period, last N, files; download a file",
+        usage:"bb telegram-projects search-history [words] [--author A] [--from YYYY-MM-DD[THH:MM]] [--to …] [--tz Europe/Moscow] [--last N] [--files] [--chat C] [--topic T] [--file CHAT:MESSAGE]",
       },
       {
         name: "chat-forget",
@@ -2079,15 +2082,26 @@ export default async function plugin(bb: BbPluginApi) {
           (ctx.threadId && (await sharedGroupThreads(store,bb.sdk.threads,[ctx.threadId])).has(ctx.threadId))))
         return {exitCode: 1, stderr: "bridge_admin_command_unavailable_in_group"};
       if(argv[0]==="search-history"){
-        const threadId=ctx.threadId;
-        const scope=threadId && store.get<string>("group:thread:"+threadId);
-        const policy=scope && store.get<import("./ingress").GroupTopicPolicy>(scope);
-        if(!history || !policy || !policy.searchableHistory || policy.threadId!==threadId ||
-          policy.ownerId!==ownerId() || policy.botId!==botId())return {exitCode:1,stderr:"bound_searchable_group_required"};
-        const query=argv.slice(1).join(" ").trim();
-        if(!query || query.length>1000)return {exitCode:1,stderr:"search_query_required"};
-        const rows=history.find(historyPrefix(policy.chatId,policy.topicId),query,Number.MAX_SAFE_INTEGER);
-        return {exitCode:0,stdout:topicPassages(rows,policy.chatId)||"Совпадений нет."};
+        if (!ctx.threadId) return {exitCode:1,stderr:"run_from_a_conversation_thread"};
+        // bb telegram-projects search-history [words] [--author A] [--from D] [--to D] [--tz Z] [--last N] [--files] [--chat C] [--topic T] [--file CHAT:MESSAGE]
+        const words:string[]=[]; const a:Record<string,unknown>={};
+        const rest=argv.slice(1);
+        for (let i=0;i<rest.length;i++) {
+          const k=rest[i];
+          if (k==="--files") a.files=true;
+          else if (k==="--json") continue;
+          else if (["--author","--from","--to","--tz","--last","--chat","--topic","--file"].includes(k)) {
+            const v=rest[++i]; if (v===undefined) return {exitCode:2,stderr:"missing_value_for "+k};
+            if (k==="--tz") a.timeZone=v; else if (k==="--last") a.last=Number(v); else if (k==="--topic") a.topic=Number(v);
+            else if (k==="--file") { const [c,m]=v.split(":").map(Number); a.file={chat:c,message:m}; }
+            else a[k.slice(2)]=v;
+          } else words.push(k);
+        }
+        if (words.length) a.words=words.join(" ");
+        const parsed=archiveToolInput.safeParse(a);
+        if (!parsed.success) return {exitCode:2,stderr:"invalid_arguments"};
+        try { return {exitCode:0,stdout:await readArchive(parsed.data,ctx.threadId,lifetime.signal)}; }
+        catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
       }
       const [cmd, key, id] = argv.filter((x) => x !== "--json");
       if (cmd === "chat-forget") {
