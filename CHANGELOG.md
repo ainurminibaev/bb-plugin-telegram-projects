@@ -1,3 +1,7 @@
+# 0.9.50
+
+- Detect a basic group that became a supergroup while an older bridge was running: Telegram names the new chat ID for member requests, not for `getChat`. The binding, its thread, the group settings and the saved conversation move to the new ID.
+
 # 0.9.49
 
 - Employee groups: every member may talk to the employee and give it tasks, on mention or reply, including people added later. A group can still be limited to people with access. The former Codex lock is removed.
