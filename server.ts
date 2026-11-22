@@ -2046,7 +2046,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name:"send",
         summary:"Send a message or file to a group topic or a person with access; --ask remembers the question so the answer comes back",
-        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON | --answer ASK) (--text TEXT | --text-file PATH, not stdin) [--file PATH] [--ask]",
+        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON|owner | --answer ASK) (--text TEXT | --text-file PATH, not stdin) [--file PATH] [--ask]",
       },
       {
         name:"topic",
@@ -2157,6 +2157,7 @@ export default async function plugin(bb: BbPluginApi) {
           let target:{chat:number;topic:number};
           const answer=store.get<import("./send-command").Ask>(`send:ask:${bot}:${opt.answer}`);
           if (opt.answer) { if (!answer) return {exitCode:1,stderr:"no_open_question_for_this_answer"}; target=answer.origin; }
+          else if (opt.person && ["owner","владелец"].includes(opt.person.trim().toLowerCase())) target={chat:owner,topic:0};
           else if (opt.person) target={chat:findPerson(store,bot,opt.person),topic:0};
           else if (opt.chat) { const chat=findGroup(store,bot,opt.chat); target=opt.topic ? findTopic(store,bot,chat,opt.topic) : {chat,topic:0}; }
           else if (opt.topic) target=findTopic(store,bot,undefined,opt.topic);
