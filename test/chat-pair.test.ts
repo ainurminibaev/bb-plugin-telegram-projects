@@ -16,7 +16,8 @@ function memStore(): Store {
 }
 
 type T = {id: string; projectId: string; environmentId: string; providerId: string; status: string;
-  title: string; parentThreadId: string | null; model: string};
+  title: string; parentThreadId: string | null; model: string; originPluginId?: string | null;
+  lifecycleOwnerThreadId?: string | null; archivedAt?: number | null};
 
 function world() {
   const now0 = Date.now();
@@ -26,13 +27,15 @@ function world() {
     ["codex", {id: "codex", projectId: "p", environmentId: "e", providerId: "codex", status: "idle",
       title: "Личный помощник", parentThreadId: null, model: "gpt-6.2-sol"}],
     ["kid", {id: "kid", projectId: "p", environmentId: "e2", providerId: "claude-code", status: "idle",
-      title: "Отчёт", parentThreadId: "claude", model: "claude-opus-5-5"}],
+      title: "Отчёт", parentThreadId: "claude", model: "claude-opus-5-5", originPluginId: null}],
   ]);
   const queues = new Map<string, {id: string; payload: {kind: string; retryOfTurnRequestId?: string}; state: string; sendAt: number | null}[]>();
   const events = new Map<string, {seq: number; type: string; createdAt: number; data: unknown; scope?: unknown}[]>();
   const sent: {threadId: string; text: string; marker: string}[] = [];
   const notices: string[] = [];
   const handoffs: unknown[] = [];
+  const archived: string[] = [];
+  let schedules: {enabled: boolean; execution: {targetThreadId?: string | null}}[] = [];
   let spawned = 0;
   const store = memStore();
   let binding = {topicId: 0, projectId: "p", threadId: "claude" as string | null, revision: "r0"};
@@ -46,7 +49,10 @@ function world() {
         if (a.parentThreadId) t.parentThreadId = a.parentThreadId;
         return {thread: t};
       },
-      list: async (a: {parentThreadId?: string}) => [...threads.values()].filter(t => t.parentThreadId === a.parentThreadId),
+      list: async (a: {parentThreadId?: string}) => [...threads.values()].filter(t => t.parentThreadId === a.parentThreadId && !t.archivedAt)
+        .map(({originPluginId: _o, lifecycleOwnerThreadId: _l, ...rest}) => rest),
+      archive: async ({threadId}: {threadId: string}) => { archived.push(threadId); threads.get(threadId)!.archivedAt = Date.now(); return {}; },
+      interactions: {list: async () => []},
       defaultExecutionOptions: async ({threadId}: {threadId: string}) => ({model: threads.get(threadId)!.model}),
       queuedMessages: {
         list: async ({threadId}: {threadId: string}) => queues.get(threadId) ?? [],
@@ -69,7 +75,8 @@ function world() {
       spawn: async () => { spawned++; return {id: "new"}; },
     },
     plugins: {
-      callRpc: async (a: {method: string; input: {threadId: string}}) => {
+      callRpc: async (a: {pluginId: string; method: string; input: {threadId: string}}) => {
+        if (a.method === "automations_list") return schedules;
         handoffs.push(a);
         threads.set("kid2", {...threads.get(a.input.threadId)!, id: "kid2", parentThreadId: null, providerId: "codex"});
         return {newThreadId: "kid2"};
@@ -101,7 +108,25 @@ function world() {
       payload: {kind: "retry", retryOfTurnRequestId: "req-" + turn}, state: "waiting", sendAt: Date.now() + resetIn}]);
     threads.get(thread)!.status = "error";
   };
-  return {threads, queues, events, sent, notices, handoffs, store, deps, limitTurn, now0,
+  /** Подтред: последний ход завершён `hoursAgo` назад (или упал). */
+  const child = (id: string, extra: Partial<T>, end: "completed" | "failed", hoursAgo = 7) => {
+    threads.set(id, {id, projectId: "p", environmentId: "e", providerId: "claude-code", status: end === "failed" ? "error" : "idle",
+      title: "Задача " + id, parentThreadId: "claude", model: "claude-opus-5-5", ...extra});
+    const at = Date.now() - hoursAgo * 3600_000;
+    events.set(id, [
+      {seq: 1, type: "client/turn/requested", createdAt: at - 1000, data: {input: [{type: "text", text: "Сделай задачу " + id}]}},
+      {seq: 2, type: "turn/started", createdAt: at - 500, data: {}},
+      {seq: 3, type: "turn/completed", createdAt: at, data: {status: end}},
+    ]);
+  };
+  /** У пары был завершённый ход после итогов подтредов. */
+  const pairDigested = () => {
+    const list = events.get("claude") ?? [];
+    list.push({seq: list.length + 100, type: "turn/completed", createdAt: Date.now() - 60_000, data: {status: "completed"}});
+    events.set("claude", list);
+  };
+  return {threads, queues, events, sent, notices, handoffs, store, deps, limitTurn, now0, archived, child, pairDigested,
+    setSchedules: (v: typeof schedules) => { schedules = v; },
     get binding() { return binding; }, get spawned() { return spawned; }};
 }
 
@@ -299,4 +324,96 @@ test("лимит основного сняли досрочно: возврат 
   (pairs as unknown as {probed: Map<string, number>}).probed.clear();
   await pairs.tick();
   assert.equal(w.binding.threadId, "claude");
+});
+
+
+test("признак «создан помощником» — только штатные поля и запись моста", async () => {
+  const w = world();
+  const pairs = new ChatPairs(w.deps);
+  const p = await pairs.configure(0, "claude", "codex");
+  const row = (x: Partial<T>) => ({id: "x", projectId: "p", environmentId: "e", providerId: "codex", status: "idle",
+    title: "t", parentThreadId: null, ...x}) as never;
+  assert.equal(pairs.createdByAssistant(row({originPluginId: "telegram-projects", parentThreadId: "claude"}), p), true);
+  assert.equal(pairs.createdByAssistant(row({lifecycleOwnerThreadId: "codex"}), p), true);
+  assert.equal(pairs.createdByAssistant(row({originPluginId: null, parentThreadId: "claude"}), p), false, "только родитель — не доказательство");
+  assert.equal(pairs.createdByAssistant(row({originPluginId: "automations", parentThreadId: "claude"}), p), false, "тред расписания");
+  assert.equal(pairs.createdByAssistant(row({originPluginId: "telegram-projects", parentThreadId: "foreign"}), p), false);
+  w.store.put("reply:delegation-spawn:d1", {state: "accepted", threadId: "x"});
+  assert.equal(pairs.createdByAssistant(row({originPluginId: null, parentThreadId: "foreign"}), p), true, "запись моста о создании");
+  assert.equal(pairs.createdByAssistant(row({id: "claude"}), p), false);
+});
+
+test("уборка: архивируются только завершённые созданные помощником, прочитанные и 6 ч без движения", async () => {
+  const w = world();
+  w.threads.delete("kid");
+  const pairs = new ChatPairs(w.deps);
+  const p = await pairs.configure(0, "claude", "codex");
+  w.child("done", {originPluginId: "telegram-projects"}, "completed");
+  w.child("fresh", {originPluginId: "telegram-projects"}, "completed", 1);
+  w.child("scheduled", {originPluginId: "telegram-projects"}, "completed");
+  w.child("foreign", {originPluginId: null}, "completed");
+  w.child("cron", {originPluginId: "automations"}, "completed");
+  w.child("broken", {originPluginId: "telegram-projects"}, "failed");
+  w.setSchedules([{enabled: true, execution: {targetThreadId: "scheduled"}}]);
+  assert.deepEqual(await pairs.cleanup(p), [], "итог ещё не прочитан помощником — ничего не трогаем");
+  w.pairDigested();
+  assert.deepEqual(await pairs.cleanup(p), ["done"]);
+  assert.deepEqual(w.archived, ["done"]);
+  assert.ok(w.threads.has("done"), "архив, не удаление");
+});
+
+test("уборка не идёт, если не удалось проверить расписания", async () => {
+  const w = world();
+  w.threads.delete("kid");
+  const pairs = new ChatPairs({...w.deps, sdk: {...(w.deps.sdk as object), plugins: {callRpc: async () => { throw Error("down"); }}} as never});
+  const p = await pairs.configure(0, "claude", "codex");
+  w.child("done", {originPluginId: "telegram-projects"}, "completed");
+  w.pairDigested();
+  await assert.rejects(() => pairs.cleanup(p));
+  assert.deepEqual(w.archived, []);
+});
+
+test("переключение: владельцу — нумерованный список незаконченного на модели в лимите, действующему — сводка с номерами", async () => {
+  const w = world();
+  w.threads.delete("kid");
+  const pairs = new ChatPairs(w.deps);
+  await pairs.configure(0, "claude", "codex");
+  w.child("stuck", {originPluginId: "telegram-projects", title: "Отчёт по рекламе"}, "failed");
+  w.queues.set("stuck", [{id: "r", payload: {kind: "retry", retryOfTurnRequestId: "x"}, state: "waiting", sendAt: Date.now() + 3600_000}]);
+  w.child("codexjob", {originPluginId: "telegram-projects", providerId: "codex", title: "Задача на Codex"}, "failed");
+  w.child("foreign", {originPluginId: null, title: "Чужой тред"}, "failed");
+  w.limitTurn("claude", "t1", "Привет", 2 * 3600_000);
+  await pairs.onLimit(w.binding as never, "claude", "t1");
+  const list = w.notices.find(n => n.startsWith("Незаконченные задачи"));
+  assert.ok(list, w.notices.join(" | "));
+  assert.match(list!, /на Claude, который сейчас в лимите:\n1\. ⏳ Отчёт по рекламе — Сделай задачу stuck — ждёт лимита до .*, Claude/);
+  assert.doesNotMatch(list!, /Чужой тред/, "чужие треды не показываются");
+  assert.doesNotMatch(list!, /Задача на Codex/, "на действующей модели решать нечего");
+  assert.match(list!, /Ответь номерами: что перенести на действующую модель, что оставить ждать, что закрыть\./);
+  const replay = w.sent.find(x => x.threadId === "codex")!;
+  assert.match(replay.text, /Сводка при переключении/);
+  assert.match(replay.text, /1 = stuck/);
+  assert.match(replay.text, /continueChildOnActive/);
+  assert.deepEqual(pairs.get(0)!.roster?.items, [{n: 1, threadId: "stuck"}]);
+  assert.deepEqual(w.archived, [], "незаконченное не архивируется");
+});
+
+test("решения владельца: «перенести» — handoff на действующую модель, «закрыть» — архив; чужие отклоняются", async () => {
+  const w = world();
+  w.threads.delete("kid");
+  const pairs = new ChatPairs(w.deps);
+  await pairs.configure(0, "claude", "codex");
+  w.child("stuck", {originPluginId: "telegram-projects"}, "failed");
+  w.child("other", {originPluginId: "telegram-projects"}, "failed");
+  w.child("foreign", {originPluginId: null}, "failed");
+  w.threads.get("claude")!.status = "idle";
+  await pairs.manualSwitch(0, "claude", "codex");
+  const moved = await pairs.continueOnActive(0, "stuck");
+  assert.equal(moved, "kid2");
+  assert.equal((w.handoffs[0] as {input: {providerId: string; workspace: string}}).input.providerId, "codex");
+  assert.equal(w.threads.get("kid2")!.parentThreadId, "codex");
+  assert.equal(await pairs.archiveCreated(0, "other"), true);
+  assert.deepEqual(w.archived, ["other"]);
+  await assert.rejects(() => pairs.archiveCreated(0, "foreign"), /thread_not_created_by_assistant/);
+  await assert.rejects(() => pairs.continueOnActive(0, "foreign"), /thread_not_created_by_assistant/);
 });

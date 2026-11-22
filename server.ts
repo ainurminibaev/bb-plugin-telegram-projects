@@ -256,6 +256,12 @@ export const rpcContract = defineRpcContract({
     output: z.unknown(),
   },
   setChildUrgency: {input: z.object({threadId: z.string().min(1), urgent: z.boolean()}).strict(), output: z.boolean()},
+  /** Решение владельца по треду, созданному помощником: перенести на действующую модель. */
+  continueChildOnActive: {input: z.object({threadId: z.string().min(1), topicId: z.number().int().nonnegative().optional()}).strict(),
+    output: z.object({threadId: z.string()})},
+  /** Решение владельца «закрыть»: архив треда, созданного помощником (не удаление). */
+  archiveAssistantThread: {input: z.object({threadId: z.string().min(1), topicId: z.number().int().nonnegative().optional()}).strict(),
+    output: z.boolean()},
   sendToTelegram: {
     input: z.object({threadId: z.string().min(1), topicId: z.number().int().nonnegative(),
       text: z.string().max(16000).optional(), files: z.array(z.string().min(2).max(4096)).max(20).optional(),
@@ -1842,6 +1848,18 @@ export default async function plugin(bb: BbPluginApi) {
     switchChatThread: async ({topicId, fromThreadId, toThreadId}) => {
       if (!bridge) throw Error("telegram_chat_unavailable");
       return bridge.pairs.manualSwitch(topicId, fromThreadId, toThreadId);
+    },
+    continueChildOnActive: async ({threadId, topicId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      const pair = await bridge.pairs.pairFor(threadId, topicId);
+      if (!pair) throw Error("pair_missing");
+      return {threadId: await bridge.pairs.continueOnActive(pair.topicId, threadId)};
+    },
+    archiveAssistantThread: async ({threadId, topicId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      const pair = await bridge.pairs.pairFor(threadId, topicId);
+      if (!pair) throw Error("pair_missing");
+      return bridge.pairs.archiveCreated(pair.topicId, threadId);
     },
     setChildUrgency: async ({threadId, urgent}) => {
       if (!bridge) throw Error("telegram_chat_unavailable");

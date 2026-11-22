@@ -30,6 +30,10 @@ export type ChatPair = {
   waiting?: {threadId: string; turnId: string; retryId?: string; at: number};
   /** Последнее переключение: не повторять уведомление при быстром возврате. */
   lastSwitch?: {from: string; to: string; at: number; kind: "limit" | "return" | "manual"};
+  /** Когда последний раз убирали завершённые треды помощника. */
+  lastCleanup?: number;
+  /** Последний список незаконченных для владельца: номер → тред. */
+  roster?: {at: number; items: {n: number; threadId: string}[]};
   /** Последняя проставленная пометка, чтобы не переименовывать впустую. */
   marks?: Record<string, string>;
 };
@@ -276,6 +280,11 @@ export class ChatPairs {
       }
     }
     await this.moveChildren(this.get(p.topicId)!, other, active);
+    const cur = this.get(p.topicId)!;
+    if (now - (cur.lastCleanup ?? 0) > 24 * 3600_000) {
+      this.put({...cur, lastCleanup: now});
+      await this.cleanup(cur).catch(() => undefined);
+    }
     await this.marks(this.get(p.topicId)!);
   }
 
@@ -317,9 +326,12 @@ export class ChatPairs {
       now - p.lastSwitch.at < 30 * 60_000;
     this.put({...p, inactiveSince: {...p.inactiveSince, [from]: now}, lastSwitch: {from, to, at: now, kind: opts.kind}});
     if (!bounce) this.d.notify(topicId, opts.notice, `pair-switch:${from}:${to}:${now}`);
+    await this.moveChildren(this.get(topicId)!, from, to);
+    const review = await this.review(this.get(topicId)!, to).catch(() => undefined);
+    if (review?.ownerList) this.d.notify(topicId, review.ownerList, `pair-roster:${to}:${now}`);
     if (opts.replay) {
       const text = await this.originalText(opts.replay.threadId, opts.replay.turnId);
-      const summary = since ? await this.summary(from, since) : "";
+      const summary = [since ? await this.summary(from, since) : "", review?.handover ?? ""].filter(Boolean).join("\n\n");
       const lead = "Ответь владельцу на сообщение ниже. Прошлая попытка ответить на него оборвалась: у второго " +
         "исполнителя закончился лимит модели. Сначала проверь, что из начатого уже сделано, и не повторяй выполненные " +
         "действия с внешним эффектом.";
@@ -330,8 +342,8 @@ export class ChatPairs {
       if (opts.replay.retryId)
         await this.d.sdk.threads.queuedMessages.delete({threadId: opts.replay.threadId, queuedMessageId: opts.replay.retryId})
           .catch(() => undefined);
-    } else if (since) {
-      this.d.store.put(KEY + "catchup:" + to, {from, since});
+    } else if (since || review?.handover) {
+      this.d.store.put(KEY + "catchup:" + to, {from, since: since ?? 0, handover: review?.handover});
     }
     await this.moveChildren(this.get(topicId)!, from, to);
     await this.marks(this.get(topicId)!);
@@ -340,10 +352,11 @@ export class ChatPairs {
   /** Первое после переключения сообщение владельца получает сводку пропущенного. */
   async catchUpPrefix(threadId: string): Promise<string> {
     const key = KEY + "catchup:" + threadId;
-    const c = this.d.store.get<{from: string; since: number}>(key);
+    const c = this.d.store.get<{from: string; since: number; handover?: string}>(key);
     if (!c) return "";
     this.d.store.del(key);
-    return this.summary(c.from, c.since).catch(() => "");
+    const summary = c.since ? await this.summary(c.from, c.since).catch(() => "") : "";
+    return [summary, c.handover ?? ""].filter(Boolean).join("\n\n");
   }
 
   private async originalText(threadId: string, turnId: string) {
@@ -454,8 +467,7 @@ export class ChatPairs {
    */
   async continueUrgent(childId: string): Promise<string | undefined> {
     if (!this.isUrgent(childId)) return;
-    const doneKey = URGENT + "done:" + childId;
-    const done = this.d.store.get<{target?: string}>(doneKey);
+    const done = this.d.store.get<{target?: string}>(URGENT + "done:" + childId);
     if (done) return done.target;
     const child = await this.thread(childId);
     if (!child.parentThreadId || !["error", "idle"].includes(child.status)) return;
@@ -465,10 +477,26 @@ export class ChatPairs {
     const [a, c] = await Promise.all([this.thread(pair.primary), this.thread(pair.fallback)]);
     const target = [a, c].find(t => t.providerId !== child.providerId);
     if (!target) return;
+    return this.handoffTo(child, target.id, child.parentThreadId);
+  }
+
+  /**
+   * Штатный handoff треда на провайдера треда `providerOf` в той же папке
+   * (workspace reuse), родитель — `parent`. Старый тред остаётся, его повтор
+   * снимается, чтобы работа не пошла дважды. Повторный вызов не создаёт второй.
+   */
+  private async handoffTo(child: ThreadRow, providerOf: string, parent: string): Promise<string> {
+    const doneKey = URGENT + "done:" + child.id;
+    const done = this.d.store.get<{target?: string}>(doneKey);
+    if (done) {
+      if (done.target) return done.target;
+      throw Error("handoff_outcome_uncertain_check_threads");
+    }
+    const target = await this.thread(providerOf);
     const options = await this.d.sdk.threads.defaultExecutionOptions({threadId: target.id}).catch(() => null);
     this.d.store.put(doneKey, {at: Date.now()});
     const result = await this.d.sdk.plugins.callRpc({pluginId: "handoff", method: "startHandoff",
-      input: {threadId: childId, providerId: target.providerId, ...(options?.model ? {model: options.model} : {}),
+      input: {threadId: child.id, providerId: target.providerId, ...(options?.model ? {model: options.model} : {}),
         workspace: "reuse", briefing: false,
         extraInstructions: "Продолжи эту задачу: прошлый исполнитель упёрся в лимит модели посреди работы. " +
           "Ты в той же рабочей папке. Сначала проверь, что уже сделано (файлы, git status, внешние действия), " +
@@ -476,10 +504,212 @@ export class ChatPairs {
       outputSchema: z.object({newThreadId: z.string().min(1)}).passthrough(),
     });
     this.d.store.put(doneKey, {at: Date.now(), target: result.newThreadId});
-    await this.d.sdk.threads.update({threadId: result.newThreadId, parentThreadId: child.parentThreadId}).catch(() => undefined);
-    const queue = await this.d.sdk.threads.queuedMessages.list({threadId: childId});
+    await this.d.sdk.threads.update({threadId: result.newThreadId, parentThreadId: parent}).catch(() => undefined);
+    const queue = await this.d.sdk.threads.queuedMessages.list({threadId: child.id});
     for (const r of queue.filter(r => r.payload.kind === "retry"))
-      await this.d.sdk.threads.queuedMessages.delete({threadId: childId, queuedMessageId: r.id}).catch(() => undefined);
+      await this.d.sdk.threads.queuedMessages.delete({threadId: child.id, queuedMessageId: r.id}).catch(() => undefined);
     return result.newThreadId;
+  }
+
+  // ---------- Треды, созданные помощником: сводка, уборка, решение владельца ----------
+
+  /**
+   * Тред создан помощником под задачу — только по штатным признакам:
+   * запись моста о создании (spawnDelegated) или создание мостом с родителем
+   * из пары, либо lifecycleOwner — тред пары. Треды расписаний не входят:
+   * они живут дольше одной задачи. По названию ничего не угадывается.
+   */
+  createdByAssistant(row: ThreadRow & {originPluginId?: string | null; lifecycleOwnerThreadId?: string | null}, p: ChatPair) {
+    if (row.id === p.primary || row.id === p.fallback) return false;
+    if (row.originPluginId === "automations") return false;
+    const pair = new Set([p.primary, p.fallback]);
+    if (row.lifecycleOwnerThreadId && pair.has(row.lifecycleOwnerThreadId)) return true;
+    if (this.spawnedByBridge().has(row.id)) return true;
+    return row.originPluginId === "telegram-projects" && Boolean(row.parentThreadId && pair.has(row.parentThreadId));
+  }
+  private spawnedByBridge() {
+    return new Set(this.d.store.list<{state?: string; threadId?: string}>("reply:delegation-spawn:")
+      .flatMap(r => r.value.state === "accepted" && r.value.threadId ? [r.value.threadId] : []));
+  }
+
+  /** Все треды, которые помощник создал (не архивные). */
+  private async createdThreads(p: ChatPair) {
+    const ids = new Set<string>();
+    const rows: (ThreadRow & {originPluginId?: string | null; lifecycleOwnerThreadId?: string | null})[] = [];
+    for (const parent of [p.primary, p.fallback]) {
+      const children = await this.d.sdk.threads.list({parentThreadId: parent, archived: false, includeHidden: true, limit: 100});
+      for (const c of children as unknown as ThreadRow[]) {
+        if (ids.has(c.id) || c.parentThreadId !== parent) continue;
+        ids.add(c.id);
+        // В списке тредов нет полей происхождения — берём полную карточку.
+        const full = await this.thread(c.id).catch(() => undefined) as (typeof rows)[number] | undefined;
+        if (full) rows.push(full);
+      }
+    }
+    for (const id of this.spawnedByBridge()) {
+      if (ids.has(id)) continue;
+      const t = await this.thread(id).catch(() => undefined) as (typeof rows)[number] | undefined;
+      if (t && !t.archivedAt && !t.deletedAt) { ids.add(id); rows.push(t); }
+    }
+    return rows.filter(r => !r.archivedAt && !r.deletedAt && this.createdByAssistant(r, p));
+  }
+
+  /** Треды, на которые нацелены включённые расписания (их не архивируем). */
+  private async scheduledTargets(projectIds: string[]) {
+    const out = new Set<string>();
+    for (const projectId of new Set(projectIds)) {
+      const list = await this.d.sdk.plugins.callRpc({pluginId: "automations", method: "automations_list", input: {projectId},
+        outputSchema: z.array(z.object({enabled: z.boolean(), execution: z.object({targetThreadId: z.string().nullish()}).passthrough()}).passthrough()),
+      }).catch(() => undefined);
+      if (!list) throw Error("automations_unavailable");
+      for (const a of list) if (a.enabled && a.execution.targetThreadId) out.add(a.execution.targetThreadId);
+    }
+    return out;
+  }
+
+  /** Состояние треда для решения: завершён или что именно не закончено. */
+  async state(row: ThreadRow): Promise<{done: boolean; lastAt: number; icon: string; status: string; limited?: number}> {
+    const [events, queue, asks] = await Promise.all([
+      this.d.sdk.threads.events.list({threadId: row.id, order: "desc", limit: "20",
+        types: ["turn/completed", "turn/started", "provider/error"], signal: this.d.signal}),
+      this.d.sdk.threads.queuedMessages.list({threadId: row.id}),
+      this.d.sdk.threads.interactions.list({threadId: row.id, signal: this.d.signal}).catch(() => []),
+    ]);
+    const sorted = [...events].sort((a, c) => c.seq - a.seq);
+    const end = sorted.find(e => e.type === "turn/completed");
+    const endStatus = (end?.data as {status?: string} | undefined)?.status;
+    const lastAt = end?.createdAt ?? 0;
+    const retry = queue.find(r => r.payload.kind === "retry" && r.state !== "failed_exhausted");
+    if ((asks as {status?: string}[]).some(i => i.status === "pending"))
+      return {done: false, lastAt, icon: "❓", status: "ждёт ответа на вопрос"};
+    if (["active", "starting", "pending", "stopping"].includes(row.status))
+      return {done: false, lastAt, icon: "▶️", status: "работает"};
+    if (retry?.sendAt) return {done: false, lastAt, icon: "⏳", status: `ждёт лимита до ${msk(retry.sendAt)}`, limited: retry.sendAt};
+    if (queue.length) return {done: false, lastAt, icon: "📨", status: "в очереди сообщения"};
+    if (row.status === "error" || endStatus === "failed") return {done: false, lastAt, icon: "🔴", status: "остановился с ошибкой"};
+    if (endStatus === "interrupted") return {done: false, lastAt, icon: "⏸", status: "прерван"};
+    if (row.status === "idle" && endStatus === "completed") return {done: true, lastAt, icon: "✅", status: "завершён"};
+    return {done: false, lastAt, icon: "⚪", status: "без результата"};
+  }
+
+  private async taskOf(threadId: string) {
+    const ev = await this.d.sdk.threads.events.list({threadId, types: ["client/turn/requested"], order: "asc", limit: "1",
+      signal: this.d.signal});
+    const input = (ev[0]?.data as {input?: {type: string; text?: string}[]} | undefined)?.input ?? [];
+    const text = input.filter(i => i.type === "text" && i.text && !MARKER.test(i.text)).map(i => i.text).join(" ");
+    return text.replace(/\s+/g, " ").trim().slice(0, 90);
+  }
+
+  /** Время последнего завершённого хода тредов пары: итог подтреда уже прочитан. */
+  private async pairDigestedAt(p: ChatPair) {
+    let at = 0;
+    for (const id of [p.primary, p.fallback]) {
+      const ev = await this.d.sdk.threads.events.list({threadId: id, types: ["turn/completed"], order: "desc", limit: "1",
+        signal: this.d.signal});
+      at = Math.max(at, ev[0]?.createdAt ?? 0);
+    }
+    return at;
+  }
+
+  /**
+   * Уборка: завершённые треды, созданные помощником, итог которых уже прочитан
+   * (после них у пары был завершённый ход) и которые 6 часов без движения,
+   * архивируются. Не удаляются; хранилище и рабочие копии не трогаются.
+   * Треды под расписаниями и чужие треды не трогаются никогда.
+   */
+  async cleanup(p: ChatPair) {
+    const rows = await this.createdThreads(p);
+    if (!rows.length) return [];
+    const targets = await this.scheduledTargets(rows.map(r => r.projectId));
+    const digested = await this.pairDigestedAt(p);
+    const archived: string[] = [];
+    for (const row of rows) {
+      if (targets.has(row.id)) continue;
+      const children = await this.d.sdk.threads.list({parentThreadId: row.id, archived: false, includeHidden: true, limit: 1});
+      if (children.length) continue;
+      const st = await this.state(row);
+      if (!st.done || !st.lastAt || st.lastAt > digested || Date.now() - st.lastAt < 6 * 3600_000) continue;
+      await this.d.sdk.threads.archive({threadId: row.id});
+      this.d.store.put(KEY + "archived:" + row.id, {at: Date.now(), title: row.title});
+      archived.push(row.id);
+    }
+    return archived;
+  }
+
+  /**
+   * При переключении: уборка завершённых, сводка для нового действующего треда
+   * о том, что осталось от прежнего, и — если есть незаконченные треды на
+   * провайдере, который сейчас в лимите, — один нумерованный вопрос владельцу.
+   */
+  async review(p: ChatPair, active: string) {
+    const archived = await this.cleanup(p).catch(() => [] as string[]);
+    const rows = (await this.createdThreads(p)).filter(r => !archived.includes(r.id));
+    const activeProvider = await this.providerOf(active);
+    const limitedProviders = new Set<string>();
+    for (const id of [p.primary, p.fallback]) if (!this.free(p, id)) limitedProviders.add(await this.providerOf(id));
+    const open: {row: ThreadRow; st: Awaited<ReturnType<ChatPairs["state"]>>; task: string}[] = [];
+    for (const row of rows) {
+      const st = await this.state(row);
+      if (st.done) continue;
+      open.push({row, st, task: await this.taskOf(row.id).catch(() => "")});
+    }
+    const line = (x: (typeof open)[number], n?: number) =>
+      `${n ? n + ". " : "— "}${x.st.icon} ${(x.row.title ?? "Без названия").replace(/\s+/g, " ").slice(0, 70)}` +
+      (x.task ? ` — ${x.task}` : "") + ` — ${x.st.status}, ${providerLabel(x.row.providerId)}`;
+    const handover = open.length || archived.length ? [
+      "Сводка при переключении: подтреды и задачи помощника, оставшиеся от прежнего исполнителя.",
+      ...open.map(x => line(x) + ` (${x.row.id})`),
+      archived.length ? `Завершённые и уже переданные треды заархивированы: ${archived.join(", ")}.` : "",
+    ].filter(Boolean).join("\n") : "";
+    const ask = open.filter(x => limitedProviders.has(x.row.providerId) && x.row.providerId !== activeProvider);
+    if (!ask.length) {
+      const cur = this.get(p.topicId);
+      if (cur) this.put({...cur, roster: undefined});
+      return {handover, ownerList: null as string | null};
+    }
+    const items = ask.map((x, i) => ({n: i + 1, threadId: x.row.id}));
+    const cur = this.get(p.topicId);
+    if (cur) this.put({...cur, roster: {at: Date.now(), items}});
+    const ownerList = [`Незаконченные задачи на ${[...new Set(ask.map(x => providerLabel(x.row.providerId)))].join(" и ")}, ` +
+      `который сейчас в лимите:`, ...ask.map((x, i) => line(x, i + 1)), "",
+      "Ответь номерами: что перенести на действующую модель, что оставить ждать, что закрыть. " +
+      "Пока ответа нет, всё ждёт сброса лимита."].join("\n");
+    const instructions = "Владелец получил этот список номерами. Когда он ответит: «перенести» — вызови telegram-projects " +
+      "continueChildOnActive {threadId}; «закрыть» — archiveAssistantThread {threadId}; «ждать» — ничего не делай. " +
+      "Номера: " + items.map(i => `${i.n} = ${i.threadId}`).join(", ") + ".";
+    return {handover: [handover, instructions].filter(Boolean).join("\n"), ownerList};
+  }
+
+  /** Пара, к которой относится тред помощника (по родителю), иначе единственная. */
+  async pairFor(threadId: string, topicId?: number) {
+    if (topicId !== undefined) return this.get(topicId);
+    const row = await this.thread(threadId).catch(() => undefined);
+    return (row?.parentThreadId && this.of(row.parentThreadId)) || (this.list().length === 1 ? this.list()[0] : undefined);
+  }
+  /** Решение владельца «перенести»: продолжить тред на действующем провайдере в той же папке. */
+  async continueOnActive(topicId: number, threadId: string) {
+    const p = this.get(topicId);
+    if (!p) throw Error("pair_missing");
+    const row = await this.thread(threadId) as ThreadRow & {originPluginId?: string | null; lifecycleOwnerThreadId?: string | null};
+    if (!this.createdByAssistant(row, p)) throw Error("thread_not_created_by_assistant");
+    const active = this.d.binding(topicId)?.threadId;
+    if (!active) throw Error("pair_binding_missing");
+    const target = await this.thread(active);
+    if (target.providerId === row.providerId) throw Error("thread_already_on_active_provider");
+    return this.handoffTo(row, target.id, active);
+  }
+
+  /** Решение владельца «закрыть»: архив, только для созданного помощником. */
+  async archiveCreated(topicId: number, threadId: string) {
+    const p = this.get(topicId);
+    if (!p) throw Error("pair_missing");
+    const row = await this.thread(threadId) as ThreadRow & {originPluginId?: string | null; lifecycleOwnerThreadId?: string | null};
+    if (!this.createdByAssistant(row, p)) throw Error("thread_not_created_by_assistant");
+    if (["active", "starting", "pending"].includes(row.status)) throw Error("thread_busy");
+    for (const r of await this.d.sdk.threads.queuedMessages.list({threadId}))
+      if (r.payload.kind === "retry") await this.d.sdk.threads.queuedMessages.delete({threadId, queuedMessageId: r.id}).catch(() => undefined);
+    await this.d.sdk.threads.archive({threadId});
+    this.d.store.put(KEY + "archived:" + threadId, {at: Date.now(), title: row.title, byOwner: true});
+    return true;
   }
 }
