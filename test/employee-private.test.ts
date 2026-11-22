@@ -42,6 +42,13 @@ test("a stranger gets one notice and the owner one card with buttons",async()=>{
   assert.deepEqual(card.reply_markup.inline_keyboard[0].map((b:any)=>b.text),["Разрешить","Отказать"]);
   assert.equal(await h.say(ALICE,"ещё раз").handled,true);
   assert.equal(h.sent.filter(x=>x.chat===OWNER).length,1,"no second card while the request waits");
+  assert.equal(h.sent.at(-1).text,"Запрос уже у владельца. Как только он решит, я отвечу.");
+  await h.say(ALICE,"и ещё").handled;
+  assert.equal(h.sent.filter(x=>x.chat===ALICE).length,2,"told once while waiting");
+  const key=h.store.list<any>("employee:private:access:")[0];
+  h.store.put(key.key,{...key.value,at:Date.now()-2*3600_000});
+  await h.say(ALICE,"прошёл час").handled;
+  assert.equal(h.sent.filter(x=>x.chat===OWNER).length,2,"a fresh card after an hour without a decision");
   assert.equal(h.binds.length,0);
 });
 

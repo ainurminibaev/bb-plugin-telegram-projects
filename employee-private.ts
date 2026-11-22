@@ -84,12 +84,21 @@ export async function acceptPrivateEmployeeUpdate(d:Dependencies,update:any) {
     return true;
   }
   const key=accessKey(bot,owner,subject);
-  const existing=store.get<Access>(key);
-  if (existing?.state==="pending") return true;
+  const existing=store.get<Access & {at?:number;waitNotified?:true}>(key);
+  if (existing?.state==="pending") {
+    // A request left without a decision: tell the person once, and give the owner a fresh card after an hour.
+    if ((existing.at ?? 0) > Date.now()-3600_000) {
+      if (!existing.waitNotified) {
+        store.put(key,{...existing,waitNotified:true});
+        await transport(subject)("sendMessage",{chat_id:subject,text:"Запрос уже у владельца. Как только он решит, я отвечу."}).catch(()=>{});
+      }
+      return true;
+    }
+  }
   // Denied or revoked people may ask again; the owner sees one new card per request.
   const nonce=randomUUID().replaceAll("-","");
   const name=personName(message.from);
-  const row={owner,bot,subject,nonce,state:"pending" as const,name};
+  const row={owner,bot,subject,nonce,state:"pending" as const,name,at:Date.now()};
   store.atomic(()=>{
     store.put(key,row);
     store.put(nonceKey(bot,owner,nonce),subject);
