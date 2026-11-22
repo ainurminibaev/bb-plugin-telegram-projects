@@ -1,3 +1,14 @@
+# 0.9.53
+
+- A group message that arrives while the agent works joins the running turn and gets its own answer, as in the owner's chat; without that answer it is sent again in turn order.
+- Schedules set in a group or a person's chat deliver each run's result back to the same topic or chat; a silent run (NO_REPLY) writes nothing.
+- Forum topics by an ordinary request: `bb telegram-projects topic create|rename|close|reopen|delete` — the owner's conversation any group, a group its own topics without deleting, a person's chat none.
+- People in Telegram talk to the agent, not to BB: a question is "❓ Question" with its text, a reply is confirmed with "Answer received." The setting "BB links and mentions in Telegram" (auto by install kind: assistant — on, employee — off) removes BB buttons and mentions; guests never get them.
+- Conversation memory: texts are kept forever, files for a configurable number of days (183 by default); an expired file is marked "removed by term". The history kept before the archive moves into it on update, without duplicates.
+- Sending: names and topics found by the agent (`send --targets`), a topic by its name in any group, a group by its number from before it became a supergroup; reading the text from standard input is refused with a hint.
+- Chat pair: on a switch only working subthreads move to the active thread; removing a pair restores thread titles.
+- Inbox and archive files are readable by the inbox folder's group (640/750).
+
 # 0.9.52
 
 - Conversation memory: the bridge keeps an archive of every message it sees (owner's chat, people's chats, groups and topics) and agents read it with `bb telegram-projects search-history` — words with typos and transliteration, author, period, last N, files. Who may read what follows the calling conversation; a person's private chat is never shown to anyone else.
