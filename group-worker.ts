@@ -19,7 +19,7 @@ import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumS
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
-import {accessModeKey,activeGroupSettings,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
+import {DISCLOSURE,accessModeKey,activeGroupSettings,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
 type Job = {
@@ -368,7 +368,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const title=store.get<{title?:string}>(`visibility:${botId}:group:${r.chatId}`)?.title ?? "эта группа";
       const senderName=r.senderName ?? "участник";
       const rules=policy.privateChat
-        ? `Личный чат в Telegram: пишет ${senderName}, у него есть доступ к тебе и он может тебе поручать. Отвечай ему здесь.`
+        ? `Личный чат в Telegram: пишет ${senderName}, у него есть доступ к тебе и он может тебе поручать. Отвечай ему здесь.\n${DISCLOSURE}`
         : rulesNote({title,settings,role,senderName});
       const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
