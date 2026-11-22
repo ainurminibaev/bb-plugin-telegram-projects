@@ -590,3 +590,17 @@ export function unboundAddressedGroupMessage(store: Store, update: any, botId: n
   if (!addressed) return;
   return {chatId: m.chat.id as number, topicId, date: m.date as number, title: member.title || "группа"};
 }
+
+/**
+ * Each Telegram server (api.telegram.org or a local one) numbers updates on its own. After a switch the old
+ * offset is larger than the new numbers and would mark the first new updates as already handled: start over.
+ * An install that has never recorded its server keeps its offset.
+ */
+export function offsetForServer(store:Store,root:string) {
+  const known=store.get<string>("ingress:api-root");
+  if (known!==root) {
+    if (known!==undefined) store.put("ingress:offset",0);
+    store.put("ingress:api-root",root);
+  }
+  return store.get<number>("ingress:offset") ?? 0;
+}

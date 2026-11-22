@@ -36,7 +36,7 @@ import { bindGroupTopic, groupCliRestricted, groupTyping, processGroupInputs } f
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
-import { acceptGroupUpdate, contextMediaPrefix, routeUpdate, skipExcludedForumUpdate, unboundAddressedGroupMessage, type GroupTopicPolicy } from "./ingress";
+import { acceptGroupUpdate, contextMediaPrefix, offsetForServer, routeUpdate, skipExcludedForumUpdate, unboundAddressedGroupMessage, type GroupTopicPolicy } from "./ingress";
 import { accessList, accessModeKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, setAccess } from "./rights";
 import { handleConsentCallback, watchConsents } from "./consent";
 import { handleSetupUpdate, notifyGroupsAdded, welcomeScreen } from "./setup-screens";
@@ -2594,7 +2594,7 @@ export default async function plugin(bb: BbPluginApi) {
           ingressPolling = true;
           try {
             updates = await tg<any[]>("getUpdates", {
-              offset: store.get<number>("ingress:offset") ?? 0,
+              offset: offsetForServer(store, checkedApiRoot(await apiRoot())),
               timeout: 25,
               allowed_updates: ["message", "edited_message", "callback_query", ...(process.env.BB_TELEGRAM_GUEST_TOPICS ? ["guest_message"] : []), "my_chat_member"],
             });
