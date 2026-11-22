@@ -2505,7 +2505,8 @@ export default async function plugin(bb: BbPluginApi) {
             nextUpgradeCheck=Date.now()+10*60_000;
             // A basic group upgraded while the bridge was away: Telegram names the new ID on request.
             for (const chat of basicGroupChats(store)) {
-              try { await tg("getChat",{chat_id:chat}); }
+              // getChat still answers for an upgraded group; a member count names the new chat.
+              try { await tg("getChatMemberCount",{chat_id:chat}); }
               catch (error) { if (error instanceof TelegramFailure && error.migrateTo) migrateGroupChat(store,botId()!,chat,error.migrateTo); }
             }
           }
