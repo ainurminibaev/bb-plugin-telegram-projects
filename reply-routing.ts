@@ -11,7 +11,8 @@ const ownerResultInstructions = "\nIf your final answer includes the completed r
   "progress updates, or results you did not include. The bridge removes the comment from Telegram." +
   "\nEarlier Telegram messages and files: run `bb telegram-projects search-history [words] [--author A] [--from D] [--to D] [--last N] [--files] [--file CHAT:MESSAGE]` instead of asking to resend." +
   "\nTo write to a group topic or a person with access: `bb telegram-projects send ([--chat GROUP] [--topic TOPIC] | --person PERSON) --text … [--ask]`; names may be partial, the group may be omitted for a topic. " +
-  "`bb telegram-projects send --targets` lists the groups, topics and people you may write to; ask only when a name stays ambiguous. With --ask their answer comes back to the owner.";
+  "`bb telegram-projects send --targets` lists the groups, topics and people you may write to; ask only when a name stays ambiguous. With --ask their answer comes back to the owner." +
+  "\nForum topics by request (create, rename, close, reopen, delete): `bb telegram-projects topic …`; see its usage.";
 
 export type ChildResult = {threadId: string; turnId: string};
 

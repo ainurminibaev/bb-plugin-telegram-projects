@@ -1,8 +1,9 @@
+import {TOPIC_ACTIONS,topicRefusal,type TopicAction} from "./topic-command";
 import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
-import {learnTopicName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,type ForumDefaults} from "./forum-defaults";
+import {learnTopicName,rememberForumName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
-import {handleOwnerForumCommand} from "./forum-commands";
+import {applyForumTopicChange,handleOwnerForumCommand} from "./forum-commands";
 import {topicStateKey} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
@@ -2048,6 +2049,11 @@ export default async function plugin(bb: BbPluginApi) {
         usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON | --answer ASK) (--text TEXT | --text-file PATH, not stdin) [--file PATH] [--ask]",
       },
       {
+        name:"topic",
+        summary:"Create, rename, close, reopen or delete a forum topic by its name; a group may manage its own topics, deleting is for the owner",
+        usage:"bb telegram-projects topic (create --chat GROUP --name NAME [--text FIRST] | rename --topic TOPIC --name NAME | close|reopen|delete --topic TOPIC) [--chat GROUP]",
+      },
+      {
         name:"search-history",
         summary:"Read the conversation archive this conversation may see: words, author, period, last N, files; download a file",
         usage:"bb telegram-projects search-history [words] [--author A] [--from YYYY-MM-DD[THH:MM]] [--to …] [--tz Europe/Moscow] [--last N] [--files] [--chat C] [--topic T] [--file CHAT:MESSAGE]",
@@ -2091,9 +2097,47 @@ export default async function plugin(bb: BbPluginApi) {
       },
     ],
     async run(argv,ctx) {
-      if (!["search-history","send"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
+      if (!["search-history","send","topic"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
           (ctx.threadId && (await sharedGroupThreads(store,bb.sdk.threads,[ctx.threadId])).has(ctx.threadId))))
         return {exitCode: 1, stderr: "bridge_admin_command_unavailable_in_group"};
+      if(argv[0]==="topic"){
+        const owner=ownerId(),bot=botId();
+        if (!ctx.threadId || !owner || !bot) return {exitCode:1,stderr:"run_from_a_conversation_thread"};
+        const action=argv[1] as TopicAction;
+        if (!TOPIC_ACTIONS.includes(action)) return {exitCode:2,stderr:"usage: topic create|rename|close|reopen|delete"};
+        const opt:Record<string,string>={};
+        const rest=argv.slice(2);
+        for (let i=0;i<rest.length;i++) {
+          if (rest[i]==="--json") continue;
+          if (rest[i].startsWith("--") && rest[i+1]!==undefined) opt[rest[i].slice(2)]=rest[++i];
+          else return {exitCode:2,stderr:"unexpected_argument "+rest[i]};
+        }
+        try {
+          const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
+          const group=opt.chat ? findGroup(store,bot,opt.chat) : undefined;
+          const target=action==="create" ? (group!==undefined ? {chat:group,topic:0} : undefined) :
+            opt.topic ? findTopic(store,bot,group,opt.topic) : undefined;
+          if (!target) return {exitCode:2,stderr:action==="create" ? "group_required: --chat" : "topic_required: --topic"};
+          const refusal=topicRefusal(caller,action,target.chat);
+          if (refusal) return {exitCode:1,stderr:refusal};
+          const tg=telegram(botToken,lifetime.signal,30_000,()=>target.chat,apiRoot);
+          if (action==="create" || action==="rename") {
+            const name=(opt.name ?? "").trim().slice(0,128);
+            if (!name) return {exitCode:2,stderr:"name_required: --name"};
+            if (action==="create") {
+              const made=await tg<{message_thread_id:number}>("createForumTopic",{chat_id:target.chat,name});
+              rememberForumName(store,bot,target.chat,made.message_thread_id,name,Date.now());
+              if (opt.text) await sendOutboundMessage(tg,{chatId:target.chat,topicId:made.message_thread_id,text:opt.text});
+              return {exitCode:0,stdout:JSON.stringify({created:true,topic:made.message_thread_id,name})};
+            }
+            if (await tg("editForumTopic",{chat_id:target.chat,message_thread_id:target.topic,name})!==true) throw Error("rename_unconfirmed");
+            rememberForumName(store,bot,target.chat,target.topic,name,Date.now());
+            return {exitCode:0,stdout:JSON.stringify({renamed:true,topic:target.topic,name})};
+          }
+          const result=await applyForumTopicChange(store,bot,target.chat,target.topic,action,tg);
+          return {exitCode:0,stdout:JSON.stringify({done:true,action,topic:target.topic,result})};
+        } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
+      }
       if(argv[0]==="send"){
         // bb telegram-projects send (--chat C [--topic T] | --person P | --answer ASK) (--text T | --text-file F) [--file PATH] [--ask]
         const owner=ownerId(),bot=botId();
