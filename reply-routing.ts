@@ -9,7 +9,8 @@ const ownerResultInstructions = "\nIf your final answer includes the completed r
   "one Markdown comment on its own line for each such result: <!-- bb-telegram-child-result:CHILD_THREAD_ID:CHILD_TURN_ID -->. " +
   "Use the exact turn ID from the child's BB event log. Omit this comment for launch acknowledgements, " +
   "progress updates, or results you did not include. The bridge removes the comment from Telegram." +
-  "\nEarlier Telegram messages and files: run `bb telegram-projects search-history [words] [--author A] [--from D] [--to D] [--last N] [--files] [--file CHAT:MESSAGE]` instead of asking to resend.";
+  "\nEarlier Telegram messages and files: run `bb telegram-projects search-history [words] [--author A] [--from D] [--to D] [--last N] [--files] [--file CHAT:MESSAGE]` instead of asking to resend." +
+  "\nTo write to a group topic or a person with access: `bb telegram-projects send (--chat GROUP [--topic TOPIC] | --person PERSON) --text … [--ask]`; with --ask their answer comes back to the owner.";
 
 export type ChildResult = {threadId: string; turnId: string};
 

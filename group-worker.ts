@@ -16,6 +16,7 @@ import {routedArtifactKind,routedCaption} from "./routed-message";
 import {splitText} from "./chat";
 import {ReplyRoutes, stripTelegramMarkers} from "./reply-routing";
 import {voiceTranscripts} from "./archive";
+import {askNotes} from "./send-command";
 import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumScope, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
@@ -366,9 +367,11 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const settings=activeGroupSettings(store,botId,r.chatId);
       const title=store.get<{title?:string}>(`visibility:${botId}:group:${r.chatId}`)?.title ?? "эта группа";
       const senderName=r.senderName ?? "участник";
-      const rules=policy.privateChat
+      const asks=askNotes(store,botId,r.chatId);
+      const rulesBase=policy.privateChat
         ? `Личный чат в Telegram: пишет ${senderName}, у него есть доступ к тебе и он может тебе поручать. Отвечай ему здесь.\n${DISCLOSURE}`
         : rulesNote({title,settings,role,senderName});
+      const rules=asks ? rulesBase+"\n"+asks : rulesBase;
       const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
       if (!allowed() || !await safeToSend()) {finish("revoked");continue;}

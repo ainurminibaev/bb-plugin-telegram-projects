@@ -13,7 +13,7 @@ import {groupSettings,installKind,saveGroupSettings} from "./rights";
 // - A group with shared memory has only the owner in it: it reads like the owner's private chat.
 // - A person's private chat reads itself, the shared groups and the groups that person writes in.
 
-export type Conversation={kind:"owner"}|{kind:"group";chat:number}|{kind:"person";subject:number};
+export type Conversation={kind:"owner"}|{kind:"group";chat:number;topic?:number}|{kind:"person";subject:number};
 export type GroupMemory="shared"|"separate";
 
 /** The group's memory setting, or the default: a personal assistant's groups share, an employee's are separate. */
@@ -44,7 +44,7 @@ export function conversationOfThread(store:Store,threadId:string):Conversation|u
   const scope=store.get<string>("group:thread:"+threadId);
   const policy=scope ? store.get<GroupTopicPolicy>(scope) : undefined;
   if (!policy || policy.threadId!==threadId) return;
-  return policy.privateChat ? {kind:"person",subject:policy.chatId} : {kind:"group",chat:policy.chatId};
+  return policy.privateChat ? {kind:"person",subject:policy.chatId} : {kind:"group",chat:policy.chatId,topic:policy.topicId};
 }
 
 export async function conversationOf(store:Store,threads:Pick<BbPluginApi["sdk"]["threads"],"get">,threadId:string,signal?:AbortSignal) {
