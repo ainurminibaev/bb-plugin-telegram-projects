@@ -458,3 +458,18 @@ test("отказ основного после успешного хода на 
   assert.equal(w.notices.length, before + 1);
   assert.match(w.notices.at(-1)!, /^Claude в лимите до/);
 });
+
+test("лимит снят вручную: возврат на ближайшем такте, сводка сохраняется", async () => {
+  const w = world();
+  w.threads.delete("kid");
+  const pairs = new ChatPairs(w.deps);
+  await pairs.configure(0, "claude", "codex");
+  w.limitTurn("claude", "t1", "Раз", 5 * 3600_000);
+  await pairs.onLimit(w.binding as never, "claude", "t1");
+  w.threads.get("codex")!.status = "idle";
+  assert.throws(() => pairs.clearLimit(0, "kid"));
+  assert.equal(pairs.clearLimit(0, "claude"), true);
+  await pairs.tick();
+  assert.equal(w.binding.threadId, "claude");
+  assert.ok(pairs.get(0)!.inactiveSince.codex, "сводка пропущенного не потеряна");
+});

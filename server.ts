@@ -256,6 +256,7 @@ export const rpcContract = defineRpcContract({
     output: z.unknown(),
   },
   setChildUrgency: {input: z.object({threadId: z.string().min(1), urgent: z.boolean()}).strict(), output: z.boolean()},
+  clearChatPairLimit: {input: z.object({topicId: z.number().int().nonnegative(), threadId: z.string().min(1)}).strict(), output: z.boolean()},
   /** Решение владельца по треду, созданному помощником: перенести на действующую модель. */
   continueChildOnActive: {input: z.object({threadId: z.string().min(1), topicId: z.number().int().nonnegative().optional()}).strict(),
     output: z.object({threadId: z.string()})},
@@ -1860,6 +1861,10 @@ export default async function plugin(bb: BbPluginApi) {
       const pair = await bridge.pairs.pairFor(threadId, topicId);
       if (!pair) throw Error("pair_missing");
       return bridge.pairs.archiveCreated(pair.topicId, threadId);
+    },
+    clearChatPairLimit: async ({topicId, threadId}) => {
+      if (!bridge) throw Error("telegram_chat_unavailable");
+      return bridge.pairs.clearLimit(topicId, threadId);
     },
     setChildUrgency: async ({threadId, urgent}) => {
       if (!bridge) throw Error("telegram_chat_unavailable");

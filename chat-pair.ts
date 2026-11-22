@@ -144,6 +144,14 @@ export class ChatPairs {
     return pair;
   }
   remove(topicId: number) { this.d.store.del(KEY + topicId); return true; }
+  /** Лимит треда снят досрочно (сброс, докупка): возврат на ближайшем такте. */
+  clearLimit(topicId: number, threadId: string) {
+    const p = this.get(topicId);
+    if (!p || (threadId !== p.primary && threadId !== p.fallback)) throw Error("pair_threads_mismatch");
+    const {[threadId]: _gone, ...rest} = p.blockedUntil;
+    this.put({...p, blockedUntil: rest});
+    return true;
+  }
 
   status(topicId: number) {
     const p = this.get(topicId);
