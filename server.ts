@@ -1,6 +1,5 @@
 import {describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
-import {publishScheduledReport,registerSchedulePermit,schedulePermit,scheduledReportGrants,scheduledReportInput} from "./scheduled-group-report";
 import {handleOwnerGroupPost,ownerGroupPostGrants,ownerGroupPostInput,previewOwnerGroupPost} from "./owner-group-post";
 import {handleOwnerForumCommand} from "./forum-commands";
 import {topicStateKey} from "./topic-lifecycle";
@@ -124,9 +123,6 @@ const groupRightsSchema = z.object({
   members: z.enum(["silent", "read", "propose"]), zones: z.array(z.string().max(64)).max(50), note: z.string().max(500),
 });
 export const rpcContract = defineRpcContract({
-  registerScheduledGroupReport:{
-    input:schedulePermit,output:z.object({registered:z.literal(true)}),
-  },
   rightsAccess: { input: z.null(), output: z.array(personSchema) },
   rightsAccessSet: { input: z.object({ people: z.array(personSchema).max(200) }).strict(), output: z.array(personSchema) },
   rightsGroup: { input: z.object({ chatId: z.number().int() }).strict(), output: groupRightsSchema.nullable() },
@@ -710,19 +706,6 @@ export default async function plugin(bb: BbPluginApi) {
     async execute(args,{threadId,signal}) {
       activeTelegramWrites++;
       try {return JSON.stringify(await previewOwnerGroupPost(ownerGroupPost(signal),threadId,args));}
-      finally {activeTelegramWrites--;}
-    },
-  });
-  const scheduledGroupReport = (signal:AbortSignal) => ({
-    ...ownerGroupPost(signal),grants:scheduledReportGrants,threads:bb.sdk.threads,
-  });
-  if (process.env.BB_TELEGRAM_SCHEDULED_GROUP_REPORTS) bb.agents.registerTool({
-    name:"telegram_publish_scheduled_group_report",
-    description:"Publish one message from the current verified scheduled run. Pass text alone or one artifact (document by default or explicitly photo for PNG/JPEG) with an optional text caption. For an audit, the existing summary and zip inputs still accept the checked PDF archive. The bridge derives the destination and issue key and opens files only in the approved output directory. Keep the artifacts in place and report the exact blocker when the bridge cannot confirm delivery.",
-    parameters:scheduledReportInput,
-    async execute(args,ctx) {
-      activeTelegramWrites++;
-      try {return JSON.stringify(await publishScheduledReport(scheduledGroupReport(ctx.signal),ctx,args));}
       finally {activeTelegramWrites--;}
     },
   });
@@ -1587,8 +1570,6 @@ export default async function plugin(bb: BbPluginApi) {
     return project;
   }
   bb.rpc.register(rpcContract, {
-    registerScheduledGroupReport:(args,ctx)=>
-      registerSchedulePermit(scheduledGroupReport(lifetime.signal),args,ctx.experimental_caller),
     rightsAccess: async () => botId() ? accessList(store, botId()!) : [],
     rightsAccessSet: async ({ people }) => {
       if (!botId()) throw Error("bot_unavailable");
