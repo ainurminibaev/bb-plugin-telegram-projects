@@ -171,6 +171,11 @@ dispatch instructions. Preserve the transport identity through RPC JSON input:
   The RPC uses native BB spawn with parent notifications
   enabled and returns threadId.
 
+These methods are for the owner's own chat. In a group, a topic or another
+person's private chat, start a subthread natively with
+`bb thread spawn --parent-self --prompt …`: its result comes back to the calling
+thread, which answers in its chat as usual.
+
 These methods attach delivery metadata to native send/spawn. BB owns execution,
 queue and retries. Successful submission is not completion: wait for the native
 child result and verify it. Never bypass an uncertain delivery error by changing
