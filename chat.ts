@@ -2605,7 +2605,7 @@ export class ChatBridge {
       const category = error?.type === "provider/error" ? error.data.errorInfo?.category : undefined;
       if (category === "rate-limit") {
         // Пара тредов: лимит действующего — переключение без «⚠️».
-        if (t.id === b.threadId && await this.pairs.onLimit(b, t.id, end.scope.turnId)) continue;
+        if (t.id === b.threadId && await this.pairs.onLimit(b, t.id, end.scope.turnId, end.createdAt)) continue;
         // Подтред: срочный продолжается на другом провайдере, остальные ждут штатного повтора.
         if (t.id !== b.threadId) {
           if (await this.pairs.continueUrgent(t.id).catch(() => undefined)) continue;
@@ -2923,7 +2923,7 @@ export class ChatBridge {
             if (event.data.status==="failed") {
               const category = this.s.get<string>(errorKey);
               // Пара тредов: лимит действующего — переключение без «⚠️».
-              if (!(category === "rate-limit" && await this.pairs.onLimit(b, b.threadId, event.scope.turnId).catch(() => false)))
+              if (!(category === "rate-limit" && await this.pairs.onLimit(b, b.threadId, event.scope.turnId, event.createdAt).catch(() => false)))
                 await this.reportFailure(b,b.threadId,t.title,event.scope.turnId,event.seq,category);
             }
             this.s.del(errorKey);

@@ -417,3 +417,44 @@ test("решения владельца: «перенести» — handoff на
   await assert.rejects(() => pairs.archiveCreated(0, "foreign"), /thread_not_created_by_assistant/);
   await assert.rejects(() => pairs.continueOnActive(0, "foreign"), /thread_not_created_by_assistant/);
 });
+
+test("повтор BB ещё не появился: сбой разбирается позже, с настоящим временем; запоздавший повтор снимается", async () => {
+  const w = world();
+  w.threads.delete("kid");
+  const pairs = new ChatPairs(w.deps);
+  await pairs.configure(0, "claude", "codex");
+  w.limitTurn("claude", "t1", "Раз", 2 * 3600_000);
+  const retry = w.queues.get("claude")!;
+  w.queues.set("claude", []);
+  assert.equal(await pairs.onLimit(w.binding as never, "claude", "t1", Date.now() - 2000), true, "«⚠️» не нужен");
+  assert.equal(w.binding.threadId, "claude", "ждём повтор, не переключаемся вслепую");
+  w.queues.set("claude", retry);
+  await pairs.onLimit(w.binding as never, "claude", "t1", Date.now() - 2000);
+  assert.equal(w.binding.threadId, "codex");
+  assert.ok(pairs.get(0)!.blockedUntil.claude > Date.now() + 3600_000, "время из штатного повтора");
+  // BB поставил ещё один повтор того же хода уже после переотправки.
+  w.queues.set("claude", [{id: "late", payload: {kind: "retry", retryOfTurnRequestId: "req-t1"}, state: "waiting", sendAt: Date.now() + 60_000}]);
+  await pairs.tick();
+  assert.equal(w.queues.get("claude")!.length, 0, "запоздавший повтор снят — второго ответа не будет");
+});
+
+test("отказ основного после успешного хода на нём — с уведомлением", async () => {
+  const w = world();
+  w.threads.delete("kid");
+  const pairs = new ChatPairs(w.deps);
+  await pairs.configure(0, "claude", "codex");
+  w.limitTurn("claude", "t1", "Раз", 3600_000);
+  await pairs.onLimit(w.binding as never, "claude", "t1");
+  const p = pairs.get(0)!;
+  w.store.put("chat:pair:0", {...p, blockedUntil: {}});
+  w.threads.get("codex")!.status = "idle";
+  await pairs.tick();
+  assert.equal(w.binding.threadId, "claude");
+  w.events.get("claude")!.push({seq: 500, type: "turn/completed", createdAt: Date.now() + 1, data: {status: "completed"}});
+  const before = w.notices.length;
+  w.limitTurn("claude", "t9", "Два", 3600_000);
+  await pairs.onLimit(w.binding as never, "claude", "t9");
+  assert.equal(w.binding.threadId, "codex");
+  assert.equal(w.notices.length, before + 1);
+  assert.match(w.notices.at(-1)!, /^Claude в лимите до/);
+});

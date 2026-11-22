@@ -74,6 +74,7 @@ const KEY = "chat:pair:";
 const URGENT = "chat:pair:urgent:";
 const HANDLED = "chat:pair:handled:";
 const MOVED = "chat:pair:moved-child:";
+const REPLAYED = "chat:pair:replayed:";
 const MARK_ACTIVE = "🟢 Действующий";
 const MARK_STANDBY = "⏸ Резерв";
 const MARK_WAITING = "⏳ Ждёт лимита";
@@ -189,7 +190,7 @@ export class ChatPairs {
    * Ход действующего треда пары упал из-за лимита. true — сбой обработан
    * парой, мосту не нужно присылать «⚠️ … не подтверждён».
    */
-  async onLimit(b: Binding, threadId: string, turnId: string): Promise<boolean> {
+  async onLimit(b: Binding, threadId: string, turnId: string, endedAt?: number): Promise<boolean> {
     const p = this.get(b.topicId);
     if (!p || (threadId !== p.primary && threadId !== p.fallback)) return false;
     const handled = HANDLED + threadId + ":" + turnId;
@@ -206,11 +207,16 @@ export class ChatPairs {
     if (route?.kind !== "telegram") return false;
     const retry = await this.retryOf(threadId, turnId);
     const now = Date.now();
+    // Штатный повтор ставится сразу за сбоем; дать ему появиться, иначе он
+    // позже выполнится на старом треде и ответ придёт дважды.
+    if (!retry && endedAt && now - endedAt < 20_000) return true;
+    const to = this.other(p, threadId);
+    // Тема занята входящим: разобрать этот сбой на следующем такте.
+    if (this.free(p, to, now) && this.d.busy(b.topicId)) return true;
     const until = retry?.sendAt && retry.sendAt > now ? retry.sendAt : now + 30 * 60_000;
     p.blockedUntil = {...p.blockedUntil, [threadId]: Math.max(p.blockedUntil[threadId] ?? 0, until)};
-    const to = this.other(p, threadId);
     this.d.store.put(handled, {at: now});
-    if (this.free(p, to, now) && !this.d.busy(b.topicId)) {
+    if (this.free(p, to, now)) {
       this.put({...p, waiting: undefined});
       await this.switchTo(b.topicId, threadId, to, {
         replay: {threadId, turnId, route, retryId: retry?.id}, kind: "limit",
@@ -253,6 +259,7 @@ export class ChatPairs {
     const b = this.d.binding(p.topicId);
     if (!b?.threadId || (b.threadId !== p.primary && b.threadId !== p.fallback)) return;
     p = await this.refreshBlocked(p, this.other(p, b.threadId));
+    await this.sweepReplayed(this.other(p, b.threadId)).catch(() => undefined);
     const now = Date.now();
     const active = b.threadId, other = this.other(p, active);
     if (p.waiting && p.waiting.threadId === active && this.free(p, other, now) && !this.free(p, active, now)) {
@@ -286,6 +293,26 @@ export class ChatPairs {
       await this.cleanup(cur).catch(() => undefined);
     }
     await this.marks(this.get(p.topicId)!);
+  }
+
+  private async completedSince(threadId: string, at: number) {
+    const ev = await this.d.sdk.threads.events.list({threadId, types: ["turn/completed"], order: "desc", limit: "20",
+      signal: this.d.signal});
+    return ev.some(e => e.createdAt >= at && (e.data as {status?: string}).status === "completed");
+  }
+
+  /** Повтор, поставленный BB уже после переотправки сообщения, снимается: ответ не придёт дважды. */
+  private async sweepReplayed(threadId: string) {
+    const turns = this.d.store.list<{at: number}>(REPLAYED + threadId + ":");
+    if (!turns.length) return;
+    const queue = await this.d.sdk.threads.queuedMessages.list({threadId});
+    for (const r of queue) {
+      if (r.payload.kind !== "retry") continue;
+      const of = (r.payload as {retryOfTurnRequestId: string}).retryOfTurnRequestId;
+      if (turns.some(t => this.d.retryBelongsToTurn(threadId, t.key.slice((REPLAYED + threadId + ":").length), of)))
+        await this.d.sdk.threads.queuedMessages.delete({threadId, queuedMessageId: r.id}).catch(() => undefined);
+    }
+    for (const t of turns) if (Date.now() - t.value.at > 24 * 3600_000) this.d.store.del(t.key);
   }
 
   /** Ручное переключение (RPC) с теми же проверками. */
@@ -322,8 +349,9 @@ export class ChatPairs {
       progressText: undefined, activity: undefined, toolActivity: undefined});
     const since = p.inactiveSince[to];
     // Быстрый возврат туда, откуда только что ушли (лимит не снялся), — без второго уведомления.
+    // Тихо — только если основной отказал на первом же ходе после возврата.
     const bounce = opts.kind === "limit" && p.lastSwitch?.kind === "return" && p.lastSwitch.to === from &&
-      now - p.lastSwitch.at < 30 * 60_000;
+      !(await this.completedSince(from, p.lastSwitch.at));
     this.put({...p, inactiveSince: {...p.inactiveSince, [from]: now}, lastSwitch: {from, to, at: now, kind: opts.kind}});
     if (!bounce) this.d.notify(topicId, opts.notice, `pair-switch:${from}:${to}:${now}`);
     await this.moveChildren(this.get(topicId)!, from, to);
@@ -339,6 +367,7 @@ export class ChatPairs {
         {type: "text", text: [summary, lead, "Сообщение владельца:\n" + text].filter(Boolean).join("\n\n"), mentions: []},
         this.d.ingress(to, opts.replay.route),
       ]});
+      this.d.store.put(REPLAYED + opts.replay.threadId + ":" + opts.replay.turnId, {at: now});
       if (opts.replay.retryId)
         await this.d.sdk.threads.queuedMessages.delete({threadId: opts.replay.threadId, queuedMessageId: opts.replay.retryId})
           .catch(() => undefined);
