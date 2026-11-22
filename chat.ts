@@ -202,6 +202,8 @@ const states: Record<string, string> = {
   error: "ошибка",
 };
 
+const adoptedKey=(parent:string,worker:string)=>"reply:adopted:"+parent+":"+worker;
+
 export class ChatBridge {
   private tr = (s: string) => translate(this.d.language?.() ?? "ru", s);
   private navigation = new AsyncLocalStorage<{
@@ -412,7 +414,11 @@ export class ChatBridge {
   }
   async sendDelegated(args: {parentThreadId: string; routeToken: string; threadId: string; text: string; deliveryId: string}): Promise<{accepted: true}> {
     const child = await this.d.sdk.threads.get({threadId: args.threadId, signal: this.d.signal});
-    if (child.parentThreadId !== args.parentThreadId || child.archivedAt || child.deletedAt)
+    // The owner's own conversation may hand a task to any existing thread, also of another project:
+    // the bridge then watches that worker like a child, for its questions and its result.
+    const adopted = child.parentThreadId !== args.parentThreadId;
+    if (child.archivedAt || child.deletedAt || child.id === args.parentThreadId ||
+        (adopted && !this.bindings().some(b => b.threadId === args.parentThreadId)))
       throw Error("delegation_parent_mismatch");
     const key = "reply:delegation:" + args.deliveryId;
     const old = this.s.get<{args: typeof args; state: string}>(key);
@@ -424,6 +430,7 @@ export class ChatBridge {
     await this.validateDelegationParent(args.parentThreadId,args.routeToken);
     if (this.s.get(key)) return this.sendDelegated(args);
     const marker = this.routes.delegatedIngress(args.parentThreadId, args.routeToken, args.threadId);
+    if (adopted) this.s.put(adoptedKey(args.parentThreadId, args.threadId), Date.now());
     // Reserve synchronously before any further await: concurrent RPC retries
     // must not both submit a message while reading the worker's event cursor.
     this.s.put(key, {args, state:"sending"});
@@ -583,8 +590,20 @@ export class ChatBridge {
     const seen = new Set(parents);
     for (const parentThreadId of parents) {
       const children = await this.d.sdk.threads.list({parentThreadId,archived:false,includeHidden:false,limit:100,signal:this.d.signal});
+      const adopted = new Set<string>();
+      if (parentThreadId === parent.threadId)
+        for (const {key} of this.s.list(adoptedKey(parentThreadId, ""))) {
+          const id = key.slice(adoptedKey(parentThreadId, "").length);
+          if (children.some(c => c.id === id)) continue;
+          try {
+            const got = await this.d.sdk.threads.get({threadId:id,signal:this.d.signal});
+            children.push(("thread" in got ? got.thread : got) as (typeof children)[number]); adopted.add(id);
+          }
+          catch { this.s.del(key); }
+        }
       for (const child of children) {
-        if (seen.has(child.id) || child.parentThreadId !== parentThreadId || child.deletedAt || child.archivedAt ||
+        if (adopted.has(child.id) && (child.deletedAt || child.archivedAt)) { this.s.del(adoptedKey(parentThreadId, child.id)); continue; }
+        if (seen.has(child.id) || (child.parentThreadId !== parentThreadId && !adopted.has(child.id)) || child.deletedAt || child.archivedAt ||
             child.visibility === "hidden" || this.s.get("group:thread:" + child.id)) continue;
         const key = "reply:child-cursor:" + child.id;
         if (this.s.get(key) === undefined) continue;

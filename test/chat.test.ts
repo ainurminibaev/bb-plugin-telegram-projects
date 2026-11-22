@@ -1846,7 +1846,7 @@ test("distinct completed turns may send identical text even under the same Teleg
 
 for (const scenario of ["parent wait", "early acknowledgement", "another update", "reordered recovery",
     "cancelled delivery", "rejected delivery", "empty final", "interrupted turn", "premature claim", "no claim",
-    "another child turn", "part receipt recovery"]) {
+    "another child turn", "part receipt recovery", "another project worker"]) {
   test("delegated Telegram result: " + scenario, async () => {
     const f = fixture();
     try {
@@ -1855,7 +1855,8 @@ for (const scenario of ["parent wait", "early acknowledgement", "another update"
       const original = f.calls.find(c => c[0] === "spawn")[1].input[1];
       assert.match(original.text, /If your final answer includes the completed result/);
       const routes = new ReplyRoutes(f.store);
-      const child = {...f.thread, id:"thr_worker", parentThreadId:f.thread.id};
+      const foreign = scenario === "another project worker";
+      const child = {...f.thread, id:"thr_worker", parentThreadId:foreign ? null : f.thread.id, ...(foreign && {projectId:"proj_other"})};
       const threadScope = {kind:"thread"};
       const turnScope = (turnId: string) => ({kind:"turn", turnId});
       const parentScope = turnScope("parent-turn");
@@ -1875,7 +1876,7 @@ for (const scenario of ["parent wait", "early acknowledgement", "another update"
       const ownerEvents: any[] = [request(1,"owner",original), accept(2,"owner",parentScope)];
       const childEvents: any[] = [];
       f.sdk.threads.get = async ({threadId}: any) => threadId === child.id ? child : f.thread;
-      f.sdk.threads.list = async () => [child];
+      f.sdk.threads.list = async () => foreign ? [] : [child];
       f.sdk.threads.events.list = async (q: any) => {
         const events = q.threadId === child.id ? childEvents : ownerEvents;
         const filtered = events.filter(e => (!q.types || q.types.includes(e.type)) && e.seq > Number(q.afterSeq ?? 0));
@@ -1886,6 +1887,9 @@ for (const scenario of ["parent wait", "early acknowledgement", "another update"
       await f.bridge.sendDelegated({parentThreadId:f.thread.id, threadId:child.id,
         routeToken:original.text.match(/route:([^\]]+)/)[1], text:"Do the work", deliveryId:"delegation"});
       const delegated = f.calls.find(c => c[0] === "send" && c[1].threadId === child.id)[1].input[1];
+      if (foreign) await assert.rejects(f.bridge.sendDelegated({parentThreadId:"thr_not_owner", threadId:child.id,
+        routeToken:original.text.match(/route:([^\]]+)/)[1], text:"Do the work", deliveryId:"delegation-2"}),/delegation_parent_mismatch/,
+        "only the owner's own conversation hands work to a thread that is not its child");
       const workerTurn = turnScope("worker-turn");
       childEvents.push(request(1,"worker",delegated), accept(2,"worker",workerTurn));
 
@@ -1910,7 +1914,7 @@ for (const scenario of ["parent wait", "early acknowledgement", "another update"
       }
       const finalScope = scenario === "another update" ? turnScope("different-turn") : parentScope;
       const early = scenario === "early acknowledgement";
-      const hasClaim = !early && scenario !== "no claim";
+      const hasClaim = !early && scenario !== "no claim" && !foreign;
       ownerEvents.push(answer(ownerEvents.length+1,finalScope,
         (early ? "Work started" : scenario === "empty final" ? "" : "Coordinator wording") +
         (hasClaim ? "\n<!-- bb-telegram-child-result:thr_worker:worker-turn -->" : ""),

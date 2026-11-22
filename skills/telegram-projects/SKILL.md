@@ -159,8 +159,10 @@ project, account, memory or permission grant.
 Choose the project, environment and worker with the normal BB registry and
 dispatch instructions. Preserve the transport identity through RPC JSON input:
 
-- `sendDelegated`: parentThreadId, routeToken (current UUID), threadId of the
-  existing direct child, text and stable deliveryId.
+- `sendDelegated`: parentThreadId, routeToken (current UUID), threadId of an
+  existing direct child, text and stable deliveryId. From the owner's own chat
+  thread it may also be any existing thread, for example a work thread of another
+  project: its questions reach the owner and its result comes back the same way.
 - `spawnDelegated`: parentThreadId, routeToken, projectId, title,
   text, stable deliveryId, optional providerId/model. Create projects through
   normal BB APIs first. Supply exactly one checkout selector: an existing
