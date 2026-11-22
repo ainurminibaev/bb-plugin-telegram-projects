@@ -139,6 +139,7 @@ export function telegram(
         code,
         Number(data.parameters?.retry_after) || 30,
         r.status >= 500,
+        Number.isSafeInteger(data.parameters?.migrate_to_chat_id) ? data.parameters.migrate_to_chat_id : undefined,
       );
     }
     return data.result as T;

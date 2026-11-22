@@ -5,6 +5,7 @@ import {handleOwnerGroupPost,ownerGroupPostGrants,ownerGroupPostInput,previewOwn
 import {handleOwnerForumCommand} from "./forum-commands";
 import {topicStateKey} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
+import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
 import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
@@ -552,6 +553,7 @@ export default async function plugin(bb: BbPluginApi) {
     store, sdk: bb.sdk, bot: botId()!, owner: ownerId()!, ttlMs: consentTtlMs, signal,
     tg: (chat: number) => telegram(botToken, signal, 15_000, () => chat, apiRoot),
   });
+  let nextUpgradeCheck = 0;
   let stateTransferBusy = false;
   let activeTelegramWrites = 0;
   function pairCode() {
@@ -2374,6 +2376,8 @@ export default async function plugin(bb: BbPluginApi) {
           } finally { ingressPolling = false; }
           ingressError = null;
           for (const u of updates) {
+            const moved=groupMigration(u);
+            if (moved && botId()) migrateGroupChat(store,botId()!,moved.from,moved.to);
             if (skipExcludedForumUpdate(store, u)) continue;
             const privateOwner=ownerId(),privateBot=botId();
             if (privateOwner && privateBot && cfg.chatEnabled && bridge &&
@@ -2496,6 +2500,14 @@ export default async function plugin(bb: BbPluginApi) {
                 callback_query_id: route.callbackId,
               }).catch(() => {});
             store.put("ingress:offset", u.update_id + 1);
+          }
+          if (botId() && Date.now()>=nextUpgradeCheck) {
+            nextUpgradeCheck=Date.now()+10*60_000;
+            // A basic group upgraded while the bridge was away: Telegram names the new ID on request.
+            for (const chat of basicGroupChats(store)) {
+              try { await tg("getChat",{chat_id:chat}); }
+              catch (error) { if (error instanceof TelegramFailure && error.migrateTo) migrateGroupChat(store,botId()!,chat,error.migrateTo); }
+            }
           }
           if (botId() && ownerId() && store.list("visibility:"+botId()+":group:").length)
             await sendGroupVisibility();

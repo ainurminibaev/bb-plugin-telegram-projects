@@ -198,6 +198,8 @@ export class TelegramFailure extends Error {
     public code: string,
     public retryAfter = 30,
     public ambiguous = false,
+    /** A basic group upgraded to a supergroup answers with its new chat ID. */
+    public migrateTo?: number,
   ) {
     super(code);
   }
