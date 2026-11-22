@@ -7,7 +7,7 @@ import {topicStateKey} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
-import {conversationOf,guardGroupMemory,readableChats} from "./archive-access";
+import {conversationOf,conversationOfThread,guardGroupMemory,readableChats} from "./archive-access";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
 import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
@@ -502,8 +502,10 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const lifetime = new AbortController();
   let bridge: ChatBridge | undefined;
-  bb.experimental_hooks.on("message.dispatch", ctx =>
-    handoffDispatch(store, ctx) ?? bridge?.admitDispatch(ctx) ?? {action: "proceed"});
+  // One dispatch handler for the whole bridge: a second registration could replace the first.
+  let scheduleAccess: ((ctx: Parameters<typeof handoffDispatch>[1]) => Promise<{action: "reject"; message: string} | undefined>) | undefined;
+  bb.experimental_hooks.on("message.dispatch", async ctx =>
+    (await scheduleAccess?.(ctx)) ?? handoffDispatch(store, ctx) ?? bridge?.admitDispatch(ctx) ?? {action: "proceed"});
   let flight: Promise<void> | null = null;
   let lastError: string | null = null;
   let topicsEnabled = false;
@@ -612,6 +614,25 @@ export default async function plugin(bb: BbPluginApi) {
       return JSON.stringify({messages:archive.find(bot,readable,query,safeTimeZone(cfg.timeZone))});
     },
   });
+  // A schedule set up in a group or a person's private chat runs only while that conversation still has access.
+  scheduleAccess=async ctx=>{
+    if (ctx.originPluginId!=="automations") return undefined;
+    const owner=ownerId(),bot=botId();
+    if (!owner || !bot) return undefined;
+    const ids=[ctx.thread.id,...(ctx.thread.parentThreadId ? [ctx.thread.parentThreadId] : [])];
+    const closed=ids.some(id=>store.get("conversation:closed:"+id));
+    const conv=ids.map(id=>conversationOfThread(store,id)).find(Boolean);
+    const gone=closed || (conv?.kind==="group" && !store.get(`visibility:${bot}:group:${conv.chat}`)) ||
+      (conv?.kind==="person" && !hasAccess(store,bot,owner,conv.subject));
+    if (!gone) return undefined;
+    const told="conversation:schedule-refused:"+ctx.thread.id;
+    if (!store.get(told)) {
+      store.put(told,Date.now());
+      await telegram(botToken,new AbortController().signal,15_000,ownerId,apiRoot)("sendMessage",{chat_id:owner,
+        text:`Расписание в разговоре «${ctx.thread.title ?? ctx.thread.id}» не запущено: у этого разговора больше нет доступа.`}).catch(()=>{});
+    }
+    return {action:"reject" as const,message:"This conversation no longer has access; its schedules do not run."};
+  };
   bb.agents.registerTool({
     name:"telegram_group_reminder",
     description:"Schedule one conditional reminder for an existing Telegram group task from the owner's direct BB conversation.",

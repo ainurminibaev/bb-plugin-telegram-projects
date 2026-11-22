@@ -25,6 +25,8 @@ export function unbindPerson(store:Store,subject:number) {
     const policy=store.get<GroupTopicPolicy>(privatePolicyKey(subject));
     if (!policy?.privateChat) return;
     store.del(privatePolicyKey(subject));
+    // Schedules of this conversation must not outlive the access: the dispatch check reads this mark.
+    store.put("conversation:closed:"+policy.threadId,Date.now());
     if (store.get("group:thread:"+policy.threadId)===privatePolicyKey(subject)) store.del("group:thread:"+policy.threadId);
   });
 }
