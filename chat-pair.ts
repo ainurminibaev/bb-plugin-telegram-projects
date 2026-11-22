@@ -441,11 +441,15 @@ export class ChatPairs {
       `Коротко, по порядку:\n${body}\n\nДальше — новое сообщение.`;
   }
 
-  /** Свободные подтреды переезжают к действующему треду; занятые — когда освободятся. */
+  /**
+   * К действующему треду переезжают только работающие подтреды: их итог должен прийти туда. Перенос будит
+   * нового родителя уведомлением BB (штатного переноса без уведомления нет), поэтому законченные и ждущие
+   * подтреды остаются на месте — их разбирают суточная уборка и ответ владельца «перенести».
+   */
   private async moveChildren(p: ChatPair, from: string, to: string) {
     const children = await this.d.sdk.threads.list({parentThreadId: from, archived: false, includeHidden: true, limit: 100});
     for (const c of children as unknown as ThreadRow[]) {
-      if (c.parentThreadId !== from || c.id === to || !["idle", "error"].includes(c.status)) continue;
+      if (c.parentThreadId !== from || c.id === to || c.status !== "active") continue;
       try {
         await this.d.sdk.threads.update({threadId: c.id, parentThreadId: to});
         this.d.store.put(MOVED + c.id, {from, to, at: Date.now()});

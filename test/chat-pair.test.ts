@@ -171,7 +171,7 @@ test("лимит действующего: переключение, перео�
   assert.match(w.notices[0], /^Claude в лимите до .*Пока отвечает Codex\.$/);
   assert.equal(w.threads.get("codex")!.title, "🟢 Действующий · Личный помощник · Codex");
   assert.equal(w.threads.get("claude")!.title, "⏳ Ждёт лимита · Личный помощник · Claude");
-  assert.equal(w.threads.get("kid")!.parentThreadId, "codex", "свободный подтред переехал к действующему");
+  assert.equal(w.threads.get("kid")!.parentThreadId, "claude", "законченный подтред не переезжает: перенос будил бы действующий тред");
   assert.equal(await pairs.onLimit(w.binding as never, "claude", "t1"), true, "повторный разбор того же сбоя — без действий");
   assert.equal(w.sent.length, 1);
 });
@@ -544,4 +544,15 @@ test("пакет исходов подтредов: все — лимит с п�
   assert.equal(held?.action, "wait");
   assert.match((held as {reason: string}).reason, /^Подтреды «Задача k1», «Задача k2» ждут сброса лимита до .* МСК, повторы поставлены\.$/);
   assert.equal(await pairs.admitChildNotice(ctx([{threadId: "k1", status: "failed"}, {threadId: "kid", status: "completed"}])), undefined);
+});
+
+test("переключение: работающий подтред переезжает к действующему, законченные остаются", async () => {
+  const w = world();
+  w.threads.set("busy", {...w.threads.get("kid")!, id: "busy", title: "Расчёт", status: "active"});
+  const pairs = new ChatPairs(w.deps);
+  await pairs.configure(0, "claude", "codex");
+  w.limitTurn("claude", "t1", "Сколько стоит билет?", 2 * 3600_000);
+  await pairs.onLimit(w.binding as never, "claude", "t1");
+  assert.equal(w.threads.get("busy")!.parentThreadId, "codex", "итог работающего подтреда придёт действующему");
+  assert.equal(w.threads.get("kid")!.parentThreadId, "claude");
 });
