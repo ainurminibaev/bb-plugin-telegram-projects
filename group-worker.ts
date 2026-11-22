@@ -19,7 +19,7 @@ import {refersToExamples, promisesExamples, canInvokeGroup, contextMediaPrefix, 
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
-import {accessModeKey,groupSettings,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
+import {accessModeKey,activeGroupSettings,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
 type Job = {
@@ -75,7 +75,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
       store.put(sharedGroupThreadKey(threadId),true);
       store.put(sharedGroupScopeKey(chatId,topicId),true);
       store.put("group:shared-project:"+projectId,true);
-    } else store.put("group:project:"+projectId,true);
+    } else if (!policy.privateChat) store.put("group:project:"+projectId,true);
     const prev=previous;
     if (prev && prev.projectId === projectId && !!prev.isolated === !!policy.isolated && prev.acceptAfterSecond !== undefined && prev.threadId===threadId && prev.ownerOnly===policy.ownerOnly && prev.ownerTopic===policy.ownerTopic && prev.ownerSharedProject===policy.ownerSharedProject &&
         prev.ownerTopicManagerProjectId===policy.ownerTopicManagerProjectId &&
@@ -98,7 +98,7 @@ export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId
     }
     store.del(`group:context:${chatId}:${topicId}`);
     store.put("group:thread:"+threadId,key);
-    store.put(key,{...policy,projectId,acceptAfterSecond:Math.floor(Date.now()/1000)});
+    store.put(key,{...policy,projectId,acceptAfterSecond:policy.privateChat ? 0 : Math.floor(Date.now()/1000)});
   });
 }
 
@@ -390,10 +390,12 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const provider=(thread as {providerId?:string}).providerId;
       const role=senderRole(store,botId,owner,r.chatId,r.senderId,provider);
       if (role==="none") {finish("revoked");continue;}
-      const settings=groupSettings(store,botId,r.chatId);
+      const settings=activeGroupSettings(store,botId,r.chatId);
       const title=store.get<{title?:string}>(`visibility:${botId}:group:${r.chatId}`)?.title ?? "эта группа";
       const senderName=r.senderName ?? "участник";
-      const rules=rulesNote({title,settings,role,senderName});
+      const rules=policy.privateChat
+        ? `Личный чат в Telegram: пишет ${senderName}, у него есть доступ к тебе и он может тебе поручать. Отвечай ему здесь.`
+        : rulesNote({title,settings,role,senderName});
       const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
       if (!allowed() || !await safeToSend()) {finish("revoked");continue;}

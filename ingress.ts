@@ -11,6 +11,8 @@ import {MAX_INCOMING_BYTES} from "./telegram-files";
 
 export type GroupTopicPolicy = {
   isolated?: boolean;
+  /** A person's private chat with an employee, bound to an ordinary employee thread. */
+  privateChat?: true;
   deliverySources?: string[];
   projectId?: string; // Older bindings used project and thread markers only.
   chatId: number;
@@ -159,7 +161,8 @@ export function routeUpdate(
   const m = cq ? cq.message : u?.message;
   const from = cq ? cq.from : u?.message?.from;
   const callbackId = cq ? String(cq.id) : undefined;
-  if (group && !cq && (m?.chat?.type === "supergroup" || m?.chat?.type === "group")) {
+  if (group && !cq && (m?.chat?.type === "supergroup" || m?.chat?.type === "group" ||
+      (group.privateChat && m?.chat?.type === "private" && m.chat.id === from?.id))) {
     const topicId = m.message_thread_id ?? 0;
     if (!owner || m.chat.id !== group.chatId || topicId !== group.topicId ||
         !group.threadId || !Number.isSafeInteger(from?.id) || from.id <= 0 ||
@@ -356,16 +359,18 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
   const message = update?.message ?? edit;
   if (!owner || !botId || !Number.isSafeInteger(update?.update_id) || update.update_id < 0 ||
       !Number.isSafeInteger(message?.message_id) || message.message_id <= 0 ||
-      !["group", "supergroup"].includes(message?.chat?.type)) return false;
+      !["group", "supergroup", "private"].includes(message?.chat?.type)) return false;
   const chatId = message.chat.id;
   const topicId = message.message_thread_id ?? 0;
-  if (!Number.isSafeInteger(chatId) || chatId >= 0 || !Number.isSafeInteger(topicId) || topicId < 0) return false;
+  const privateChat = message.chat.type === "private";
+  if (!Number.isSafeInteger(chatId) || !Number.isSafeInteger(topicId) || topicId < 0) return false;
+  if (privateChat ? guest || chatId <= 0 || chatId === owner || message.from?.id !== chatId || topicId !== 0 : chatId >= 0) return false;
   let accepted = false;
   store.atomic(() => {
     if (isTopicPaused(store,botId,chatId,topicId)) return;
     const bound = store.get<GroupTopicPolicy>(`group:policy:${chatId}:${topicId}`);
     if (!bound || (bound.ownerId !== undefined && owner !== bound.ownerId) || bound.botId !== botId || typeof bound.ownerOnly !== "boolean" ||
-        typeof bound.requireMention !== "boolean" || !bound.botUsername) return;
+        typeof bound.requireMention !== "boolean" || !bound.botUsername || privateChat !== (bound.privateChat === true)) return;
     if (bound.ownerSharedProject && (!isSharedOwnerPolicy(bound) || guest || message.is_topic_message!==true ||
         !originalPerson(message) || message.from.id!==owner)) return;
     // Who may call the bot here follows the access list and the group settings.

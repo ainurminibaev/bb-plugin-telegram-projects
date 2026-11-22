@@ -3,7 +3,7 @@ import type { GroupTopicPolicy } from "./ingress";
 import { privacyKey } from "./group-visibility";
 import type { Store, Telegram } from "./model";
 import {
-  accessList, defaultGroupSettings, groupSettings, hasAccess, openGroupLock, saveGroupSettings, setAccess,
+  accessList, activeGroupSettings, installKind, defaultGroupSettings, groupSettings, hasAccess, openGroupLock, saveGroupSettings, setAccess,
   type GroupSettings, type MembersMode,
 } from "./rights";
 
@@ -92,20 +92,22 @@ export function groupsScreen(store: Store, bot: number, botUsername: string, vis
   return {
     text: "Группы, где я есть:",
     reply_markup: { inline_keyboard: groups.map((g) => [{
-      text: `${g.title} — ${shortState(groupSettings(store, bot, g.chat) ?? defaultGroupSettings(), openGroupLock(store) === "assistant")}`,
+      text: `${g.title} — ${shortState(activeGroupSettings(store, bot, g.chat) ?? defaultGroupSettings(), openGroupLock(store) === "assistant")}`,
       callback_data: "rs:g:" + g.chat,
     }]) },
   };
 }
 
-export function groupScreen(title: string, chat: number, s: GroupSettings, lock?: "codex" | "assistant") {
+export function groupScreen(title: string, chat: number, s: GroupSettings, lock?: "codex" | "assistant", employee = false) {
   const who = lock ? "access" : s.who;
+  // An employee answers every member of an open group as someone who may give tasks.
+  const membersAreAccess = employee && who === "all";
   const lines = [
     `Группа «${title}»`,
     "Ко мне обращаются: " + WHO_LINE[who],
     "Отвечаю: " + REPLY_LINE[s.reply],
-    "Остальным участникам: " + (who === "access" ? "не отвечаю, пока ко мне обращаются только те, кто может поручать" : MEMBERS_LINE[s.members]),
-    ...(who === "all" ? [MEMBERS_HINT[s.members]] : []),
+    membersAreAccess ? "Все участники группы могут мне поручать." : "Остальным участникам: " + (who === "access" ? "не отвечаю, пока ко мне обращаются только те, кто может поручать" : MEMBERS_LINE[s.members]),
+    ...(who === "all" && !membersAreAccess ? [MEMBERS_HINT[s.members]] : []),
     "Можно рассказывать: " + (s.zones.length ? s.zones.join(", ") : "всё, что относится к работе группы"),
     "Заметка: " + (s.note || "—"),
     "Кто может мне поручать, всегда может попросить сделать что-то и ответить сюда.",
@@ -114,7 +116,7 @@ export function groupScreen(title: string, chat: number, s: GroupSettings, lock?
   const rows: Button[][] = [
     [{ text: lock ? WHO_BUTTON.access + " 🔒" : WHO_BUTTON[s.who], callback_data: `rs:w:${chat}` }],
     [{ text: REPLY_BUTTON[s.reply], callback_data: `rs:r:${chat}` }],
-    ...(who === "all" ? [[{ text: MEMBERS_BUTTON[s.members], callback_data: `rs:m:${chat}` }]] : []),
+    ...(who === "all" && !membersAreAccess ? [[{ text: MEMBERS_BUTTON[s.members], callback_data: `rs:m:${chat}` }]] : []),
     [{ text: "Что можно рассказывать ›", callback_data: `rs:z:${chat}` }],
     [{ text: "✏️ Заметка", callback_data: `rs:n:${chat}` }],
     [{ text: "Готово", callback_data: `rs:d:${chat}` }],
@@ -151,9 +153,11 @@ export async function notifyGroupsAdded(ctx: SetupContext) {
     const signature = JSON.stringify([g.event, visible]);
     if (ctx.store.get(key) === signature) continue;
     const recipient = g.inviter && hasAccess(ctx.store, ctx.bot, ctx.owner, g.inviter) ? g.inviter : ctx.owner;
-    const s = groupSettings(ctx.store, ctx.bot, g.chat) ?? defaultGroupSettings();
+    const s = activeGroupSettings(ctx.store, ctx.bot, g.chat) ?? defaultGroupSettings();
     const lines = [s.version === 0
-      ? `Меня добавили в «${g.title}». Пока я отвечаю здесь только тем, кто может мне поручать, и только когда обращаются ко мне.`
+      ? (s.who === "all" && !openGroupLock(ctx.store)
+        ? `Меня добавили в «${g.title}». Отвечаю здесь всем участникам, когда меня отмечают или отвечают на моё сообщение.`
+        : `Меня добавили в «${g.title}». Пока я отвечаю здесь только тем, кто может мне поручать, и только когда обращаются ко мне.`)
       : `Я в «${g.title}». Сейчас ${shortState(s, openGroupLock(ctx.store) === "assistant")}.`];
     if (privacy === false && !g.administrator)
       lines.push(`Режим приватности у меня выключен: я вижу всю переписку «${g.title}». Обрабатываю только то, что разрешают настройки группы.`);
@@ -228,7 +232,7 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
       const s = saveGroupSettings(ctx.store, ctx.bot, waiting.chat, { note: text });
       ctx.store.del(awaitKey);
       await send(groupScreen(membership(ctx.store, ctx.bot, waiting.chat)?.title ?? "группа", waiting.chat, s,
-        openGroupLock(ctx.store, await providerOf(ctx, waiting.chat))));
+        openGroupLock(ctx.store, await providerOf(ctx, waiting.chat)), installKind(ctx.store) === "employee"));
       return true;
     }
     if (!allowed || !MENU.has(text)) return false;
@@ -287,7 +291,7 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
   }
   const title = membership(ctx.store, ctx.bot, chat)?.title ?? "группа";
   const lock = openGroupLock(ctx.store, await providerOf(ctx, chat));
-  let s = groupSettings(ctx.store, ctx.bot, chat) ?? defaultGroupSettings();
+  let s = activeGroupSettings(ctx.store, ctx.bot, chat) ?? defaultGroupSettings();
   if (action === "w") {
     if (lock) {
       await answer(lockText(lock), true);
@@ -320,7 +324,7 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
     await answer();
     return true;
   } else if (action === "g") ctx.store.del(awaitKey);
-  await show(groupScreen(title, chat, s, lock));
+  await show(groupScreen(title, chat, s, lock, installKind(ctx.store) === "employee"));
   await answer();
   return true;
 }

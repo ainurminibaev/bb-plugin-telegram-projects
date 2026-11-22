@@ -8,6 +8,7 @@ export const sharedGroupThreadKey=(threadId:string)=>"group:shared-thread:"+thre
 export function groupThreadMatches(store:Store,policy:GroupTopicPolicy,projectId:string) {
   const scope=`group:policy:${policy.chatId}:${policy.topicId}`;
   if (store.get("group:thread:"+policy.threadId)!==scope) return false;
+  if (policy.privateChat) return !!policy.projectId && policy.projectId===projectId;
   if (policy.ownerSharedProject)
     return policy.projectId===projectId && store.get(sharedGroupThreadKey(policy.threadId))===true;
   return store.get("group:project:"+projectId)===true &&

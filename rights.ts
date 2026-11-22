@@ -35,10 +35,24 @@ export const installKindKey = "rights:install-kind";
 export type InstallKind = "assistant" | "employee";
 export const installKind = (store: Store): InstallKind =>
   store.get<InstallKind>(installKindKey) === "employee" ? "employee" : "assistant";
-/** Why only people with access may call the bot here, or undefined when everyone may. */
-export function openGroupLock(store: Store, provider?: string): "codex" | "assistant" | undefined {
-  if (provider === "codex") return "codex";
+/**
+ * Why only people with access may call the bot in a group, or undefined when everyone may.
+ * A personal assistant runs with the owner's files, so its groups stay closed. An employee is
+ * a member of the team: whoever is in its group may talk to it, whatever agent it runs on.
+ */
+export function openGroupLock(store: Store, _provider?: string): "assistant" | undefined {
   return installKind(store) === "assistant" ? "assistant" : undefined;
+}
+
+/** An employee added to a group answers all its members, on mention or reply, until the group says otherwise. */
+export const defaultEmployeeGroupSettings = (): GroupSettings => ({
+  version: 0, who: "all", reply: "mention", members: "propose", zones: [], note: "",
+});
+
+/** Saved group settings, or the default for this kind of install. Private chats have none. */
+export function activeGroupSettings(store: Store, bot: number, chat: number): GroupSettings | undefined {
+  if (chat > 0) return undefined;
+  return groupSettings(store, bot, chat) ?? (installKind(store) === "employee" ? defaultEmployeeGroupSettings() : undefined);
 }
 
 export function accessList(store: Store, bot: number): Person[] {
@@ -62,7 +76,7 @@ export function groupSettings(store: Store, bot: number, chat: number): GroupSet
 }
 
 export function saveGroupSettings(store: Store, bot: number, chat: number, change: Partial<Omit<GroupSettings, "version">>) {
-  const current = groupSettings(store, bot, chat) ?? defaultGroupSettings();
+  const current = activeGroupSettings(store, bot, chat) ?? defaultGroupSettings();
   const next: GroupSettings = {
     ...current,
     ...change,
@@ -74,22 +88,27 @@ export function saveGroupSettings(store: Store, bot: number, chat: number, chang
   return next;
 }
 
-/** Codex employees accept only people with access until the Codex boundary is verified. */
+/**
+ * People with access may give tasks everywhere. In an employee's group open to all members,
+ * every member has the same access there: membership in the group is the permission.
+ */
 export function senderRole(store: Store, bot: number, owner: number | undefined, chat: number,
   sender: number, provider?: string): SenderRole {
   if (hasAccess(store, bot, owner, sender)) return "access";
-  // Strangers reach only employees on a verified boundary (see openGroupLock).
-  if (openGroupLock(store, provider)) return "none";
-  const s = groupSettings(store, bot, chat) ?? defaultGroupSettings();
-  return s.who === "all" && s.members !== "silent" ? "member" : "none";
+  if (chat > 0 || openGroupLock(store, provider)) return "none";
+  const s = activeGroupSettings(store, bot, chat) ?? defaultGroupSettings();
+  if (s.who !== "all") return "none";
+  if (installKind(store) === "employee") return "access";
+  return s.members !== "silent" ? "member" : "none";
 }
 
 /** The topic binding seen through the group settings, for the synchronous ingress gate. */
 export function effectiveGroupPolicy(store: Store, policy: GroupTopicPolicy, owner: number): GroupTopicPolicy {
-  if (policy.isolated || policy.ownerTopic || policy.ownerSharedProject) return policy;
-  const s = groupSettings(store, policy.botId, policy.chatId);
+  if (policy.isolated || policy.ownerTopic || policy.ownerSharedProject || policy.privateChat) return policy;
+  const s = activeGroupSettings(store, policy.botId, policy.chatId);
   const access = [...new Set([owner, ...accessList(store, policy.botId).map((p) => p.id)])];
-  const open = s ? s.who === "all" && s.members !== "silent" : false;
+  const employee = installKind(store) === "employee";
+  const open = s ? s.who === "all" && (employee || s.members !== "silent") && !openGroupLock(store) : false;
   return {
     ...policy,
     ownerOnly: !open,

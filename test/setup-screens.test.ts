@@ -40,17 +40,16 @@ test("one group fits one screen: every button shows its current value and no IDs
 test("a tap saves at once and the screen shows the new value",async()=>{
   const h=harness();
   assert.equal(await h.say(OWNER,"Мои группы"),true);
-  assert.match(visibleText(h.last("sendMessage")),/Склад — отвечаю только своим/);
+  assert.match(visibleText(h.last("sendMessage")),/Склад — отвечаю всем/);
   await h.tap(OWNER,`rs:g:${CHAT}`);
-  await h.tap(OWNER,`rs:w:${CHAT}`);
-  assert.equal(groupSettings(h.store as any,BOT,CHAT)!.who,"all");
   let screen=h.last("editMessageText");
   assert.match(visibleText(screen),/Обращаются: все участники/);
-  assert.match(visibleText(screen),/Остальным: не отвечаю/);
-  await h.tap(OWNER,`rs:m:${CHAT}`);
+  assert.match(screen.text,/Все участники группы могут мне поручать/);
+  assert.doesNotMatch(visibleText(screen),/Остальным:/);
+  await h.tap(OWNER,`rs:w:${CHAT}`);
+  assert.equal(groupSettings(h.store as any,BOT,CHAT)!.who,"access");
   screen=h.last("editMessageText");
-  assert.match(visibleText(screen),/Остальным: отвечаю и смотрю данные/);
-  assert.match(screen.text,/Ничего не меняю без согласия/);
+  assert.match(visibleText(screen),/Обращаются: только кто может поручать/);
   await h.tap(OWNER,`rs:r:${CHAT}`);
   assert.equal(groupSettings(h.store as any,BOT,CHAT)!.reply,"auto");
   await h.tap(OWNER,`rs:z:${CHAT}`);
@@ -66,16 +65,13 @@ test("a tap saves at once and the screen shows the new value",async()=>{
     assert.doesNotMatch(String(x.text),/-?100\d{6,}|версия/);
 });
 
-test("a Codex employee keeps «only who may give tasks» and says why",async()=>{
+test("a Codex employee may open its group to all members like any employee",async()=>{
   const h=harness("codex");
   await h.tap(OWNER,`rs:g:${CHAT}`);
-  assert.match(h.last("editMessageText").text,new RegExp(CODEX_LOCK.slice(0,30)));
-  assert.match(visibleText(h.last("editMessageText")),/Обращаются: только кто может поручать 🔒/);
+  assert.doesNotMatch(h.last("editMessageText").text,new RegExp(CODEX_LOCK.slice(0,30)));
+  assert.match(visibleText(h.last("editMessageText")),/Обращаются: все участники/);
   await h.tap(OWNER,`rs:w:${CHAT}`);
-  assert.equal(groupSettings(h.store as any,BOT,CHAT),undefined,"nothing is saved");
-  const alert=h.last("answerCallbackQuery");
-  assert.equal(alert.show_alert,true);
-  assert.equal(alert.text,CODEX_LOCK);
+  assert.equal(groupSettings(h.store as any,BOT,CHAT)!.who,"access");
 });
 
 test("only people with access who administer the group can open its settings",async()=>{

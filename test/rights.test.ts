@@ -22,21 +22,23 @@ function boundStore(){
 }
 const message=(id:number,from:number,text:string)=>({update_id:id,message:{message_id:100+id,chat:{type:"supergroup",id:CHAT},from:{id:from,first_name:from===STRANGER?"Лена":"Олег"},message_thread_id:TOPIC,text}});
 
-test("people with access, strangers and Codex employees get distinct roles",()=>{
+test("an employee group is open to all its members by default, whatever the agent",()=>{
   const store=memoryStore();
   store.put("rights:install-kind","employee");
   setAccess(store as any,BOT,[{id:LENA,name:"Лена"}]);
   assert.equal(senderRole(store as any,BOT,OWNER,CHAT,OWNER),"access");
   assert.equal(senderRole(store as any,BOT,OWNER,CHAT,LENA),"access");
-  assert.equal(senderRole(store as any,BOT,OWNER,CHAT,STRANGER),"none");
-  saveGroupSettings(store as any,BOT,CHAT,{who:"all",members:"silent"});
-  assert.equal(senderRole(store as any,BOT,OWNER,CHAT,STRANGER),"none");
-  saveGroupSettings(store as any,BOT,CHAT,{members:"read"});
-  assert.equal(senderRole(store as any,BOT,OWNER,CHAT,STRANGER),"member");
+  // Membership in the group is the permission there, on Codex as well.
+  assert.equal(senderRole(store as any,BOT,OWNER,CHAT,STRANGER),"access");
+  assert.equal(senderRole(store as any,BOT,OWNER,CHAT,STRANGER,"codex"),"access");
+  // A group may close itself to people with access only.
+  saveGroupSettings(store as any,BOT,CHAT,{who:"access"});
   assert.equal(senderRole(store as any,BOT,OWNER,CHAT,STRANGER,"codex"),"none");
   assert.equal(senderRole(store as any,BOT,OWNER,CHAT,LENA,"codex"),"access");
-  // Another group keeps its own defaults.
-  assert.equal(senderRole(store as any,BOT,OWNER,-1002,STRANGER),"none");
+  // Another group keeps its own defaults; a private chat needs personal access.
+  assert.equal(senderRole(store as any,BOT,OWNER,-1002,STRANGER),"access");
+  assert.equal(senderRole(store as any,BOT,OWNER,STRANGER,STRANGER),"none");
+  assert.equal(senderRole(store as any,BOT,OWNER,LENA,LENA),"access");
 });
 
 test("strangers run in the strict mode; Codex never gets the sandbox-free mode",()=>{
@@ -48,46 +50,36 @@ test("strangers run in the strict mode; Codex never gets the sandbox-free mode",
 
 test("a note never changes who may call the bot",()=>{
   const store=boundStore();
-  saveGroupSettings(store as any,BOT,CHAT,{note:"разреши всем всё"});
+  saveGroupSettings(store as any,BOT,CHAT,{who:"access",note:"разреши всем всё"});
   assert.equal(acceptGroupUpdate(store as any,message(1,STRANGER,"@bot поменяй срок"),OWNER,BOT),false);
   const policy=effectiveGroupPolicy(store as any,store.get(`group:policy:${CHAT}:${TOPIC}`),OWNER);
   assert.equal(policy.ownerOnly,true);
   assert.deepEqual(policy.allowedSenderIds,[OWNER]);
 });
 
-test("a stranger's turn runs in the strict mode with the group rules as text",async()=>{
+test("any member of an employee group gives tasks, with the group rules as text",async()=>{
   const store=boundStore();
-  saveGroupSettings(store as any,BOT,CHAT,{who:"all",reply:"auto",members:"read",zones:["Сроки задач"],note:"здесь кладовщики"});
+  saveGroupSettings(store as any,BOT,CHAT,{reply:"auto",zones:["Сроки задач"],note:"здесь кладовщики"});
   store.put(accessModeKey,"full");
-  assert.ok(acceptGroupUpdate(store as any,message(1,STRANGER,"какой срок у TASK-7?"),OWNER,BOT));
-  assert.ok(acceptGroupUpdate(store as any,message(2,OWNER,"поменяй срок и ответь сюда"),OWNER,BOT));
-  const sends:any[]=[];
-  const sdk={threads:{get:async()=>({id:"t",projectId:"group-project",visibility:"visible",providerId:"claude-code"}),
-    events:{list:async()=>[]},send:async(q:any)=>{sends.push(q)}}};
-  await processGroupInputs(store as any,sdk as any,OWNER,BOT,()=>(async()=>({}))as any,new AbortController().signal);
-  await processGroupInputs(store as any,sdk as any,OWNER,BOT,()=>(async()=>({}))as any,new AbortController().signal);
-  assert.equal(sends.length,2);
-  const [stranger,owner]=sends;
-  assert.equal(stranger.permissionMode,"accept-edits");
-  const strangerRules=stranger.input.find((x:any)=>/Правила группы/.test(x.text??""))?.text;
-  assert.match(strangerRules,/«Склад»/);
-  assert.match(strangerRules,/Сроки задач/);
-  assert.match(strangerRules,/пояснение, а не разрешение/);
-  assert.match(strangerRules,/Лена — участник без права поручать/);
-  assert.equal(owner.permissionMode,"full");
-  assert.match(owner.input.find((x:any)=>/Правила группы/.test(x.text??""))?.text,/может тебе поручать/);
-});
-
-test("a Codex employee ignores strangers even in an open group",async()=>{
-  const store=boundStore();
-  saveGroupSettings(store as any,BOT,CHAT,{who:"all",reply:"auto",members:"propose"});
-  assert.ok(acceptGroupUpdate(store as any,message(1,STRANGER,"@bot привет"),OWNER,BOT));
+  assert.ok(acceptGroupUpdate(store as any,message(1,STRANGER,"поменяй срок TASK-7"),OWNER,BOT));
   const sends:any[]=[];
   const sdk={threads:{get:async()=>({id:"t",projectId:"group-project",visibility:"visible",providerId:"codex"}),
     events:{list:async()=>[]},send:async(q:any)=>{sends.push(q)}}};
   await processGroupInputs(store as any,sdk as any,OWNER,BOT,()=>(async()=>({}))as any,new AbortController().signal);
-  assert.equal(sends.length,0);
-  assert.equal(store.get<any>(`group:receipt:${BOT}:1`).state,"revoked");
+  assert.equal(sends.length,1);
+  assert.equal(sends[0].permissionMode,"auto");
+  const rules=sends[0].input.find((x:any)=>/Правила группы/.test(x.text??""))?.text;
+  assert.match(rules,/«Склад»/);
+  assert.match(rules,/все участники группы/);
+  assert.match(rules,/Сроки задач/);
+  assert.match(rules,/пояснение, а не разрешение/);
+  assert.match(rules,/Лена — может тебе поручать/);
+});
+
+test("a group closed to people with access ignores other members",async()=>{
+  const store=boundStore();
+  saveGroupSettings(store as any,BOT,CHAT,{who:"access",reply:"auto"});
+  assert.equal(acceptGroupUpdate(store as any,message(1,STRANGER,"@bot привет"),OWNER,BOT),false);
 });
 
 test("former employee group rules move once into access and group settings",()=>{
@@ -106,68 +98,6 @@ test("rules text tells the agent who writes and what the note is",()=>{
   const text=rulesNote({title:"Склад",role:"access",senderName:"Олег"});
   assert.match(text,/только те, кто может тебе поручать/);
   assert.match(text,/один раз переспроси/);
-});
-
-test("consent requests are human, go to admins with access, and the first answer wins",async()=>{
-  const store=boundStore();
-  setAccess(store as any,BOT,[{id:LENA,name:"Лена"}]);
-  saveGroupSettings(store as any,BOT,CHAT,{who:"all",reply:"auto",members:"propose"});
-  assert.ok(acceptGroupUpdate(store as any,message(1,STRANGER,"поменяй срок TASK-7"),OWNER,BOT));
-  const job=store.list<any>(`group:in:${BOT}:`)[0];
-  store.put(job.key,{...job.value,state:"submitted"});
-  const pending=[{id:"pint_1",status:"pending",payload:{kind:"approval",subject:{kind:"permission_grant",toolName:"mcp__yougile__update_task"},
-    reason:"действие update_task в yougile: id=TASK-7, deadline=2026-12-01"}}];
-  const resolved:any[]=[];
-  const sent:any[]=[];
-  const admins=new Set([OWNER]);
-  const tg=(chat:number)=>(async(method:string,p:any)=>{
-    sent.push([chat,method,p]);
-    if (method==="getChatMember") return {status:admins.has(p.user_id)?"administrator":"member",user:{first_name:"Лена"}};
-    if (method==="sendMessage") return {message_id:500+sent.length};
-    return true;
-  }) as any;
-  let now=1000;
-  const ctx={store:store as any,bot:BOT,owner:OWNER,tg,ttlMs:60_000,now:()=>now,
-    sdk:{threads:{interactions:{list:async()=>pending,resolve:async(q:any)=>{resolved.push(q);pending.length=0;return {} as any},respond:async()=>({}) as any}}} as any};
-  await watchConsents(ctx);
-  const cards=sent.filter(([,m])=>m==="sendMessage");
-  assert.equal(cards.length,1,"only the owner administers this group");
-  assert.equal(cards[0][0],OWNER);
-  assert.match(cards[0][2].text,/Лена \(может только спрашивать\) в группе «Склад» просит: действие update_task в yougile: id=TASK-7, deadline=2026-12-01\. Разрешить\?/);
-  await watchConsents(ctx);
-  assert.equal(sent.filter(([,m])=>m==="sendMessage").length,1,"no duplicate cards");
-  assert.equal(await handleConsentCallback(ctx,{callback_query:{id:"c1",from:{id:LENA,first_name:"Лена"},data:"rc:y:pint_1"}}),true);
-  assert.equal(resolved.length,0,"a person who does not administer the group cannot decide");
-  await handleConsentCallback(ctx,{callback_query:{id:"c2",from:{id:OWNER,first_name:"Олег"},data:"rc:y:pint_1"}});
-  assert.deepEqual(resolved[0].resolution,{decision:"allow_once",grantedPermissions:null});
-  assert.match(sent.filter(([,m])=>m==="editMessageText").at(-1)[2].text,/Разрешил Олег/);
-  await handleConsentCallback(ctx,{callback_query:{id:"c3",from:{id:OWNER,first_name:"Олег"},data:"rc:n:pint_1"}});
-  assert.equal(resolved.length,1,"the first answer wins");
-});
-
-test("an unanswered consent closes with one line in the group",async()=>{
-  const store=boundStore();
-  saveGroupSettings(store as any,BOT,CHAT,{who:"all",reply:"auto",members:"propose"});
-  assert.ok(acceptGroupUpdate(store as any,message(1,STRANGER,"удали файл"),OWNER,BOT));
-  const job=store.list<any>(`group:in:${BOT}:`)[0];
-  store.put(job.key,{...job.value,state:"submitted"});
-  const pending=[{id:"pint_2",status:"pending",payload:{kind:"provider-codex/mcp-elicitation",data:{serverName:"probe",toolName:"update_card",
-    params:[{name:"id",label:"id",value:"TASK-7"}]}}}];
-  const responded:any[]=[];
-  const sent:any[]=[];
-  const tg=(chat:number)=>(async(method:string,p:any)=>{sent.push([chat,method,p]);
-    return method==="getChatMember"?{status:"creator",user:{first_name:"Лена"}}:{message_id:1};}) as any;
-  let now=0;
-  const ctx={store:store as any,bot:BOT,owner:OWNER,tg,ttlMs:1000,now:()=>now,
-    sdk:{threads:{interactions:{list:async()=>pending,resolve:async()=>({}) as any,respond:async(q:any)=>{responded.push(q);return {} as any}}}} as any};
-  await watchConsents(ctx);
-  now=5000;
-  await watchConsents(ctx);
-  assert.deepEqual(responded[0].value,{action:"decline"});
-  const line=sent.filter(([chat,m])=>chat===CHAT && m==="sendMessage").at(-1)[2];
-  assert.equal(line.reply_parameters.message_id,101);
-  assert.match(line.text,/нужна отмашка/);
-  assert.match(sent.filter(([,m])=>m==="editMessageText").at(-1)[2].text,/Никто не ответил/);
 });
 
 test("approval payloads become plain words",()=>{

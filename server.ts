@@ -4,7 +4,7 @@ import {publishScheduledReport,registerSchedulePermit,schedulePermit,scheduledRe
 import {handleOwnerGroupPost,ownerGroupPostGrants,ownerGroupPostInput,previewOwnerGroupPost} from "./owner-group-post";
 import {handleOwnerForumCommand} from "./forum-commands";
 import {topicStateKey} from "./topic-lifecycle";
-import {acceptPrivateEmployeeUpdate,processPrivateEmployeeInputs,type PrivateJob} from "./employee-private";
+import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
 import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
@@ -867,14 +867,37 @@ export default async function plugin(bb: BbPluginApi) {
     return receiveLocalFile(file,file.sourceUpdateId??route.updateId,route.threadId,signal,scope,
       policy?.isolated===true,file.image && !file.document ? maxImageBytes : maxRoutedDocumentBytes);
   }
-  async function receivePrivateFile(file:import("./ingress").GroupExample,job:PrivateJob,signal:AbortSignal) {
-    const cloud=await receiveCloudImage(file,signal);
-    if (cloud) return cloud;
-    const threadId="employee-private:"+job.subject;
-    const scope=["employee-private",String(job.bot),String(job.owner),String(job.subject)];
-    const document=await receiveCloudDocument(file,file.sourceUpdateId??job.updateId,threadId,scope,signal);
-    if (document) return document;
-    return receiveLocalFile(file,file.sourceUpdateId??job.updateId,threadId,signal,scope,true,file.image&&!file.document?maxImageBytes:maxRoutedDocumentBytes);
+  // A person with access talks to an ordinary thread of the employee: same project, environment,
+  // agent and instructions as the owner's private chat. One thread per person, created once.
+  async function bindPrivatePerson(owner:number,bot:number,subject:number,name:string,signal:AbortSignal) {
+    if (store.get<GroupTopicPolicy>(privatePolicyKey(subject))?.privateChat) return true;
+    const dm=store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId);
+    const botUsername=store.get<string>("bot:username");
+    if (!dm?.threadId || !botUsername) return false;
+    const reserve="employee:private:thread:"+bot+":"+subject;
+    const prior=store.get<{at:number;threadId?:string}>(reserve);
+    let threadId=prior?.threadId;
+    if (!threadId) {
+      // An unconfirmed spawn is not repeated for ten minutes, so one person never gets two threads.
+      if (prior && Date.now()-prior.at<10*60_000) return false;
+      const source=await bb.sdk.threads.get({threadId:dm.threadId,signal});
+      if (!source?.environmentId || source.projectId!==dm.projectId) return false;
+      store.put(reserve,{at:Date.now()});
+      const thread=await bb.sdk.threads.spawn({projectId:dm.projectId,title:"Личка: "+(name||subject),
+        visibility:"visible",permissionMode:"accept-edits",
+        input:[{type:"text",visibility:"agent-only",mentions:[],
+          text:"This thread is a private Telegram chat with "+(name||"a person")+" (Telegram ID "+subject+"), who has access to you. Wait for a request. Reply with NO_REPLY, without using tools."}],
+        environment:{type:"reuse",environmentId:source.environmentId},
+        ...(source.providerId && {providerId:source.providerId})});
+      if (!thread.id || thread.projectId!==dm.projectId) return false;
+      threadId=thread.id;
+      store.put(reserve,{at:Date.now(),threadId});
+    }
+    if (owner!==ownerId() || bot!==botId() || stateTransferBusy) return false;
+    bindGroupTopic(store,{chatId:subject,topicId:0,threadId,privateChat:true,ownerOnly:true,allowedSenderIds:[subject],
+      requireMention:false,includeTopicContext:true,searchableHistory:true,retainFullHistory:true,
+      botId:bot,botUsername,ownerId:owner,revision:crypto.randomUUID()},dm.projectId);
+    return true;
   }
   let cleaning=false;
   const inboxTimer=setInterval(async()=>{
@@ -2211,13 +2234,6 @@ export default async function plugin(bb: BbPluginApi) {
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined),cfg.telegramFileHostId,
                   (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum);
               } catch (error) { ingressError = safeError(error); }
-              if (!legacyOperations && cfg.employeePrivateRequests && cfg.installKind==="employee") {
-                await processPrivateEmployeeInputs({
-                  store,owner,bot,transport:groupTransport,
-                  current:()=>ownerId()===owner && botId()===bot && !stateTransferBusy,
-                },signal,(file,job)=>receivePrivateFile(file,job,signal))
-                  .catch(error=>{ ingressError=safeError(error); });
-              }
             }
           } else {
             activeAbort?.abort();
@@ -2365,6 +2381,7 @@ export default async function plugin(bb: BbPluginApi) {
                   store,owner:privateOwner,bot:privateBot,
                   current:()=>ownerId()===privateOwner && botId()===privateBot && !stateTransferBusy,
                   transport:chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),
+                  bindPerson:(subject,name)=>bindPrivatePerson(privateOwner,privateBot,subject,name,signal),
               },u)) {
                 store.put("ingress:offset",u.update_id+1);
                 chatWake?.();
