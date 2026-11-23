@@ -1,3 +1,7 @@
+# 0.9.63
+
+- A message from another thread (the employee, the assistant, a coordinator, a worker) to an agent busy with a Telegram task no longer waits for the end of the turn (С48): it joins the running turn as a service message (the sender's `bb thread tell` reports it delivered at once), and the task's answer still goes to the chat it came from, without that exchange. The place note asks the agent to answer the sender at once with `bb thread tell` and keep it out of the reply to the person.
+
 # 0.9.62
 
 - Far fewer requests to BB (С72). The bridge reads a thread when BB reports it changed (thread:changed), and threads still at work every 2 s for the live status; when everything is quiet a full safety pass runs every 12 s (quiet children once a minute). Without the realtime feed, after a break or with no subscription it reads everything every 2 s as before; after a reconnect a full pass runs at once. Scheduled results read changed threads (all of them once a minute); the consent watch reads only threads with a group turn or an open consent. On the stand: 3716 → 160 requests a minute.
