@@ -20,7 +20,7 @@ import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumS
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
-import {DISCLOSURE,accessModeKey,activeGroupSettings,peopleNote,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
+import {DISCLOSURE,accessModeKey,authorStatus,activeGroupSettings,peopleNote,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
 import {voiceHeader,acknowledge,react,SERVICE_REACTIONS,stepLabel,firstLine,progressText,DEFAULT_REACTION_OPTIONS,type ReactionChooser,type ReactionOption,type Stage} from "./turn-feedback";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
@@ -397,7 +397,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const asks=askNotes(store,botId,r.chatId);
       const rulesBase=policy.privateChat
         ? `Личный чат в Telegram: пишет ${senderName}, у него есть доступ к тебе и он может тебе поручать. Отвечай ему здесь.\n${DISCLOSURE}`
-        : rulesNote({title,settings,role,senderName});
+        : rulesNote({title,settings,role,senderName,status:authorStatus(store,botId,owner,r.senderId)});
       const people=policy.privateChat ? "" : peopleNote(store,botId,owner,r.senderId);
       // С55: the owner wrote without a mention; the agent decides whether the message is meant for it.
       const unaddressed=r.ownerUnaddressed ? "Владелец написал в группе без отметки. Если реплика обращена не к тебе (он говорит с другими людьми), ничего не делай и ответь ровно "+NO_REPLY+"." : "";

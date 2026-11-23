@@ -57,7 +57,7 @@ test("a note never changes who may call the bot",()=>{
   assert.deepEqual(policy.allowedSenderIds,[OWNER]);
 });
 
-test("any member of an employee group gives tasks, with the group rules as text",async()=>{
+test("any member of an employee group may ask within the group, with the group rules as text",async()=>{
   const store=boundStore();
   saveGroupSettings(store as any,BOT,CHAT,{reply:"auto",zones:["Сроки задач"],note:"здесь кладовщики"});
   store.put(accessModeKey,"full");
@@ -73,7 +73,7 @@ test("any member of an employee group gives tasks, with the group rules as text"
   assert.match(rules,/все участники группы/);
   assert.match(rules,/Сроки задач/);
   assert.match(rules,/пояснение, а не разрешение/);
-  assert.match(rules,/Лена — может тебе поручать/);
+  assert.match(rules,/Лена — участник этой группы: может просить в пределах дела этой группы/);
 });
 
 test("a group closed to people with access ignores other members",async()=>{

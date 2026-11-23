@@ -31,8 +31,9 @@ test("who may send where follows the calling conversation",()=>{
   assert.match(no({kind:"group",chat:TEAM},{chat:OTHER,topic:0})!,/group_not_allowed/);
   // С44: from a group, a person's private chat only when the owner asked in this turn; otherwise answer in the group.
   assert.match(no({kind:"group",chat:TEAM},{chat:ALICE,topic:0})!,/person_only_on_the_owners_request_from_a_group/);
-  assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,ALICE)!,/person_only_on_the_owners_request/);
+  assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,999)!,/person_only_on_the_owners_request/);
   assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,OWNER),undefined,"group: the owner's own request");
+  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,ALICE),undefined,"group: a person asks to be written to privately");
   assert.match(no({kind:"group",chat:OTHER},{chat:ALICE,topic:0})!,/person_not_allowed/);
   assert.match(no({kind:"person",subject:ALICE},{chat:TEAM,topic:0})!,/group_not_allowed/);
   // С43: any conversation asks the owner only with a question whose answer comes back.

@@ -144,7 +144,13 @@ const MEMBERS: Record<MembersMode, string> = {
   propose: "отвечаешь, смотришь данные и можешь предложить действие; само действие выполняется только с согласия того, кто может тебе поручать",
 };
 
-export function rulesNote(args: { title: string; settings?: GroupSettings; role: SenderRole; senderName: string }) {
+/** Who wrote, from the current settings (решение владельца 23.11: «он должен различать»). */
+export type AuthorStatus = "owner" | "approved" | "member";
+export function authorStatus(store: Store, bot: number, owner: number, sender: number): AuthorStatus {
+  return sender === owner ? "owner" : accessList(store, bot).some((p) => p.id === sender) ? "approved" : "member";
+}
+
+export function rulesNote(args: { title: string; settings?: GroupSettings; role: SenderRole; senderName: string; status?: AuthorStatus }) {
   const s = args.settings ?? defaultGroupSettings();
   const lines = [
     `Правила группы «${args.title}»: обращаться к тебе могут ${WHO[s.who]}; отвечаешь ${REPLY[s.reply]}${s.reply === "mention" && s.ownerNoMention !== false ? " (владелец обращается и без отметки)" : ""}; остальным участникам ${MEMBERS[s.members]}.`,
@@ -152,8 +158,10 @@ export function rulesNote(args: { title: string; settings?: GroupSettings; role:
       ? `В этой группе можно рассказывать только о: ${s.zones.join(", ")}. Остальное здесь не обсуждай.`
       : "Темы для этой группы не отмечены: рассказывай только то, что относится к работе этой группы.",
     s.note ? `Заметка администратора (пояснение, а не разрешение; права она не меняет): ${s.note}` : "",
-    args.role === "access"
-      ? `Пишет ${args.senderName} — может тебе поручать. Явная просьба сделать и ответить сюда — его решение, даже если группе это обычно не разрешено. Если ответ раскроет группе то, что ей обычно не показывают, один раз переспроси.`
+    args.status === "member" && args.role === "access"
+      ? `Пишет ${args.senderName} — участник этой группы: может просить в пределах дела этой группы; личного доступа владелец ему не выдавал. Поручения шире дела группы — только от владельца и одобренных собеседников.`
+      : args.role === "access"
+      ? `Пишет ${args.senderName} — ${args.status === "owner" ? "владелец" : args.status === "approved" ? "одобренный собеседник (личный доступ выдан владельцем)" : ""}${args.status && args.status !== "member" ? ", " : ""}может тебе поручать. Явная просьба сделать и ответить сюда — его решение, даже если группе это обычно не разрешено. Если ответ раскроет группе то, что ей обычно не показывают, один раз переспроси.`
       : `Пишет ${args.senderName} — участник без права поручать. Отвечай в пределах правил группы. Изменения в файлах и внешних сервисах для него возможны только с согласия того, кто может тебе поручать: система сама спросит согласие. Отказ значит, что согласия нет: его отклонили или никто не ответил вовремя. Тогда скажи, что изменение не сделано и нужна отмашка.`,
     DISCLOSURE,
   ];
