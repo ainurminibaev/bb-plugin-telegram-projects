@@ -3158,8 +3158,10 @@ export class ChatBridge {
           this.save(b);
       } catch (e) {
         const bound = this.binding(b.topicId)?.threadId === b.threadId;
-        // A deleted thread's watch can never deliver again: it is finished, not an error.
-        if (!bound && e instanceof Error && e.message === "thread_archived" && this.s.get("reply:watch:" + b.revision)) {
+        // A deleted thread's watch (gone from BB or marked deleted) can never deliver again: finished, not an error.
+        const gone = e instanceof Error && (e.message === "thread_archived" ||
+          (e as {code?: string}).code === "thread_not_found" || /\b404\b|thread not found/i.test(e.message));
+        if (!bound && gone && this.s.get("reply:watch:" + b.revision)) {
           this.s.del("reply:watch:" + b.revision);
         } else if (bound || this.s.get("reply:watch:" + b.revision)) {
           bindingFailed = true;

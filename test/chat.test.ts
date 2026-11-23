@@ -268,15 +268,18 @@ test("a delivery watch of an archived thread is finished, not an error; an error
   try {
     f.store.put("chat:binding:100", {topicId: 100, projectId: "proj_one", threadId: "thr_one", revision: "current", ready: false, cursor: 99});
     f.store.put("reply:watch:arch", {owner: OWNER_ID, topicId: 100, projectId: "proj_one", threadId: "arch", revision: "arch", cursor: 99});
+    f.store.put("reply:watch:gone", {owner: OWNER_ID, topicId: 100, projectId: "proj_one", threadId: "gone", revision: "gone", cursor: 99});
     const original = f.sdk.threads.get;
     let broken = false;
     f.sdk.threads.get = async (a: any) => {
       if (a.threadId === "arch") return {...(await original({threadId: "thr_one"})), id: "arch", archivedAt: 1};
+      if (a.threadId === "gone") throw Object.assign(Error("HTTP 404: Thread not found"), {code: "thread_not_found"});
       if (a.threadId === "thr_one" && broken) throw Error("timeout");
       return original(a);
     };
     await f.bridge.observe();
     assert.equal(f.store.get("reply:watch:arch"), undefined);       // read once more, then finished
+    assert.equal(f.store.get("reply:watch:gone"), undefined);       // a thread gone from BB: finished
     assert.equal(f.bridge.status().lastError, null);
     broken = true;
     await f.bridge.observe();
