@@ -238,7 +238,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     // Lazy: a transport that cannot be built must not break the job (the reaction is best effort).
     const reactTg:Telegram=(method,body)=>transport(r.chatId)(method,body);
     // С45: every message that reached this agent gets a visible sign at once: 👀, then the chosen reaction.
-    if (r.updateId>0 && !job.acked) {
+    // A message of the owner without a mention may not be for the agent (С55): no sign until it answers.
+    if (r.updateId>0 && !job.acked && !r.ownerUnaddressed) {
       job.acked=true; job.startedAt??=Date.now(); store.put(key,job);
       const set=reactions?.();
       void acknowledge(reactTg,r.chatId,r.messageId,r.text,set?.chooser,set?.options ?? DEFAULT_REACTION_OPTIONS,
@@ -246,7 +247,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     }
     // С46: one live status message: the agent's first line and the current step; guests see the step only.
     const updateProgress=async()=>{
-      if (!visibleProgress || policy.ownerSharedProject || r.updateId<=0 || job.progressId===null) return;
+      if (!visibleProgress || policy.ownerSharedProject || r.ownerUnaddressed || r.updateId<=0 || job.progressId===null) return;
       const text=progressText({agentLine:job.agentLine,step:job.step,guest:job.guest,startedAt:job.startedAt ?? Date.now()});
       if (!text || text===job.progressText || Date.now()-(job.progressAt ?? 0)<5000) return;
       try {
@@ -399,7 +400,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         ? `Личный чат в Telegram: пишет ${senderName}, у него есть доступ к тебе и он может тебе поручать. Отвечай ему здесь.\n${DISCLOSURE}`
         : rulesNote({title,settings,role,senderName});
       const people=policy.privateChat ? "" : peopleNote(store,botId,owner,r.senderId);
-      const rules=[rulesBase,people,asks].filter(Boolean).join("\n");
+      // С55: the owner wrote without a mention; the agent decides whether the message is meant for it.
+      const unaddressed=r.ownerUnaddressed ? "Владелец написал в группе без отметки. Если реплика обращена не к тебе (он говорит с другими людьми), ничего не делай и ответь ровно "+NO_REPLY+"." : "";
+      const rules=[rulesBase,people,asks,unaddressed].filter(Boolean).join("\n");
       const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
       if (!allowed() || !await safeToSend()) {finish("revoked");continue;}

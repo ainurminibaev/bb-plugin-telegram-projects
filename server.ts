@@ -132,6 +132,7 @@ const personSchema = z.object({ id: z.number().int().positive().safe(), name: z.
 const groupRightsSchema = z.object({
   version: z.number(), who: z.enum(["access", "all"]), reply: z.enum(["mention", "auto"]),
   members: z.enum(["silent", "read", "propose"]), zones: z.array(z.string().max(64)).max(50), note: z.string().max(500),
+  ownerNoMention: z.boolean().optional(),
 });
 export const rpcContract = defineRpcContract({
   rightsAccess: { input: z.null(), output: z.array(personSchema) },
@@ -140,7 +141,7 @@ export const rpcContract = defineRpcContract({
   rightsGroupSet: {
     input: z.object({ chatId: z.number().int(), who: z.enum(["access", "all"]).optional(), reply: z.enum(["mention", "auto"]).optional(),
       members: z.enum(["silent", "read", "propose"]).optional(), zones: z.array(z.string().max(64)).max(50).optional(),
-      note: z.string().max(500).optional() }).strict(),
+      note: z.string().max(500).optional(), ownerNoMention: z.boolean().optional() }).strict(),
     output: groupRightsSchema,
   },
   reconcileEmployeeTicket:{input:z.object({idempotencyKey:z.string().regex(/^[a-f0-9]{32}$/)}).strict(),output:z.object({state:z.string(),messageId:z.number().optional()})},

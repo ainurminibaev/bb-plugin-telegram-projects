@@ -107,6 +107,7 @@ export function groupScreen(title: string, chat: number, s: GroupSettings, lock?
     `Группа «${title}»`,
     "Ко мне обращаются: " + WHO_LINE[who],
     "Отвечаю: " + REPLY_LINE[s.reply],
+    ...(s.reply === "mention" ? ["Владельцу: " + (s.ownerNoMention === false ? "тоже только по отметке" : "отвечаю и без отметки, когда реплика мне")] : []),
     membersAreAccess ? "Все участники группы могут мне поручать." : "Остальным участникам: " + (who === "access" ? "не отвечаю, пока ко мне обращаются только те, кто может поручать" : MEMBERS_LINE[s.members]),
     ...(who === "all" && !membersAreAccess ? [MEMBERS_HINT[s.members]] : []),
     "Можно рассказывать: " + (s.zones.length ? s.zones.join(", ") : "всё, что относится к работе группы"),
@@ -117,6 +118,7 @@ export function groupScreen(title: string, chat: number, s: GroupSettings, lock?
   const rows: Button[][] = [
     [{ text: lock ? WHO_BUTTON.access + " 🔒" : WHO_BUTTON[s.who], callback_data: `rs:w:${chat}` }],
     [{ text: REPLY_BUTTON[s.reply], callback_data: `rs:r:${chat}` }],
+    ...(s.reply === "mention" ? [[{ text: s.ownerNoMention === false ? "Владелец: только по отметке" : "Владелец: и без отметки", callback_data: `rs:o:${chat}` }]] : []),
     ...(who === "all" && !membersAreAccess ? [[{ text: MEMBERS_BUTTON[s.members], callback_data: `rs:m:${chat}` }]] : []),
     [{ text: "Что можно рассказывать ›", callback_data: `rs:z:${chat}` }],
     [{ text: "✏️ Заметка", callback_data: `rs:n:${chat}` }],
@@ -386,6 +388,7 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
     }
     s = saveGroupSettings(ctx.store, ctx.bot, chat, { who: s.who === "access" ? "all" : "access" });
   } else if (action === "r") s = saveGroupSettings(ctx.store, ctx.bot, chat, { reply: s.reply === "mention" ? "auto" : "mention" });
+  else if (action === "o") s = saveGroupSettings(ctx.store, ctx.bot, chat, { ownerNoMention: s.ownerNoMention === false });
   else if (action === "m") s = saveGroupSettings(ctx.store, ctx.bot, chat, { members: NEXT_MEMBERS[s.members] });
   else if (action === "zt") {
     const zone = ctx.zones[Number(extra)];

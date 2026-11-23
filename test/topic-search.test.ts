@@ -36,7 +36,7 @@ for (const topicId of [0,3]) test("permitted mention retrieves older context in 
    del(k){db.prepare("DELETE FROM state WHERE key=?").run(k);},
    list(){throw Error("unexpected scan");},atomic(f){db.transaction(f)();},findTopicHistory:history.find,
   };
-  const p:GroupTopicPolicy={chatId:-100123,topicId,threadId:"t",ownerOnly:true,requireMention:true,includeTopicContext:true,searchableHistory:true,botId:1,botUsername:"bot"};
+  const p:GroupTopicPolicy={chatId:-100123,topicId,threadId:"t",ownerOnly:true,requireMention:true,ownerWithoutMention:false,includeTopicContext:true,searchableHistory:true,botId:1,botUsername:"bot"};
   store.put(`group:policy:-100123:${topicId}`,p);
   function send(id:number,text:string,edit=false){
    acceptGroupUpdate(store,{update_id:edit?32:id,[edit?"edited_message":"message"]:{chat:{type:topicId?"supergroup":"group",id:p.chatId},message_id:id,...(topicId?{message_thread_id:topicId}:{}),from:{id:2},

@@ -25,6 +25,8 @@ export type GroupTopicPolicy = {
   ownerSharedProject?: true;
   ownerTopicManagerProjectId?: string;
   requireMention: boolean;
+  /** С55: the owner's message reaches the agent without a mention (default on); the agent decides whether it is meant for it. */
+  ownerWithoutMention?: boolean;
   addressName?: string;
   allowedSenderIds?: number[];
   includeTopicContext?: boolean;
@@ -136,7 +138,7 @@ function contextMediaForReply(store:Store, policy:GroupTopicPolicy, lines:TopicL
 }
 
 export type Ingress =
-  | {kind: "group"; ownerTopicText?: string; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string}
+  | {kind: "group"; ownerTopicText?: string; ownerUnaddressed?: true; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
   | { kind: "tasks"; topicId: number }
   | { kind: "pair"; userId: number }
@@ -179,7 +181,14 @@ export function routeUpdate(
     });
     const replyAuthor=m.reply_to_message?.from;
     const repliesToDifferentBot=replyAuthor?.is_bot===true && replyAuthor.id!==group.botId;
-    if (group.requireMention && (!addressed || repliesToDifferentBot)) return {kind: "ignore"};
+    // С55: the owner talks to the agent without a mention, unless the message plainly goes to someone else:
+    // a reply to another person's message or a mention of another person.
+    const toSomeoneElse=(!!replyAuthor && replyAuthor.id!==group.botId && m.reply_to_message.message_id!==topicId) ||
+      entities.some((e: any) => (e.type==="mention" && text.slice(e.offset, e.offset + e.length).toLowerCase()!==username) ||
+        (e.type==="text_mention" && e.user?.id!==group.botId));
+    const ownerUnaddressed=group.requireMention && !addressed && from.id===owner &&
+      group.ownerWithoutMention!==false && !toSomeoneElse && !repliesToDifferentBot && !group.ownerSharedProject;
+    if (group.requireMention && !ownerUnaddressed && (!addressed || repliesToDifferentBot)) return {kind: "ignore"};
     const reply = m.reply_to_message;
     const sameTopic = reply?.chat?.id === group.chatId && (reply.message_thread_id ?? 0) === topicId;
     const repliedToMessage = sameTopic && reply.message_id !== topicId;
@@ -196,7 +205,7 @@ export function routeUpdate(
     const senderName = [from.first_name, from.last_name].filter(Boolean).join(" ").slice(0, 64) || undefined;
     const ownerTopicText = from.id===owner && m.chat.type==="supergroup" && typeof m.text==="string" &&
       !m.forward_origin && !m.forward_date && !m.is_automatic_forward && !m.via_bot ? m.text : undefined;
-    return {kind: "group", ...(ownerTopicText && {ownerTopicText}), chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
+    return {kind: "group", ...(ownerTopicText && {ownerTopicText}), ...(ownerUnaddressed && {ownerUnaddressed:true as const}), chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
       threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice}), ...(examples.length && {examples})};
   }
   if (!m || m.chat?.type !== "private" || from?.id !== m.chat?.id)

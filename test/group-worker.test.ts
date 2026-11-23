@@ -126,7 +126,7 @@ test("only an authorized voice reply is transcribed and queued with the chosen T
  store.put("group:project:group-project",true);
  store.put("group:thread:group","group:policy:-111:3");
  store.put("group:policy:-111:3",{chatId:-111,topicId:3,threadId:"group",botId:5,botUsername:"bot",
-  ownerOnly:true,allowedSenderIds:[],requireMention:true,includeTopicContext:true,ownerId:8});
+  ownerOnly:true,allowedSenderIds:[],requireMention:true,ownerWithoutMention:false,includeTopicContext:true,ownerId:8});
  const reply={message_id:12,message_thread_id:3,from:{id:5},chat,document:{file_name:"first.pdf"}};
  function voice(id:number,user:number,target?:typeof reply) {
   return acceptGroupUpdate(store,{update_id:id,message:{chat,date:20,message_id:id,message_thread_id:3,
@@ -371,7 +371,7 @@ for (const kind of ["photo","document"] as const) test(`forum ${kind} album subm
       .map(([key,value])=>({key,value:structuredClone(value) as T}))};
   const chat={id:-111,type:"supergroup"}, bot=5, owner=7, topic=3;
   bindGroupTopic(store,{chatId:chat.id,topicId:topic,threadId:"t",botId:bot,botUsername:"bot",
-    ownerOnly:true,requireMention:true,includeTopicContext:true,revision:"album-forum"},"group-project");
+    ownerOnly:true,requireMention:true,ownerWithoutMention:false,includeTopicContext:true,revision:"album-forum"},"group-project");
   now+=2000;
   const root=await mkdtemp(join(tmpdir(),"forum-album-"));
   const output=join(root,"outputs");

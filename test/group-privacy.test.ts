@@ -29,7 +29,7 @@ function fixture(isolated:boolean,topicId:number) {
   let sequence=10;
   const policy:GroupTopicPolicy={chatId,topicId,ownerId:owner,botId:bot,botUsername:"fixture_bot",
     threadId:"group-worker",ownerOnly:true,allowedSenderIds:isolated?[participant]:[],requireMention:true,addressName:"Вахтенный",
-    isolated,includeTopicContext:true,searchableHistory:true,revision:"origin"};
+    ownerWithoutMention:false,isolated,includeTopicContext:true,searchableHistory:true,revision:"origin"};
   bindGroupTopic(store,policy,"group-project");
   const sibling={...policy,topicId:5,threadId:"sibling-worker",revision:"sibling"};
   const other={...policy,chatId:-1008765432,threadId:"other-worker",revision:"other",addressName:"Другой",

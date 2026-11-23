@@ -21,6 +21,8 @@ export type GroupSettings = {
   note: string;
   /** Group memory: "shared" sees the other shared conversations, "separate" only this group. */
   memory?: "shared" | "separate";
+  /** С55: the owner reaches the agent here without a mention; on unless switched off. */
+  ownerNoMention?: boolean;
 };
 export type Person = { id: number; name: string };
 export type SenderRole = "access" | "member" | "none";
@@ -108,6 +110,7 @@ export function senderRole(store: Store, bot: number, owner: number | undefined,
 export function effectiveGroupPolicy(store: Store, policy: GroupTopicPolicy, owner: number): GroupTopicPolicy {
   if (policy.isolated || policy.ownerTopic || policy.ownerSharedProject || policy.privateChat) return policy;
   const s = activeGroupSettings(store, policy.botId, policy.chatId);
+  const ownerWithoutMention = s ? s.ownerNoMention !== false : policy.ownerWithoutMention;
   const access = [...new Set([owner, ...accessList(store, policy.botId).map((p) => p.id)])];
   const employee = installKind(store) === "employee";
   const open = s ? s.who === "all" && (employee || s.members !== "silent") && !openGroupLock(store) : false;
@@ -116,6 +119,7 @@ export function effectiveGroupPolicy(store: Store, policy: GroupTopicPolicy, own
     ownerOnly: !open,
     allowedSenderIds: open ? undefined : access,
     requireMention: s ? s.reply === "mention" : policy.requireMention,
+    ...(ownerWithoutMention !== undefined && { ownerWithoutMention }),
   };
 }
 
@@ -143,7 +147,7 @@ const MEMBERS: Record<MembersMode, string> = {
 export function rulesNote(args: { title: string; settings?: GroupSettings; role: SenderRole; senderName: string }) {
   const s = args.settings ?? defaultGroupSettings();
   const lines = [
-    `Правила группы «${args.title}»: обращаться к тебе могут ${WHO[s.who]}; отвечаешь ${REPLY[s.reply]}; остальным участникам ${MEMBERS[s.members]}.`,
+    `Правила группы «${args.title}»: обращаться к тебе могут ${WHO[s.who]}; отвечаешь ${REPLY[s.reply]}${s.reply === "mention" && s.ownerNoMention !== false ? " (владелец обращается и без отметки)" : ""}; остальным участникам ${MEMBERS[s.members]}.`,
     s.zones.length
       ? `В этой группе можно рассказывать только о: ${s.zones.join(", ")}. Остальное здесь не обсуждай.`
       : "Темы для этой группы не отмечены: рассказывай только то, что относится к работе этой группы.",
