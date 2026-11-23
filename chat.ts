@@ -250,6 +250,10 @@ export class ChatBridge {
   private busyThreads = new Set<string>();
   private childParent = new Map<string, string>();
   private lastFull = 0;
+  private lastDeep = 0;
+  private deepNow = true;
+  private focusNow = new Set<string>();
+  private childSeen = new Map<string, string>();
   private lastObserveStart = 0;
   private recentInputAt = 0;
   private validCache = new Map<string, {t: any; at: number}>();
@@ -258,8 +262,8 @@ export class ChatBridge {
   noteThreadChange(id: string) {
     this.validCache.delete(id);
     this.dirty.add(id);
-    const parent = this.childParent.get(id);
-    if (parent) this.dirty.add(parent);
+    // A change deep in the tree marks its whole chain, so the bound root is read and its children with it.
+    for (let p = this.childParent.get(id), n = 0; p && n < 20; p = this.childParent.get(p), n++) this.dirty.add(p);
     this.d.wake?.();
   }
   /** С72: the change feed is up or down; back up after a break — events may be lost, a full pass at once. */
@@ -687,6 +691,10 @@ export class ChatBridge {
             child.visibility === "hidden" || this.s.get("group:thread:" + child.id)) continue;
         const key = "reply:child-cursor:" + child.id;
         if (this.s.get(key) === undefined) continue;
+        // С72: a child that does not work and did not change since it was last read waits for the deep pass.
+        const working = ["active", "starting", "pending", "stopping"].includes(child.status);
+        if (!this.deepNow && !working && !this.focusNow.has(child.id) && this.childSeen.get(child.id) === child.status) continue;
+        this.childSeen.set(child.id, child.status);
         seen.add(child.id);
         parents.push(child.id);
         const events = await this.d.sdk.threads.events.list({threadId:child.id,
@@ -2937,6 +2945,10 @@ export class ChatBridge {
     if (full) this.lastFull = Date.now();
     const focus = new Set([...this.dirty, ...this.busyThreads]);
     this.dirty.clear();
+    // Quiet children are read on a deep pass once a minute; changed or working ones on any pass.
+    this.deepNow = !this.changeFeed || (full && Date.now() - this.lastDeep >= 60_000);
+    if (this.deepNow) this.lastDeep = Date.now();
+    this.focusNow = focus;
     this.childCache.clear();
     await this.separateQueuedTasks();
     const watches = this.deliveryWatches().filter(w=>!w.questionOnly);
