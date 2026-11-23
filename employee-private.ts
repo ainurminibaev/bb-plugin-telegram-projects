@@ -13,25 +13,25 @@ type Dependencies={store:Store;owner:number;bot:number;transport:(chatId:number)
   /** Binds the person's private chat to an ordinary employee thread. Returns false while that is not possible. */
   bindPerson:(subject:number,name:string)=>Promise<boolean>;
   /** С62: asks the person's conversation to write first — a short greeting and what the agent can do. */
-  greetPerson?:(subject:number,name:string,talkedBefore:boolean)=>Promise<boolean>};
+  greetPerson?:(subject:number,name:string,talkedBefore:boolean,late?:boolean)=>Promise<boolean>};
 const greetedKey=(bot:number,subject:number)=>`employee:private:greeted:${bot}:${subject}`;
 
 /**
  * С62: right after approval the person gets a conversation and the agent writes first. The mark is put before the turn
  * is sent, so a greeting is never asked twice; a failed bind leaves no mark and the next pass retries.
  */
-export async function greetApproved(d:Dependencies,subject:number,name:string) {
+export async function greetApproved(d:Dependencies,subject:number,name:string,late=false) {
   if (!d.greetPerson || d.store.get(greetedKey(d.bot,subject)) || !hasAccess(d.store,d.bot,d.owner,subject)) return false;
   const talkedBefore=!!d.store.get(privatePolicyKey(subject));
   if (!talkedBefore && !await d.bindPerson(subject,name).catch(()=>false)) return false;
   d.store.put(greetedKey(d.bot,subject),Date.now());
-  return d.greetPerson(subject,name,talkedBefore).catch(()=>false);
+  return d.greetPerson(subject,name,talkedBefore,late).catch(()=>false);
 }
 
 /** Approved people the agent has not been asked to greet yet (approved before С62, or a bind that failed). */
 export async function greetPendingApproved(d:Dependencies) {
   for (const {value} of d.store.list<Access & {name?:string}>(`employee:private:access:${d.bot}:${d.owner}:`))
-    if (value.state==="approved" && positive(value.subject)) await greetApproved(d,value.subject,value.name ?? "");
+    if (value.state==="approved" && positive(value.subject)) await greetApproved(d,value.subject,value.name ?? "",true);
 }
 const accessKey=(bot:number,owner:number,subject:number)=>`employee:private:access:${bot}:${owner}:${subject}`;
 const nonceKey=(bot:number,owner:number,nonce:string)=>`employee:private:decision:${bot}:${owner}:${nonce}`;
