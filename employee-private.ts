@@ -25,6 +25,8 @@ export async function greetApproved(d:Dependencies,subject:number,name:string,la
   const talkedBefore=!!d.store.get(privatePolicyKey(subject));
   if (!talkedBefore && !await d.bindPerson(subject,name).catch(()=>false)) return false;
   d.store.put(greetedKey(d.bot,subject),Date.now());
+  // Approved earlier and already in a conversation: the agent has talked to them; nothing more to send.
+  if (late && talkedBefore) return true;
   return d.greetPerson(subject,name,talkedBefore,late).catch(()=>false);
 }
 

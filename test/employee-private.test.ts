@@ -126,7 +126,7 @@ test("С62: on approval the person gets a conversation at once and the agent is 
   assert.equal(h.greetings.length,1,"no second greeting");
 });
 
-test("С62: people approved before the greeting existed get it once; an existing conversation is reused",async()=>{
+test("С62: people approved earlier get one greeting once; whoever already talked to the agent gets nothing",async()=>{
   const h=harness(true);
   const BOB=22;
   for (const [who,talked] of [[ALICE,false],[BOB,true]] as const) {
@@ -137,7 +137,8 @@ test("С62: people approved before the greeting existed get it once; an existing
   // Approved but not bound yet: writing first is allowed.
   assert.equal(sendRefusal(h.store as any,BOT,OWNER,{kind:"owner"},{chat:ALICE,topic:0},()=>[]),undefined);
   await greetPendingApproved(h.d as any);
-  assert.deepEqual(h.greetings.sort((a,b)=>a.subject-b.subject),[{subject:ALICE,talkedBefore:false},{subject:BOB,talkedBefore:true}]);
+  // Bob already has a conversation: nothing is sent to him; Alice gets a plain greeting.
+  assert.deepEqual(h.greetings,[{subject:ALICE,talkedBefore:false}]);
   await greetPendingApproved(h.d as any);
-  assert.equal(h.greetings.length,2);
+  assert.equal(h.greetings.length,1,"no repeat after a restart");
 });
