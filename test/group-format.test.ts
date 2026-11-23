@@ -53,3 +53,6 @@ test("a long answer is split into whole parts", async () => {
 });
 
 test("plain words keep escaped characters", () => assert.equal(plainFromHtml("<b>a &lt; b &amp; c</b>"), "a < b & c"));
+
+test("a mention of a person by id becomes a Telegram mention, not raw brackets", async () =>
+  assert.equal(await send("[Виктор](tg://user?id=12345), встреча в 16:00"), '<a href="tg://user?id=12345">Виктор</a>, встреча в 16:00'));
