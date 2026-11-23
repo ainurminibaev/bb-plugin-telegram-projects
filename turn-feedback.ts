@@ -169,3 +169,10 @@ export function progressText(o: { agentLine?: string; step?: string; guest?: boo
   if (o.step) return `⏳ ${o.step}`;
   return (o.now ?? Date.now()) - o.startedAt >= (o.quietMs ?? 8000) ? "⏳ Работаю над задачей…" : undefined;
 }
+
+/** С56: «Голосовое (3 мин 12 с): » — the length goes with the transcript, so a long one is handled as such. */
+export function voiceHeader(seconds: number | undefined, label = "Голосовое"): string {
+  const s = Math.max(0, Math.round(seconds ?? 0));
+  if (!s) return label + ": ";
+  return `${label} (${s >= 60 ? `${Math.floor(s / 60)} мин ${s % 60} с` : `${s} с`}): `;
+}

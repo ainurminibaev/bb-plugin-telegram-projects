@@ -9,7 +9,7 @@ import {maxOutboundDocumentBytes,outboundMessagePayload} from "./outbound-messag
 import {routedCaption} from "./routed-message";
 import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interactionOpen } from "./codex-async-question";
 import { splitChildResultClaims, stripTelegramMarkers, ReplyRoutes, type ReplyRoute } from "./reply-routing";
-import { acknowledge, react, SERVICE_REACTIONS, stepLabel, firstLine, progressText, DEFAULT_REACTION_OPTIONS, type ReactionChooser, type ReactionOption, type Stage } from "./turn-feedback";
+import { voiceHeader, acknowledge, react, SERVICE_REACTIONS, stepLabel, firstLine, progressText, DEFAULT_REACTION_OPTIONS, type ReactionChooser, type ReactionOption, type Stage } from "./turn-feedback";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
 import { TelegramHandoff, type HandoffJob } from "./handoff";
 import { ChatPairs, OWNER_MESSAGE } from "./chat-pair";
@@ -1635,7 +1635,8 @@ export class ChatBridge {
       }
       try {
         const transcript = await this.d.transcribe(input.voice);
-        text = [text, transcript].filter(Boolean).join("\n");
+        // С56: the agent knows how long the voice message was (a long one gets a PDF and a scheme).
+        text = [text, transcript ? voiceHeader(input.voice.duration) + transcript : ""].filter(Boolean).join("\n");
         if (transcript) voiceTranscripts.observe?.(input.chatId, input.messageId, transcript);
         if (this.d.signal.aborted) return;
       } catch {

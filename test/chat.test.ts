@@ -1782,7 +1782,7 @@ test("voice at the transcription limit preserves the final words in BB and Teleg
     assert.ok(routed.kind === "chat" && routed.input.voice);
     await f.bridge.handle(routed.input);
     await f.bridge.flush();
-    assert.equal(f.calls.find(c => c[0] === "send")[1].input[0].text,transcript);
+    assert.equal(f.calls.find(c => c[0] === "send")[1].input[0].text,"Голосовое (10 мин 0 с): "+transcript);   // С56: length
     assert.ok(f.sent.some(m => m.text?.includes("последние слова")));
   } finally {f.cleanup();}
 });

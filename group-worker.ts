@@ -22,7 +22,7 @@ import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
 import {DISCLOSURE,accessModeKey,activeGroupSettings,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
-import {acknowledge,react,SERVICE_REACTIONS,stepLabel,firstLine,progressText,DEFAULT_REACTION_OPTIONS,type ReactionChooser,type ReactionOption,type Stage} from "./turn-feedback";
+import {voiceHeader,acknowledge,react,SERVICE_REACTIONS,stepLabel,firstLine,progressText,DEFAULT_REACTION_OPTIONS,type ReactionChooser,type ReactionOption,type Stage} from "./turn-feedback";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
 type Job = {
@@ -271,7 +271,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           const matches=store.findTopicHistory?.(historyPrefix(r.chatId,r.topicId),transcript,r.searchBefore)??[];
           r.text=topicPassages(matches,r.chatId)+r.text;
         }
-        r.text += "\nГолосовое обращение: " + transcript;
+        r.text += "\n" + voiceHeader(r.voice.duration,"Голосовое обращение") + transcript;
         voiceTranscripts.observe?.(r.chatId, r.messageId, transcript);
         delete r.voice;
       } catch {
