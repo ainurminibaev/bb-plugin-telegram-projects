@@ -21,6 +21,7 @@ import {groupFollowUpInput,bbReminderInput,isDirectOwnerRequest,resolveGroupMess
 import {groupExecutor} from "./isolated-client";
 import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf,isolatedImageInput,isolatedImagePart,readIsolatedImage,isolatedDocumentInput,isolatedDocumentPart,readIsolatedDocument,validateIsolatedPurpose} from "./isolated-group";
 import {cleanInbox} from "./inbox-retention";
+import {allInboxes, inboxFor} from "./project-inbox";
 import {openTopicSearch,historyPrefix,topicPassages} from "./topic-search";
 import { transcribeWithVoiceRouter } from "./voice-router";
 import {MAX_INCOMING_BYTES, maxRoutedDocumentBytes, safeTelegramFilename, saveLocalTelegramFile, setUploadLimit, telegramApiRoot as checkedApiRoot, uploadLimit } from "./telegram-files";
@@ -418,6 +419,9 @@ export default async function plugin(bb: BbPluginApi) {
     telegramInboxRoot: {
       type: "string", label: "Private received-file directory", default: "",
     },
+    projectInboxRoots: {
+      type: "string", label: "Received-file directory per project (proj_id=/path, comma separated; others use the shared one)", default: "",
+    },
     voiceRouterPath: {
       type: "string", label: "Local voice router executable (empty: BB transcription)", default: "",
     },
@@ -627,10 +631,11 @@ export default async function plugin(bb: BbPluginApi) {
         const f=archive.file(bot,args.file.chat,args.file.message);
         if (f?.file_removed) throw Error(FILE_REMOVED);
         if (!f?.file_id) throw Error("message_has_no_file");
-        if (!cfg.telegramInboxRoot) throw Error("inbox_not_configured");
+        const inboxRoot=await inboxOf(threadId,cfg);
+        if (!inboxRoot) throw Error("inbox_not_configured");
         const info=await telegram(botToken,signal,60_000,undefined,apiRoot)<{file_path?:string}>("getFile",{file_id:f.file_id});
         if (!info.file_path) throw Error("file_unavailable");
-        const dir=join(cfg.telegramInboxRoot,"archive",String(bot),String(args.file.chat),String(args.file.message));
+        const dir=join(inboxRoot,"archive",String(bot),String(args.file.chat),String(args.file.message));
         await mkdir(dir,{recursive:true,mode:0o750});
         const name=safeTelegramFilename(f.file_name || info.file_path.split("/").at(-1) || "file");
         const path=join(dir,name);
@@ -884,11 +889,17 @@ export default async function plugin(bb: BbPluginApi) {
     const env=await bb.sdk.environments.get({environmentId:thread.environmentId});
     if (env.hostId!==fileHostId) throw Error("attachment_wrong_host");
   }
+  async function inboxOf(threadId:string,c:{telegramInboxRoot:string;projectInboxRoots?:string}) {
+    if (!c.projectInboxRoots) return c.telegramInboxRoot;
+    const thread=await bb.sdk.threads.get({threadId}).catch(()=>undefined);
+    return inboxFor(c.projectInboxRoots,c.telegramInboxRoot,thread?.projectId);
+  }
   async function receiveLocalFile(incoming:{fileId:string;name:string;size:number},updateId:number,
     threadId:string,fileSignal:AbortSignal,scope?:string[],isolated=false,maxBytes?:number) {
     const c = await settings.get();
+    const inboxRoot = await inboxOf(threadId,c);
     if (checkedApiRoot(c.telegramApiRoot) === "https://api.telegram.org" ||
-        !c.telegramLocalRoot || !c.telegramInboxRoot)
+        !c.telegramLocalRoot || !inboxRoot)
       throw Error("attachment_local_api_required");
     if (!isolated) await assertTelegramThreadHost(threadId,c.telegramFileHostId);
     if (incoming.size > 2 * 1024 * 1024 * 1024) throw Error("attachment_too_large");
@@ -896,7 +907,7 @@ export default async function plugin(bb: BbPluginApi) {
     const file = await tg("getFile", {file_id:incoming.fileId});
     if (typeof file.file_path !== "string") throw Error("attachment_file_invalid");
     return saveLocalTelegramFile({sourcePath:file.file_path,
-      localRoot:c.telegramLocalRoot, inboxRoot:scope ? join(c.telegramInboxRoot,...scope) : c.telegramInboxRoot,
+      localRoot:c.telegramLocalRoot, inboxRoot:scope ? join(inboxRoot,...scope) : inboxRoot,
       threadId:isolated ? "isolated:"+threadId : threadId, updateId:updateId, fileId:incoming.fileId, name:incoming.name,
       expectedBytes:incoming.size || undefined, maxBytes, signal:fileSignal});
   }
@@ -911,13 +922,14 @@ export default async function plugin(bb: BbPluginApi) {
   async function receiveCloudDocument(file:import("./ingress").GroupExample,updateId:number,
     threadId:string,scope:string[],signal:AbortSignal) {
     const c=await settings.get();
-    if (checkedApiRoot(c.telegramApiRoot)!=="https://api.telegram.org" || !c.telegramInboxRoot) return;
+    const inboxRoot=await inboxOf(threadId,c);
+    if (checkedApiRoot(c.telegramApiRoot)!=="https://api.telegram.org" || !inboxRoot) return;
     const configuredToken=await botToken();
     const requestToken=async()=>configuredToken;
     const getFile=telegram(requestToken,signal,30_000,undefined,async()=>"https://api.telegram.org");
     if (file.size>maxRoutedDocumentBytes) throw Error("attachment_too_large");
     return receiveCloudTelegramDocument(requestToken,await getFile("getFile",{file_id:file.fileId}),{
-      ...file,updateId,threadId:"isolated:"+threadId,inboxRoot:join(c.telegramInboxRoot,...scope),signal,
+      ...file,updateId,threadId:"isolated:"+threadId,inboxRoot:join(inboxRoot,...scope),signal,
     },fetch,!!file.pdf);
   }
   async function receiveGroupFile(file:import("./ingress").GroupExample,
@@ -971,12 +983,12 @@ export default async function plugin(bb: BbPluginApi) {
     return true;
   }
   // Retention of the conversation archive (В2): texts forever, files for archiveFileDays (0 — forever).
-  async function expireArchiveFiles(cfg:{archiveFileDays?:number;telegramInboxRoot?:string}) {
+  async function expireArchiveFiles(cfg:{archiveFileDays?:number;telegramInboxRoot?:string;projectInboxRoots?:string}) {
     const days=Number(cfg.archiveFileDays ?? 183);
     if (!archive || !(days>0)) return;
     for (const g of archive.expireFiles(Math.floor(Date.now()/1000-days*86400)))
-      if (cfg.telegramInboxRoot)
-        await rm(join(cfg.telegramInboxRoot,"archive",String(g.bot),String(g.chat),String(g.message)),{recursive:true,force:true});
+      for (const root of allInboxes(cfg.projectInboxRoots,cfg.telegramInboxRoot))
+        await rm(join(root,"archive",String(g.bot),String(g.chat),String(g.message)),{recursive:true,force:true});
   }
   // The history kept before the archive existed moves into it once per start; repeating adds nothing.
   function importOldHistory() {
@@ -1002,8 +1014,10 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       const cfg=await settings.get();
       await expireArchiveFiles(cfg).catch(()=>{});
-      if((!cfg.enabled && !cfg.isolatedGroupProject && !cfg.isolatedPrivateProject) || !cfg.telegramInboxRoot || !existsSync(cfg.telegramInboxRoot))return;
-      await cleanInbox(cfg.telegramInboxRoot,async id=>{
+      if(!cfg.enabled && !cfg.isolatedGroupProject && !cfg.isolatedPrivateProject)return;
+      for (const root of allInboxes(cfg.projectInboxRoots,cfg.telegramInboxRoot)) {
+      if(!existsSync(root))continue;
+      await cleanInbox(root,async id=>{
         if (id.startsWith("isolated:")) {
           const remoteId=id.slice("isolated:".length);
           return !store.list<{route?:{threadId?:string}}>("group:in:").some(row=>row.value.route?.threadId===remoteId);
@@ -1021,6 +1035,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
         return true;
       });
+      }
     } catch { console.warn("Telegram inbox maintenance deferred"); }
     finally {cleaning=false;}
   },3600_000);
