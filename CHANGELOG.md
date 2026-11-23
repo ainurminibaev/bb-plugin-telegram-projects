@@ -1,3 +1,14 @@
+# 0.9.60
+
+- General of a forum (topic 0) can be bound and is picked up by default, also in the owner's own forum; a reply inside General stays in General, topic messages never reach it.
+- Thread titles follow their Telegram place: «<тема> — группа «<короткое имя>»», General the same, «группа «…»», «личка «<имя>»». The short name is a group setting (`shortName`), by default the group's title. A renamed topic or group renames the thread; a title set by hand is kept; the assistant pair's threads are not touched.
+- `/model` in a group or topic for the owner: the current provider and model with the choices; a model of this conversation from the next message; another provider — a new thread of it takes the topic. Other topics keep theirs.
+- The live status line is the agent's own words about the request; after a few quiet seconds «Думаю над ответом…»; a step only from a short list of plain actions, never service mechanics.
+- A new topic gets a fitting standard icon from the quick decision service (`topicIcons`).
+- `send --reply-to` (a PDF as a reply to its scheme picture).
+- Status: the last chat error with where and when (`chatLastError`), cleared by the next success in the same conversation; a delivery watch of an archived thread is read once more and finished, a deleted thread's at once.
+- A mention of a person by id becomes a Telegram mention, not raw brackets.
+
 # 0.9.59
 
 - The rules in force come with every Telegram turn — groups, people's chats and the owner's chat. A running agent session keeps the instructions it started with, so later edits of the rules never reached long conversations. The bridge asks the platform plugin (`turnRules`, personal-assistant 0.4.4) for the rules in force and their fingerprint: a conversation that has not had this version gets the full text, visible to the agent only, marked «rules updated, in force from this turn, earlier wording cancelled»; the same version costs one line. Without the platform's rules nothing changes.
