@@ -55,3 +55,20 @@ test("the quick decision chooses through vallis-decide; no service or an off-lis
   await acknowledge(tg, 1, 2, "текст", async () => "🤣", options, () => true);   // a service reaction came first
   assert.deepEqual(calls, ["👀"]);
 });
+
+import { chooseTopicIcon } from "../turn-feedback";
+
+test("С58: a new topic gets a fitting standard icon; a person's icon, no service or no right — nothing changes", async () => {
+  const calls: [string, Record<string, unknown>][] = [];
+  const stickers = [{ emoji: "💰", custom_emoji_id: "money" }, { emoji: "🛠", custom_emoji_id: "tools" }, { emoji: "📅", custom_emoji_id: "cal" }];
+  const tg = async (m: string, b: Record<string, unknown>) => { calls.push([m, b]); return m === "getForumTopicIconStickers" ? stickers : true; };
+  const choose = async (_input: string, _i: string, choices: { value: string }[]) => choices.find(c => c.value === "tools")?.value;
+  assert.equal(await chooseTopicIcon(tg, -1, 40, "Ремонт CRM", undefined, choose), "tools");
+  assert.deepEqual(calls.at(-1), ["editForumTopic", { chat_id: -1, message_thread_id: 40, icon_custom_emoji_id: "tools" }]);
+  calls.length = 0;
+  assert.equal(await chooseTopicIcon(tg, -1, 41, "Финансы", "person-set", choose), undefined);   // a person's icon is kept
+  assert.equal(await chooseTopicIcon(tg, -1, 42, "Финансы", undefined, undefined), undefined);   // no service
+  assert.deepEqual(calls, []);
+  const noRight = async (m: string) => { if (m === "editForumTopic") throw Error("not enough rights"); return stickers; };
+  assert.equal(await chooseTopicIcon(noRight as never, -1, 43, "Финансы", undefined, choose), undefined);   // silently
+});

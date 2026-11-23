@@ -35,11 +35,14 @@ import {
 } from "./settings";
 import {channelPost,channelPostSchema,inspectChannelRights} from "./channel-post";
 import { bindGroupTopic, groupCliRestricted, groupTyping, processGroupInputs } from "./group-worker";
-import {decideChooser,parseReactionOptions,type ReactionChooser,type ReactionOption} from "./turn-feedback";
+import {decideChooser,decideChoice,chooseTopicIcon,parseReactionOptions,type ReactionChooser,type ReactionOption} from "./turn-feedback";
 /** С45: reaction choice from the settings, refreshed with them; the chat bridge and the group worker read it. */
 let currentReactions:{chooser?:ReactionChooser;options:ReactionOption[]}={options:parseReactionOptions(),chooser:decideChooser()};
-const reactionsFrom=(c:{reactionChoice?:boolean;reactionSet?:string;decideCommand?:string})=>
-  (currentReactions={options:parseReactionOptions(c.reactionSet),
+/** С58: the topic icon chooser (the same quick decision service); off with the topicIcons setting. */
+let currentIconChooser:ReturnType<typeof decideChoice>|undefined=decideChoice();
+const reactionsFrom=(c:{reactionChoice?:boolean;reactionSet?:string;decideCommand?:string;topicIcons?:boolean})=>
+  (currentIconChooser=c.topicIcons===false ? undefined : decideChoice(c.decideCommand || "vallis-decide"),
+  currentReactions={options:parseReactionOptions(c.reactionSet),
     ...(c.reactionChoice!==false ? {chooser:decideChooser(c.decideCommand || "vallis-decide")} : {})});
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
@@ -436,6 +439,9 @@ export default async function plugin(bb: BbPluginApi) {
     autoTopics: {
       type: "boolean", label: "New forum topics are picked up automatically (each gets its own thread); off — only bound topics", default: true,
     },
+    topicIcons: {
+      type: "boolean", label: "A new topic gets a fitting standard icon (vallis-decide); an icon set by a person is kept", default: true,
+    },
     reactionChoice: {
       type: "boolean", label: "Reactions: a quick model picks the reaction (vallis-decide); off — 👀 only", default: true,
     },
@@ -815,6 +821,10 @@ export default async function plugin(bb: BbPluginApi) {
       const policy=inheritedForumPolicy(source,topicId,{threadId,projectId},crypto.randomUUID());
       bindGroupTopic(store,policy,projectId);
       store.del(journal);
+      // С58: only on the topic's creation message, and only when it has no icon yet — a person's icon is kept.
+      const created=(update as {message?:{forum_topic_created?:{name?:string;icon_custom_emoji_id?:string}}})?.message?.forum_topic_created;
+      if (created) void chooseTopicIcon(telegram(botToken,signal,15_000,()=>chat,apiRoot),chat,topicId,
+        created.name ?? metadata.name,created.icon_custom_emoji_id,currentIconChooser,signal);
     }
     return topic.service;
   }

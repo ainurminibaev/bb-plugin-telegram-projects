@@ -176,3 +176,41 @@ export function voiceHeader(seconds: number | undefined, label = "Голосов
   if (!s) return label + ": ";
   return `${label} (${s >= 60 ? `${Math.floor(s / 60)} мин ${s % 60} с` : `${s} с`}): `;
 }
+
+/** A choice from any list through the quick decision service: the value, or undefined (no service, error, off-list). */
+export function decideChoice(command = "vallis-decide", timeoutMs = 6000) {
+  return (input: string, instructions: string, choices: { value: string; description?: string }[], signal?: AbortSignal) =>
+    new Promise<string | undefined>(resolve => {
+      const child = execFile(command, ["--timeout", String(Math.max(1, Math.floor(timeoutMs / 1000)))],
+        { cwd: tmpdir(), timeout: timeoutMs + 1000, maxBuffer: 1 << 20, signal }, (error, stdout) => {
+          if (error) return resolve(undefined);
+          try {
+            const value = JSON.parse(String(stdout)).answers?.[0]?.choice;
+            resolve(typeof value === "string" && choices.some(c => c.value === value) ? value : undefined);
+          } catch { resolve(undefined); }
+        });
+      child.stdin?.end(JSON.stringify({ input, questions: [{ type: "choice", name: "choice", instructions, choices }] }));
+    });
+}
+
+type IconSticker = { emoji?: string; custom_emoji_id?: string };
+
+/**
+ * С58: a topic picked up or created by the bridge gets a standard topic icon that fits its name. An icon a person
+ * already set is kept; no quick decision service or no right to manage topics — nothing changes, silently.
+ */
+export async function chooseTopicIcon(tg: Tg, chatId: number, topicId: number, name: string, existingIcon: string | undefined,
+  choose: ReturnType<typeof decideChoice> | undefined, signal?: AbortSignal) {
+  if (existingIcon || !choose || !name.trim()) return undefined;
+  try {
+    const stickers = await tg("getForumTopicIconStickers", {}) as IconSticker[];
+    const choices = (Array.isArray(stickers) ? stickers : []).filter(s => s.custom_emoji_id && s.emoji)
+      .slice(0, 255).map(s => ({ value: s.custom_emoji_id!, description: s.emoji! }));
+    if (choices.length < 2) return undefined;
+    const icon = await choose("Название темы: «" + name.slice(0, 128) + "»",
+      "Выбери значок темы, который лучше всего подходит к её названию.", choices, signal);
+    if (!icon) return undefined;
+    await tg("editForumTopic", { chat_id: chatId, message_thread_id: topicId, icon_custom_emoji_id: icon });
+    return icon;
+  } catch { return undefined; }   // no right to manage topics, a gone topic: leave it as it is
+}
