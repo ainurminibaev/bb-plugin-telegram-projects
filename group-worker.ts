@@ -9,11 +9,10 @@ import {randomUUID} from "node:crypto";
 import {groupExecutor} from "./isolated-client";
 import {historyPrefix,topicPassages} from "./topic-search";
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
-import {localArtifacts} from "./telegram-ux";
+import {cleanAssistantText,localArtifacts,renderTelegramParts} from "./telegram-ux";
 import {readGroupImage,readGroupPdf,readGroupDocument} from "./group-pdf";
-import {outboundMessagePayload} from "./outbound-message";
+import {outboundMessagePayload,plainFromHtml} from "./outbound-message";
 import {routedArtifactKind,routedCaption} from "./routed-message";
-import {splitText} from "./chat";
 import {ReplyRoutes, busyAnswerText, isBusyAnswer, stripTelegramMarkers} from "./reply-routing";
 import {voiceTranscripts} from "./archive";
 import {askNotes} from "./send-command";
@@ -604,12 +603,19 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       for (const link of imageLinks) text=text.replace(link.markdown,
         job.failedImages?.includes(link.path) ? "Изображение недоступно для отправки." : "");
       if (job.captionSent || !text.trim()) {finish("done");continue;}
-      const parts=splitText(text.trim());
+      // The same formatting as a private chat: bold, italic, lists, code and links; plain words if Telegram rejects it.
+      const parts=renderTelegramParts(cleanAssistantText(text).trim());
       for (let i=job.part??0;i<parts.length;i++) {
         if (!allowed() || !await safeToSend()) {finish("revoked");break;}
         store.put(key,{...job,state:"sending",part:i});
-        const {method,body}=outboundMessagePayload({...reply,text:parts[i]});
-        const sent=await transport(r.chatId)(method,body);
+        const send=(html:boolean)=>{
+          const {method,body}=outboundMessagePayload({...reply,text:html ? parts[i] : plainFromHtml(parts[i]),html});
+          return transport(r.chatId)(method,body);
+        };
+        const sent=await send(true).catch(error=>{
+          if (error instanceof TelegramFailure && error.code==="telegram_400") return send(false);
+          throw error;
+        });
         if (job.taskId && Number.isSafeInteger(sent?.message_id))
           store.put(`group:task-message:${botId}:${r.chatId}:${r.topicId}:${sent.message_id}`,job.taskId);
         if (i+1===parts.length) finish("done",sent?.message_id);

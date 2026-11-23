@@ -3,7 +3,8 @@ import {closeSync,constants,fstatSync,openSync,readSync,realpathSync} from "node
 import {basename,isAbsolute,relative,sep} from "node:path";
 import {z} from "zod";
 import {imageFormat} from "./group-attachments";
-import type {Telegram} from "./model";
+import {TelegramFailure,type Telegram} from "./model";
+import {cleanAssistantText,renderTelegramParts} from "./telegram-ux";
 
 export const maxOutboundDocumentBytes = 49 * 1024 * 1024;
 const maxPhotoBytes = 10_000_000;
@@ -114,10 +115,18 @@ export function telegramMessageId(sent:any,chatId:number) {
 type MessagePayload = {
   chatId:number;topicId:number;replyTo?:number;text?:string;
   file?:Pick<OutboundFile,"kind"|"name"|"data">;
+  /** The text is Telegram HTML made by renderTelegramParts (the same formatting as a private chat). */
+  html?:boolean;
 };
 
+/** The words of Telegram HTML without tags: sent when Telegram rejects the formatting. */
+export function plainFromHtml(html:string) {
+  return html.replace(/<a\s+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g,(_,href,label)=>label===href ? label : `${label} (${href})`)
+    .replace(/<[^>]+>/g,"").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,"&");
+}
+
 export function outboundMessagePayload(args:MessagePayload):{method:string;body:Record<string,unknown>} {
-  const {chatId,topicId,replyTo,text,file}=args;
+  const {chatId,topicId,replyTo,text,file,html}=args;
   if (!checkOutboundContent({text,artifact:file})) throw Error("outbound_content_invalid");
   const target={
     chat_id:chatId,
@@ -125,7 +134,7 @@ export function outboundMessagePayload(args:MessagePayload):{method:string;body:
     ...(replyTo!==undefined && {reply_parameters:{message_id:replyTo,allow_sending_without_reply:false}}),
   };
   if (!file)
-    return {method:"sendMessage",body:{...target,text,link_preview_options:{is_disabled:true}}};
+    return {method:"sendMessage",body:{...target,text,...(html && {parse_mode:"HTML"}),link_preview_options:{is_disabled:true}}};
   return {method:file.kind==="photo" ? "sendPhoto" : "sendDocument",body:{
     ...target,...(text!==undefined && {caption:text}),
     [file.kind]:file.data,[file.kind+"_filename"]:file.name,
@@ -146,4 +155,20 @@ export async function sendOutboundMessage(tg:Telegram,args:Omit<MessagePayload,"
   if (file?.kind==="photo" && (!Array.isArray(sent?.photo) || !sent.photo.some((item:any)=>typeof item?.file_id==="string")))
     throw Error("outbound_receipt_missing");
   return telegramMessageId(sent,chatId);
+}
+
+/**
+ * Agent text to a group or a person: the same formatting as the owner's private chat (bold, italic, lists, code, links).
+ * A part Telegram rejects as formatting goes as plain words. Returns the sent message IDs in order.
+ */
+export async function sendFormattedText(tg:Telegram,args:{chatId:number;topicId:number;replyTo?:number;markdown:string}) {
+  const ids:number[]=[];
+  for (const part of renderTelegramParts(cleanAssistantText(args.markdown).trim())) {
+    const target={chatId:args.chatId,topicId:args.topicId,replyTo:args.replyTo};
+    ids.push(await sendOutboundMessage(tg,{...target,text:part,html:true}).catch(error=>{
+      if (error instanceof TelegramFailure && error.code==="telegram_400") return sendOutboundMessage(tg,{...target,text:plainFromHtml(part)});
+      throw error;
+    }));
+  }
+  return ids;
 }

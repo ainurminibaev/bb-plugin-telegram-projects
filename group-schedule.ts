@@ -3,8 +3,7 @@ import type {Store,Telegram} from "./model";
 import type {GroupTopicPolicy} from "./ingress";
 import {NO_REPLY} from "./group-result";
 import {stripTelegramMarkers,isBusyAnswer} from "./reply-routing";
-import {sendOutboundMessage} from "./outbound-message";
-import {splitText} from "./chat";
+import {sendFormattedText} from "./outbound-message";
 
 // A schedule set in a group or a person's chat runs as an ordinary turn of that conversation's thread; a subthread's
 // outcome wakes it the same way. The result goes back to the same topic or private chat. NO_REPLY stays silent.
@@ -49,8 +48,7 @@ export async function deliverScheduledResults(store:Store,sdk:Pick<BbPluginApi["
             store.put(sentKey(threadId,turnId),Date.now());
             const tg=transport(policy.chatId);
             try {
-              for (const part of splitText(text,3900))
-                await sendOutboundMessage(tg,{chatId:policy.chatId,topicId:policy.privateChat ? 0 : policy.topicId,text:part});
+              await sendFormattedText(tg,{chatId:policy.chatId,topicId:policy.privateChat ? 0 : policy.topicId,markdown:text});
             } catch (error) {
               // Not delivered: the next pass reads this turn again and retries.
               store.del(sentKey(threadId,turnId));

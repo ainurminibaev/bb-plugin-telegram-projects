@@ -127,7 +127,7 @@ test("owner-only forum answers return to the exact topic once and stop when its 
     await tick();
     assert.equal(sendCount,1);
     assert.deepEqual(deliveries,audienceChanges?[]:[{chat_id:chat.id,message_thread_id:3,
-      reply_parameters:{message_id:101,allow_sending_without_reply:false},text:"Synthetic private result",link_preview_options:{is_disabled:true}}]);
+      reply_parameters:{message_id:101,allow_sending_without_reply:false},text:"Synthetic private result",parse_mode:"HTML",link_preview_options:{is_disabled:true}}]);
     assert.equal(store.get<{state:string}>(`group:receipt:${bot}:101`)?.state,audienceChanges?"revoked":"done");
   }
 });

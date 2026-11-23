@@ -37,7 +37,7 @@ test("worker delivers only its completed turn into the bound forum topic",async(
  assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"}},7,5));
  assert.equal(rows.has("group:in:5:8"),false);
  await tick();
- assert.deepEqual(sent,[[-1001,{chat_id:-1001,message_thread_id:3,reply_parameters:{message_id:10,allow_sending_without_reply:false},text:"answer",link_preview_options:{is_disabled:true}}]]);
+ assert.deepEqual(sent,[[-1001,{chat_id:-1001,message_thread_id:3,reply_parameters:{message_id:10,allow_sending_without_reply:false},text:"answer",parse_mode:"HTML",link_preview_options:{is_disabled:true}}]]);
 });
 
 test("a private project and another topic cannot claim the same group thread",()=>{

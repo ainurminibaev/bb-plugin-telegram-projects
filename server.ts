@@ -10,7 +10,7 @@ import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration
 import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
 import {conversationOf,conversationOfThread,guardGroupMemory,readableChats} from "./archive-access";
 import {closeAsk,findGroup,findPerson,findTopic,rememberAsk,sendRefusal,sendTargets} from "./send-command";
-import {sendOutboundMessage} from "./outbound-message";
+import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
 import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
@@ -2232,8 +2232,9 @@ export default async function plugin(bb: BbPluginApi) {
             file={name,kind:photo ? "photo" : "document",data:new Blob([new Uint8Array(bytes)],{type:photo ? "image/"+(name.toLowerCase().endsWith("png") ? "png" : "jpeg") : "application/octet-stream"}),
               sha256:createHash("sha256").update(bytes).digest("hex"),bytes:bytes.length};
           }
-          const messageId=await sendOutboundMessage(telegram(botToken,lifetime.signal,60_000,()=>target.chat,apiRoot),
-            {chatId:target.chat,topicId:target.topic,text,file});
+          const tg=telegram(botToken,lifetime.signal,60_000,()=>target.chat,apiRoot);
+          const messageId=file || !text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file})
+            : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,markdown:text})).at(-1);
           if (opt.answer) closeAsk(store,bot,opt.answer);
           let remembered:string|undefined;
           if (ask && caller && !opt.answer) {
