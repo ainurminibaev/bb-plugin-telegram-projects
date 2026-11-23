@@ -2357,6 +2357,24 @@ for (const running of [true,false]) test("late question joins the running forwar
   } finally {f.cleanup();}
 });
 
+test("П5: a message that follows the owner's text while that turn runs joins it, not a second request", async () => {
+  const f=fixture();
+  try {
+    await f.bridge.handle(f.input("start"));
+    const first={...f.input("Посмотри, что не так на странице"),sentAt:300};
+    await f.bridge.handle(first);
+    const marker=f.calls.filter(c=>c[0]==="send").at(-1)[1].input[1];
+    f.sdk.threads.events.list=async()=>[
+      {seq:31,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"t-req",originPluginId:"telegram-projects",input:[marker]}},
+      {seq:32,type:"turn/input/accepted",scope:{kind:"turn",turnId:"t-turn"},data:{clientRequestId:"t-req"}},
+    ];
+    await f.bridge.handle({...f.input("вот снимок"),sentAt:309});
+    const send=f.calls.filter(c=>c[0]==="send").at(-1)[1];
+    assert.equal(send.mode,"steer-if-active");
+    assert.match(send.input[0].text,/^Дополнение к сообщению пользователя выше \(пришло следом/);
+  } finally {f.cleanup();}
+});
+
 test("explicit delivery sends relative and empty-label images, videos and files[] like a routed answer", async () => {
   const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'explicit-media-'));
   try {

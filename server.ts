@@ -11,7 +11,7 @@ import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} fro
 import {conversationOf,conversationOfThread,guardGroupMemory,readableChats} from "./archive-access";
 import {closeAsk,findGroup,findPerson,findTopic,rememberAsk,sendRefusal,sendTargets} from "./send-command";
 import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
-import {acceptOwnerAskCallback,answerTurnText,askButtons,forwardOriginal,ownerQuestion,queueAnswerTurn,rememberAskMessage,turnMessageKey} from "./owner-ask";
+import {acceptOwnerAskCallback,answerTurnText,askButtons,cleanQuestion,forwardOriginal,ownerQuestion,queueAnswerTurn,rememberAskMessage,turnMessageKey} from "./owner-ask";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
 import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
@@ -144,6 +144,11 @@ const groupRightsSchema = z.object({
   ownerNoMention: z.boolean().optional(), shortName: z.string().max(64).optional(),
 });
 export const rpcContract = defineRpcContract({
+  // П28/С60: a plugin of this BB tells the owner something in their private chat, without a model turn.
+  sendToOwner: {
+    input: z.object({ text: z.string().min(1).max(16000), source: z.string().max(120).optional() }).strict(),
+    output: z.object({ ok: z.boolean(), reason: z.string().optional() }),
+  },
   rightsAccess: { input: z.null(), output: z.array(personSchema) },
   rightsAccessSet: { input: z.object({ people: z.array(personSchema).max(200) }).strict(), output: z.array(personSchema) },
   rightsGroup: { input: z.object({ chatId: z.number().int() }).strict(), output: groupRightsSchema.nullable() },
@@ -1008,6 +1013,13 @@ export default async function plugin(bb: BbPluginApi) {
   async function deliverOwnerAnswer(ask:import("./send-command").Ask,answer:string,via:"button"|"text",who?:string) {
     const bot=botId(), owner=ownerId();
     if (!bot || !owner || !answer.trim()) return false;
+    // П28: an ordinary thread asked — the answer comes to it as a turn.
+    if (ask.originThread) {
+      await bb.sdk.threads.send({threadId:ask.originThread,mode:"queue-if-active",input:[{type:"text",mentions:[],
+        text:answerTurnText(ask,answer.trim(),via,who).split("\n").slice(0,2).join("\n")+"\nЭто ответ самого владельца. Продолжи дело по нему."}]});
+      closeAsk(store,bot,ask.id);
+      return true;
+    }
     const sender=ask.target===owner ? {id:owner,name:"Владелец"} : {id:ask.target,name:who ?? "Собеседник"};
     if (queueAnswerTurn(store,bot,owner,ask,answerTurnText(ask,answer.trim(),via,who),sender)) {
       closeAsk(store,bot,ask.id); chatWake?.(); return true;
@@ -1720,6 +1732,20 @@ export default async function plugin(bb: BbPluginApi) {
     return project;
   }
   bb.rpc.register(rpcContract, {
+    sendToOwner: async ({ text, source }) => {
+      const owner = ownerId(), bot = botId();
+      if (!bridge || !owner || !bot || stateTransferBusy) return { ok: false, reason: "bot_unavailable" };
+      const cfg = await settings.get();
+      if (!cfg.enabled || !cfg.chatEnabled) return { ok: false, reason: "bridge_off" };
+      const body = text.trim();
+      if (!body) return { ok: false, reason: "empty_text" };
+      const cut = body.length > 3500 ? body.slice(0, 3500) + "…" : body;
+      try {
+        await sendFormattedText(telegram(botToken, lifetime.signal, 15_000, () => owner, apiRoot),
+          { chatId: owner, topicId: 0, markdown: (source ? `От: ${source}\n` : "") + cut });
+        return { ok: true };
+      } catch (error) { return { ok: false, reason: "telegram_failed: " + String((error as Error).message).slice(0, 120) }; }
+    },
     rightsAccess: async () => botId() ? accessList(store, botId()!) : [],
     rightsAccessSet: async ({ people }) => {
       if (!botId()) throw Error("bot_unavailable");
@@ -2289,8 +2315,19 @@ export default async function plugin(bb: BbPluginApi) {
           if (refusal) return {exitCode:1,stderr:refusal};
           // A question to the owner from another conversation (С43, С67): where it comes from, who asks and their status,
           // the original request (a link, or the person's message forwarded), then buttons; the answer returns there.
-          let ownerAsk:{turn?:import("./owner-ask").TurnMessage}|undefined;
-          if (target.chat===owner && caller?.kind!=="owner" && !opt.answer && (opt.text || opt["text-file"])) {
+          let ownerAsk:{turn?:import("./owner-ask").TurnMessage;thread?:string}|undefined;
+          // П28: an ordinary thread of this BB writes to the owner: who it is, the text as sent, cut at 3500 characters.
+          if (!caller && target.chat===owner && !opt.answer && (opt.text || opt["text-file"])) {
+            const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
+            const thread=await bb.sdk.threads.get({threadId:ctx.threadId}).catch(()=>undefined) as {title?:string;projectId?:string}|undefined;
+            const project=thread?.projectId ? await bb.sdk.projects.get({projectId:thread.projectId}).catch(()=>undefined) as {name?:string}|undefined : undefined;
+            const from=[thread?.title || "тред", project?.name].filter(Boolean).join(" · ");
+            const cut=body.length>3500 ? body.slice(0,3500)+"…\n(полностью — в треде)" : body;
+            opt.text=`От: ${from}\n${ask ? cleanQuestion(cut)+"\nОтветьте кнопкой или ответом на это сообщение." : cut}`;
+            delete opt["text-file"];
+            if (ask) ownerAsk={thread:ctx.threadId};
+          }
+          if (target.chat===owner && caller && caller.kind!=="owner" && !opt.answer && (opt.text || opt["text-file"])) {
             const place=caller?.kind==="person" ? "лички «"+(accessList(store,bot).find(p=>p.id===caller.subject)?.name ?? caller.subject)+"»"
               : "группы «"+(store.get<{title?:string}>(`visibility:${bot}:group:${caller?.kind==="group" ? caller.chat : 0}`)?.title ?? "группа")+"»";
             const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
@@ -2314,7 +2351,7 @@ export default async function plugin(bb: BbPluginApi) {
           // The owner's answer to a question of another conversation goes to that conversation as a turn: it carries on.
           // Any answer to a question asked from a group or a person's chat comes back there as a turn (the agent there carries on);
           // an answer to the owner's own question is posted to the owner's chat as before.
-          if (opt.answer && answer && answer.origin.chat!==owner) {
+          if (opt.answer && answer && (answer.origin.chat!==owner || answer.originThread)) {
             const who=answer.target===owner ? "Владелец" : (accessList(store,bot).find(p=>p.id===answer.target)?.name ?? "Собеседник");
             const delivered=await deliverOwnerAnswer(answer,text ?? "","text",who);
             return delivered ? {exitCode:0,stdout:JSON.stringify({sent:true,deliveredTo:"conversation"})} : {exitCode:1,stderr:"asking_conversation_unavailable"};
@@ -2323,6 +2360,11 @@ export default async function plugin(bb: BbPluginApi) {
           // С56: a PDF as a reply to the scheme picture sent just before (its messageId from the first send).
           const replyTo=opt["reply-to"] && /^\d+$/.test(opt["reply-to"]) ? Number(opt["reply-to"]) : undefined;
           let remembered:string|undefined;
+          if (ask && !caller && ownerAsk?.thread && !opt.answer) {
+            const asked=rememberAsk(store,bot,owner,{chat:owner,topic:0},text ?? "");
+            store.put(`send:ask:${bot}:${asked.id}`,{...asked,originThread:ownerAsk.thread});
+            remembered=asked.id;
+          }
           if (ask && caller && !opt.answer) {
             const origin=caller.kind==="owner" ? {chat:owner,topic:0} : caller.kind==="group" ? {chat:caller.chat,topic:caller.topic ?? 0} : {chat:caller.subject,topic:0};
             const asked=rememberAsk(store,bot,target.chat,origin,text ?? opt.file ?? "");

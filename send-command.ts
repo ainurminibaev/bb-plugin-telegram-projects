@@ -18,7 +18,9 @@ import {currentGroup} from "./group-migration";
 export type SendTarget={chat:number;topic:number};
 export type Ask={id:string;target:number;origin:SendTarget;question:string;at:number;
   /** The message in the asking conversation the answer goes under (the request this question came from). */
-  replyTo?:number};
+  replyTo?:number;
+  /** П28: an ordinary BB thread (not a Telegram conversation) that asked the owner; the answer comes back to it. */
+  originThread?:string};
 const ASK_DAYS=7;
 const askPrefix=(bot:number)=>`send:ask:${bot}:`;
 
@@ -88,7 +90,8 @@ const reachable=(store:Store,bot:number,owner:number,person:number)=>
 /** Undefined when allowed, otherwise the reason. */
 export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversation|undefined,target:SendTarget,
   groupsOf:(person:number)=>number[],askId?:string,author?:number,ask?:boolean):string|undefined {
-  if (!caller) return "send_only_from_a_telegram_conversation";
+  // П28: an ordinary thread of this BB writes to the owner only (a group or a person stays a Telegram conversation's business).
+  if (!caller) return target.chat===owner && !askId ? undefined : "send_only_from_a_telegram_conversation: an ordinary thread writes only to the owner (--person owner)";
   if (askId) {
     const ask=store.get<Ask>(askPrefix(bot)+askId);
     const own=caller.kind==="person" ? caller.subject : caller.kind==="group" ? caller.chat : owner;

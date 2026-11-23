@@ -1,3 +1,10 @@
+# 0.9.61
+
+- Forwarded messages say whose words they carry (С73): the author of the original and when — a person, a bot, a chat or channel, a hidden author — and the agent's own earlier message is named as its own. The agent never takes a forwarded message for the words or the decision of whoever forwarded it.
+- A message the owner sends right after another while that turn still runs (a text, then a screenshot) is one task with it, not a second request with its own answer (П5).
+- An ordinary thread of this BB can write to the owner (П28): `send --person owner` says which thread and project it comes from, is cut at 3500 characters, and with `--ask` has «Да / Нет» buttons; the answer comes back to that thread. Groups and people stay out of reach for such threads.
+- `sendToOwner` {text, source?} → {ok, reason?}: a plugin of this BB tells the owner something without a model turn.
+
 # 0.9.60
 
 - General of a forum (topic 0) can be bound and is picked up by default, also in the owner's own forum; a reply inside General stays in General, topic messages never reach it.

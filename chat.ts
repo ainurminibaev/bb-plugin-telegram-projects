@@ -61,6 +61,14 @@ export const inputSchema = z.object({
   protectedContent: z.literal(true).optional(),
   sentAt: z.number().int().nonnegative().optional(),
   forwarded: z.boolean().optional(),
+  /** С73: who wrote the forwarded original and when (Telegram forward_origin). */
+  forwardOrigin: z.object({
+    type: z.enum(["user","hidden_user","chat","channel"]),
+    name: z.string().max(200),
+    id: z.number().int().optional(),
+    isBot: z.boolean().optional(),
+    date: z.number().int().optional(),
+  }).optional(),
   originalText: z.literal(true).optional(),
   callback: z.string().max(64).optional(),
   replyTo: z.number().int().optional(),
@@ -91,6 +99,21 @@ export const FORWARD_FOLLOWUP_MS = 30_000;
 const FORWARD_PREFIX = "[Пересланное сообщение]\n";
 function collectionWindow(input: ChatInput, normalMs: number) {
   return input.forwarded && normalMs ? Math.max(normalMs, FORWARD_COMMENT_MS) : normalMs;
+}
+/**
+ * С73: a forwarded message says whose words it carries. The agent never takes the original's words for the words
+ * or the decision of whoever forwarded it; its own earlier message is named as its own.
+ */
+export function forwardLabel(origin: ChatInput["forwardOrigin"], botId: number | undefined) {
+  const when = origin?.date ? ", " + new Date(origin.date * 1000).toLocaleString("ru-RU", {timeZone: "Europe/Moscow",
+    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) + " МСК" : "";
+  if (!origin) return FORWARD_PREFIX;
+  if (origin.type === "user" && botId !== undefined && origin.id === botId)
+    return `[Пересланное сообщение: это твоё собственное сообщение${when}. Его слова — твои, а не того, кто переслал.]\n`;
+  const who = origin.type === "user" ? `${origin.name} (${origin.isBot ? "бот" : "человек"})`
+    : origin.type === "hidden_user" ? `${origin.name} (автор скрыл профиль)`
+    : origin.type === "channel" ? `канал «${origin.name}»` : `чат «${origin.name}»`;
+  return `[Пересланное сообщение. Автор оригинала: ${who}${when}. Это слова автора оригинала, а не того, кто переслал.]\n`;
 }
 function forwardedWithQuestion(parts: ChatInput[], texts: string[]) {
   const forwarded = texts.filter((_, i) => parts[i].forwarded)
@@ -1707,7 +1730,7 @@ export class ChatBridge {
         return;
       }
     }
-    return input.forwarded ? "[Пересланное сообщение]\n" + text : text;
+    return input.forwarded ? forwardLabel(input.forwardOrigin, this.s.get<number>("bot:id")) + text : text;
   }
 
   async handle(input: ChatInput) {
@@ -1761,14 +1784,16 @@ export class ChatBridge {
     const first = parts[0].sentAt;
     if (!prior || !b.threadId || prior.threadId !== b.threadId || first === undefined ||
         first < prior.lastSentAt || (first - prior.lastSentAt) * 1000 > FORWARD_FOLLOWUP_MS ||
-        parts.some(p => p.ownerId !== parts[0].ownerId) ||
-        !(prior.forwarded || parts.some(p => p.forwarded)) || this.routes.cancelled(prior.route)) return undefined;
+        parts.some(p => p.ownerId !== parts[0].ownerId) || this.routes.cancelled(prior.route)) return undefined;
+    // П5: not only a forward and its question — any message of the owner that follows while that turn still runs
+    // (a text, then a screenshot) is one task with it, not a second request with its own answer.
     if (!(await this.runningTurnOf(b.threadId, prior.route))) return undefined;
     const forwards = parts.filter(p => p.forwarded).length;
     const prefix = forwards === parts.length
       ? "Пересланное (дополнение к сообщению пользователя выше, это одно поручение):\n"
       : forwards ? "Дополнение к сообщению пользователя выше, это одно поручение:\n"
-        : "Вопрос пользователя к пересланному выше (это одно поручение):\n";
+        : prior.forwarded ? "Вопрос пользователя к пересланному выше (это одно поручение):\n"
+        : "Дополнение к сообщению пользователя выше (пришло следом, пока ты работал), это одно поручение:\n";
     return {route: prior.route, prefix};
   }
   private async runningTurnOf(threadId: string, route: RecentDispatch["route"]) {

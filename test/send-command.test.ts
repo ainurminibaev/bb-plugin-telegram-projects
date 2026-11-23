@@ -39,6 +39,10 @@ test("who may send where follows the calling conversation",()=>{
   assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:OTHER},{chat:ALICE,topic:0},groupsOf,undefined,999)!,/person_not_allowed/);
   assert.match(no({kind:"group",chat:OTHER},{chat:ALICE,topic:0})!,/person_not_allowed/);
   assert.match(no({kind:"person",subject:ALICE},{chat:TEAM,topic:0})!,/group_not_allowed/);
+  // П28: an ordinary BB thread (no Telegram conversation) writes only to the owner.
+  assert.equal(sendRefusal(s,BOT,OWNER,undefined,{chat:OWNER,topic:0},groupsOf),undefined);
+  assert.match(sendRefusal(s,BOT,OWNER,undefined,{chat:ALICE,topic:0},groupsOf)!,/send_only_from_a_telegram_conversation/);
+  assert.match(sendRefusal(s,BOT,OWNER,undefined,{chat:TEAM,topic:0},groupsOf)!,/send_only_from_a_telegram_conversation/);
   // С43: any conversation asks the owner only with a question whose answer comes back.
   assert.match(no({kind:"group",chat:TEAM},{chat:OWNER,topic:0})!,/owner_only_with_a_question: send --person owner --ask/);
   assert.equal(sendRefusal(s,BOT,OWNER,{kind:"person",subject:ALICE},{chat:OWNER,topic:0},groupsOf,undefined,undefined,true),undefined);

@@ -39,6 +39,22 @@ export type GroupTopicPolicy = {
   acceptAfterSecond?: number;
 };
 
+/** С73: who wrote the forwarded original (Telegram forward_origin), in a short form for the agent. */
+export function forwardOriginOf(o:any) {
+  if (!o || typeof o!=="object") return undefined;
+  const clip=(v:unknown)=>String(v??"").replace(/[\p{Cc}\p{Cf}]/gu," ").trim().slice(0,120);
+  const date=Number.isSafeInteger(o.date) ? {date:o.date as number} : {};
+  if (o.type==="user" && o.sender_user) {
+    const u=o.sender_user;
+    const name=clip([u.first_name,u.last_name].filter(Boolean).join(" ")+(u.username ? ` @${u.username}` : ""));
+    return {type:"user" as const,name:name || String(u.id),...(Number.isSafeInteger(u.id) && {id:u.id as number}),isBot:u.is_bot===true,...date};
+  }
+  if (o.type==="hidden_user") return {type:"hidden_user" as const,name:clip(o.sender_user_name) || "неизвестный",...date};
+  if (o.type==="chat") return {type:"chat" as const,name:clip(o.sender_chat?.title) || "чат",...date};
+  if (o.type==="channel") return {type:"channel" as const,name:clip(o.chat?.title)+(o.author_signature ? `, подпись ${clip(o.author_signature)}` : "") || "канал",...date};
+  return undefined;
+}
+
 export function canInvokeGroup(policy: GroupTopicPolicy, owner: number, sender: number) {
   if (policy.ownerSharedProject) return policy.ownerId===owner && sender===owner && isSharedOwnerPolicy(policy);
   return sender === owner || !policy.ownerOnly || policy.allowedSenderIds?.includes(sender) === true;
@@ -266,6 +282,7 @@ export function routeUpdate(
       }),
       ...(Number.isInteger(m.date) && {sentAt:m.date}),
       ...((m.forward_origin || m.forward_date) && {forwarded:true}),
+      ...(forwardOriginOf(m.forward_origin) && {forwardOrigin:forwardOriginOf(m.forward_origin)}),
       ...(!callback && typeof m.text==="string" && !m.reply_to_message && originalPerson(m) && {originalText:true as const}),
       callback,
       attachment: !callback && attached ? {
