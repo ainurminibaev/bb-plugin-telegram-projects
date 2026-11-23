@@ -38,3 +38,15 @@ test("a chain of agent messages without a person stops at the limit; a person re
   acceptGroupUpdate(store as never, msg(16, {id: COLLEAGUE_BOT, is_bot: true}), OWNER, BOT);
   assert.equal(jobs().length, 4, "after a person the agent is heard again");
 });
+
+test("with the setting empty (the default) no bot is taken: the agent path is not used", () => {
+  const rows = new Map<string, any>();
+  const store = {get: <T>(k: string) => rows.get(k) as T, put: (k: string, v: unknown) => { rows.set(k, v); }, del: (k: string) => { rows.delete(k); },
+    list: <T>(p: string) => [...rows].filter(([k]) => k.startsWith(p)).map(([key, value]) => ({key, value: value as T})), atomic: (f: () => void) => f()};
+  const {agentBots: _, ...plain} = policy;
+  bindGroupTopic(store as never, {...plain, revision: "r"} as never, "p");
+  acceptGroupUpdate(store as never, msg(31, {id: COLLEAGUE_BOT, is_bot: true}), OWNER, BOT);
+  assert.equal(store.list(`group:in:${BOT}:`).length, 0);
+  assert.equal(rows.has(`group:agent-chain:${forum.id}:3`), false, "no chain counting either");
+  assert.equal(routeUpdate(msg(32, {id: COLLEAGUE_BOT, is_bot: true}), OWNER, undefined, plain).kind, "ignore");
+});
