@@ -431,7 +431,7 @@ export class ChatBridge {
     // turn whose answer already has a different request identity.
     if (ctx.attempt === "join-turn" && ctx.queuedMessages.length <= 1 &&
         ctx.originPluginId === "telegram-projects" && ctx.initiator === "user" &&
-        this.routes.busyInput(ctx.thread.id, ctx.input.blocks)) return {action: "proceed"};
+        (this.routes.busyInput(ctx.thread.id, ctx.input.blocks) || this.routes.followUpInput(ctx.thread.id, ctx.input.blocks))) return {action: "proceed"};
     if (ctx.attempt === "join-turn" && ctx.initiator === "system" && ctx.queuedMessages.length === 1) {
       const notice = ctx.queuedMessages[0].systemNotice;
       const subject = notice?.subject;
@@ -2178,6 +2178,7 @@ export class ChatBridge {
       const busy = thread.status === "active" && !followUp;
       const metadata = busy ? this.routes.busyIngress(b.threadId, own, originalDigest) :
         [this.routes.ingress(b.threadId, followUp?.route ?? own, undefined, undefined, followUp ? undefined : originalDigest)];
+      if (followUp && !busy) this.routes.markFollowUp(metadata[0]);
       if (albumChanged(this.s,input.albumKey)) return;
       let rulesVersion: string | undefined;
       let rulesInput: string | undefined;

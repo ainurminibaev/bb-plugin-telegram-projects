@@ -2435,6 +2435,9 @@ test("П5: a message that follows the owner's text while that turn runs joins it
     const send=f.calls.filter(c=>c[0]==="send").at(-1)[1];
     assert.equal(send.mode,"steer-if-active");
     assert.match(send.input[0].text,/^Дополнение к сообщению пользователя выше \(пришло следом/);
+    // The bridge's own admission hook lets its follow-up join the running turn (it used to queue it as a new turn).
+    const ctx:any={thread:f.thread,attempt:"join-turn",initiator:"user",originPluginId:"telegram-projects",queuedMessages:[],input:{blocks:send.input}};
+    assert.equal((await f.bridge.admitDispatch(ctx)).action,"proceed");
   } finally {f.cleanup();}
 });
 

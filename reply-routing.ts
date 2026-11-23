@@ -113,6 +113,17 @@ export class ReplyRoutes {
     });
     return ids.length === 1 ? ids[0] : undefined;
   }
+  /** П5: a follow-up of the same task, made by the bridge itself, may join the running turn. */
+  markFollowUp(marker: {text?: string}) {
+    const id = /^\[bb-telegram-reply-route:([a-f0-9-]{36})\]/.exec(marker.text ?? "")?.[1];
+    if (id) this.store.put("reply:followup-ingress:" + id, true);
+  }
+  followUpInput(threadId: string, input: readonly {type: string; text?: string; visibility?: string}[]) {
+    const token = this.markerId(input);
+    if (!token || !this.store.get<boolean>("reply:followup-ingress:" + token)) return false;
+    const ingress = this.store.get<{threadId: string; route: ReplyRoute}>("reply:ingress:" + token);
+    return ingress?.threadId === threadId && !this.cancelled(ingress.route);
+  }
   busyInput(threadId: string, input: readonly {type: string; text?: string; visibility?: string}[]) {
     const token = this.markerId(input);
     if (!token || !this.store.get<string>("reply:busy-ingress:" + token)) return false;
