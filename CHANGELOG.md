@@ -1,3 +1,7 @@
+# 0.9.55
+
+- Received files can go to a project's own inbox (`projectInboxRoots`: `proj_id=/path`): the file lands in the inbox of the project whose thread gets the message, and the turn names that path. An agent under its own Linux account reads it through the inbox group: folders 0750 (2750 when the inbox has the group bit), files 0640, set explicitly whatever the service umask. Projects without their own inbox keep the shared one.
+
 # 0.9.54
 
 - Local Telegram Bot API server (one per machine, shared by every bot on it): files up to 2 GB are received in groups and private chats and sent back (up to 2000 MB); through api.telegram.org the usual 50 MB stays. Any file type goes out from the owner's chat as a document, as in groups.
