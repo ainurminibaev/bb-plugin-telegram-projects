@@ -45,6 +45,7 @@ The default endpoint remains `https://api.telegram.org`. Optional settings:
 - `telegramApiRoot`: HTTPS endpoint or loopback HTTP origin.
 - `telegramLocalRoot`: trusted local Bot API data root.
 - `telegramInboxRoot`: private destination for received files.
+- `projectInboxRoots`: `proj_id=/path` pairs, comma separated: received files for that project's threads go to its own inbox, the folder its agent reads under its own account (folders 0750, 2750 when the inbox has the group bit; files 0640). Other projects use `telegramInboxRoot`.
 - `telegramFileHostId`: BB host holding those directories.
 
 The server and bot-file volumes must use identical absolute paths. A receiving

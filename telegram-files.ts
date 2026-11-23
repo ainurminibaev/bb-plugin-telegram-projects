@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream, constants } from "node:fs";
-import { mkdir, open, realpath, stat, statfs, readFile, writeFile, rename, rm } from "node:fs/promises";
-import { isAbsolute, relative, resolve, join, basename, sep } from "node:path";
+import { chmod, mkdir, open, realpath, stat, statfs, readFile, writeFile, rename, rm } from "node:fs/promises";
+import { isAbsolute, relative, resolve, join, basename, dirname, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -46,6 +46,18 @@ function inside(root: string, path: string) {
   return rel !== "" && rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel);
 }
 
+/**
+ * Folders under an inbox are readable by the inbox's group (an agent under its own account reads them):
+ * 0750, plus the group bit when the inbox has it (2750). Set explicitly: the service umask may be 0077.
+ */
+export async function openInboxDirs(base: string, directory: string) {
+  await mkdir(directory, { recursive: true, mode: 0o750 });
+  const root = await realpath(base);
+  const groupBit = (await stat(root)).mode & 0o2000;
+  for (let p = await realpath(directory); inside(root, p); p = dirname(p))
+    await chmod(p, 0o750 | groupBit).catch(() => {});
+}
+
 export type SavedTelegramFile = {
   path: string;
   name: string;
@@ -63,6 +75,8 @@ export async function saveLocalTelegramFile(input: {
   sourcePath: string;
   localRoot: string;
   inboxRoot: string;
+  /** The configured inbox the folders below inboxRoot belong to (default: inboxRoot). */
+  inboxBase?: string;
   threadId?: string;
   updateId: number;
   fileId: string;
@@ -74,7 +88,8 @@ export async function saveLocalTelegramFile(input: {
   const max = input.maxBytes ?? MAX_INCOMING_BYTES;
   if (!Number.isSafeInteger(input.updateId) || input.updateId < 0 || !input.fileId ||
       !Number.isSafeInteger(max) || max < 1 || max > MAX_INCOMING_BYTES ||
-      !isAbsolute(input.localRoot) || !isAbsolute(input.inboxRoot) || !isAbsolute(input.sourcePath))
+      !isAbsolute(input.localRoot) || !isAbsolute(input.inboxRoot) || !isAbsolute(input.sourcePath) ||
+      (input.inboxBase !== undefined && input.inboxBase !== input.inboxRoot && !inside(input.inboxBase, input.inboxRoot)))
     throw Error("attachment_configuration_invalid");
   if (input.expectedBytes !== undefined &&
       (!Number.isSafeInteger(input.expectedBytes) || input.expectedBytes < 0 || input.expectedBytes > max))
@@ -100,6 +115,7 @@ export async function saveLocalTelegramFile(input: {
     const directory = join(inbox, key);
     await mkdir(directory, { recursive: true, mode: 0o750 });
     if (!inside(inbox, await realpath(directory))) throw Error("attachment_inbox_invalid");
+    await openInboxDirs(input.inboxBase ?? input.inboxRoot, directory);
     const destination = join(directory, name);
     const receiptPath = join(directory, ".complete.json");
     try {
@@ -143,6 +159,7 @@ export async function saveLocalTelegramFile(input: {
       throw Error("attachment_source_changed");
     await rename(temporary, destination);
     temporary = undefined;
+    await chmod(destination, 0o640);
     const receipt = { ...(input.threadId?{threadId:input.threadId}:{}), path: destination, name, bytes, sha256: hash.digest("hex") };
     const pendingReceipt = join(directory, `.receipt-${randomUUID()}`);
     await writeFile(pendingReceipt, JSON.stringify(receipt), { mode: 0o600 });
