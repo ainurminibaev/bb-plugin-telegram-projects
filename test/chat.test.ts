@@ -2441,6 +2441,17 @@ test("П5: a message that follows the owner's text while that turn runs joins it
   } finally {f.cleanup();}
 });
 
+test("С48: an agent's message joining a group thread busy with a Telegram task is acknowledged to its sender", async () => {
+  const f=fixture();
+  try {
+    f.store.put("group:in:5:900",{state:"submitted",route:{threadId:"thr_group"}});
+    const ctx:any={thread:{id:"thr_group",title:"Тема"},attempt:"join-turn",initiator:"agent",senderThreadId:"thr_sender",origin:null,originPluginId:null,queuedMessages:[],input:{blocks:[]}};
+    assert.equal((await f.bridge.admitDispatch(ctx)).action,"proceed");
+    await new Promise(r=>setTimeout(r,10));
+    assert.equal(f.calls.filter(([k,q]:any)=>k==="send" && q.threadId==="thr_sender").length,1);
+  } finally {f.cleanup();}
+});
+
 test("П5: a follow-up waits for the first message's turn that is still starting, then joins it", async () => {
   setFollowupStartWait(5);
   const f=fixture();

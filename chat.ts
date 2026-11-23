@@ -426,7 +426,13 @@ export class ChatBridge {
     const managed = ctx.originPluginId === "telegram-projects" ||
       this.deliveryWatches().some(w => w.threadId === ctx.thread.id) ||
       this.bindings().some(b => b.threadId === ctx.thread.id);
-    if (!managed) return {action: "proceed"};
+    if (!managed) {
+      // С48: a group or person's thread busy with a Telegram task — the agent's message joins it; tell the sender.
+      if (ctx.attempt === "join-turn" && ctx.initiator === "agent" &&
+          this.s.list<{state?: string; route?: {threadId?: string}}>("group:in:").some(({value: j}) =>
+            j.route?.threadId === ctx.thread.id && j.state === "submitted")) this.acknowledgeSender(ctx);
+      return {action: "proceed"};
+    }
     // Use BB's durable queue. Never inject a new human task into an existing
     // turn whose answer already has a different request identity.
     if (ctx.attempt === "join-turn" && ctx.queuedMessages.length <= 1 &&
