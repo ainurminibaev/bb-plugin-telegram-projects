@@ -1,3 +1,15 @@
+# 0.9.57
+
+- Reactions and a live status (С45, С46): every message that reaches the agent gets a sign at once, then a chosen reaction; a long turn shows one status message with its current step. The same in private chats, groups and topics.
+- Forum topics are picked up by default in every group (С54); a topic whose thread was archived gets a new thread (П29).
+- Voice: the agent gets the length of a voice message with its transcript (С56).
+- The assistant's name is a setting; conversation titles read «name · state · model».
+- Place of the answer (С43, С44): a request in a group is answered in that group, with a mention of the person meant; a person's private chat is written from a group only on the owner's own request. The owner sees in a group who may write privately and whose requests wait; others are told these details are not shown here.
+- The owner reaches the agent in a group without a mention (С55), on by default and switched off in the group settings; the agent stays silent when the owner talks to someone else.
+- Groups keep the formatting of the private chat: bold, italic, lists, code and links in answers, `send`, scheduled messages and reminders; plain words if Telegram rejects the formatting.
+- Anyone who may call the bot in a group may ask it for a later check there, not only the owner.
+- Any conversation may ask the owner a question with `send --person owner --ask`; the answer returns to the asking conversation.
+
 # 0.9.56
 
 - Employee private chats: when the owner approves a person, the bridge opens the conversation at once and the agent writes first — a short greeting, what it can do, and what the person needs. Nobody has to send another message after "Start".
