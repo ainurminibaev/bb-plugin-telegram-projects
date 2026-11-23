@@ -14,11 +14,13 @@ const cursorKey=(threadId:string)=>"group:schedule-cursor:"+threadId;
 const sentKey=(threadId:string,turnId:string)=>`group:schedule-sent:${threadId}:${turnId}`;
 
 export async function deliverScheduledResults(store:Store,sdk:Pick<BbPluginApi["sdk"],"threads">,
-  transport:(chatId:number)=>Telegram,signal:AbortSignal,allowed:()=>boolean) {
+  transport:(chatId:number)=>Telegram,signal:AbortSignal,allowed:()=>boolean,only?:ReadonlySet<string>) {
   const policies=store.list<GroupTopicPolicy>("group:policy:").map(r=>r.value).filter(p=>p.threadId);
   for (const policy of [...new Map(policies.map(p=>[p.threadId,p])).values()]) {
     if (!allowed()) return;
     const threadId=policy.threadId!;
+    // С72: with the change feed only threads that changed are read; a safety pass reads them all.
+    if (only && !only.has(threadId) && store.get(cursorKey(threadId))) continue;
     let cursor=store.get<Cursor>(cursorKey(threadId));
     if (!cursor) {
       // Start at the present: earlier runs are not replayed.

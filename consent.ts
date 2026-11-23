@@ -105,8 +105,14 @@ export async function watchConsents(ctx: ConsentContext) {
   const threads = new Map<string, GroupTopicPolicy>();
   for (const { value } of ctx.store.list<GroupTopicPolicy>("group:policy:"))
     if (value.botId === ctx.bot && !value.isolated && value.threadId) threads.set(value.threadId, value);
+  // С72: only threads where a group turn runs or a consent is open can have anything to do here.
+  const submitted = new Set(ctx.store.list<Job>(`group:in:${ctx.bot}:`).map((j) => j.value)
+    .filter((j) => j.state === "submitted" && j.ownerId === ctx.owner).map((j) => j.route.threadId));
+  const consentOpen = new Set(ctx.store.list<Consent>("rights:consent:").map((r) => r.value)
+    .filter((c) => c.state === "pending").map((c) => c.threadId));
   for (const [threadId, policy] of threads) {
     if (ctx.signal?.aborted) return;
+    if (!submitted.has(threadId) && !consentOpen.has(threadId)) continue;
     let pending: Interaction[];
     try {
       pending = ((await ctx.sdk.threads.interactions.list({ threadId, signal: ctx.signal })) as Interaction[])

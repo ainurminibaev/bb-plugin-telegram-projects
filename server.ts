@@ -2596,10 +2596,14 @@ export default async function plugin(bb: BbPluginApi) {
       watcher?.on("error", () => {}); // Timed polling remains as recovery if filesystem events are lost.
       // С72: thread changes wake the chat loop; while the feed is down the bridge reads everything every 2 s.
       let feedUp = false;
+      const scheduleDirty = new Set<string>();
+      let lastScheduleFull = 0;
       const unsubscribeChanges = (() => {
         try {
           const offThreads = bb.sdk.subscribe({event: "thread:changed", callback: (e) => {
-            if (e.id) bridge?.noteThreadChange(e.id);
+            if (!e.id) return;
+            scheduleDirty.add(e.id);
+            bridge?.noteThreadChange(e.id);
           }});
           const offConnection = bb.sdk.subscribe({event: "realtime:connection", callback: (e) => {
             feedUp = e.state === "connected";
@@ -2678,8 +2682,12 @@ export default async function plugin(bb: BbPluginApi) {
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined,cfg.language as "ru"|"en"),cfg.telegramFileHostId,
                   (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum,()=>currentReactions,turnRulesOf);
+                const scheduleFull=!feedUp || Date.now()-lastScheduleFull>=60_000;
+                if (scheduleFull) lastScheduleFull=Date.now();
+                const scheduleOnly=scheduleFull ? undefined : new Set(scheduleDirty);
+                scheduleDirty.clear();
                 await deliverScheduledResults(store,bb.sdk,groupTransport,signal,
-                  ()=>ownerId()===owner && botId()===bot && !stateTransferBusy);
+                  ()=>ownerId()===owner && botId()===bot && !stateTransferBusy,scheduleOnly);
               } catch (error) { ingressError = safeError(error); }
             }
           } else {
