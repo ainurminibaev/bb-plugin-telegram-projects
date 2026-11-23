@@ -27,6 +27,27 @@ import {voiceHeader,acknowledge,react,SERVICE_REACTIONS,stepLabel,firstLine,prog
 type GroupInput = Extract<Ingress,{kind:"group"}>;
 /** A submitted message without a turn for this long, while its thread is idle, is lost. */
 export const LOST_SUBMIT_MS=15*60_000;
+/**
+ * С50: slow work (a voice transcription, a file download) started once per key and taken when ready. Returns
+ * undefined while it still runs, so the worker goes on with the other chats instead of waiting.
+ */
+const slowWork=new Map<string,{done?:{value:unknown}|{error:unknown}}>();
+export async function settled(key:string,start:()=>Promise<unknown>,keep=false):Promise<{value:unknown}|{error:unknown}|undefined> {
+  let entry=slowWork.get(key);
+  if (!entry) {
+    const fresh:{done?:{value:unknown}|{error:unknown}}={};
+    slowWork.set(key,fresh);
+    entry=fresh;
+    start().then(value=>{fresh.done={value};},error=>{fresh.done={error};});
+    await new Promise(resolve=>setTimeout(resolve,SLOW_WORK_GRACE_MS));
+  }
+  if (!entry.done) return undefined;
+  if (!keep) slowWork.delete(key);
+  return entry.done;
+}
+/** Quick work finishes within this grace and is used in the same pass, as before. */
+export let SLOW_WORK_GRACE_MS=1_500;
+export function setSlowWorkGrace(ms:number) { SLOW_WORK_GRACE_MS=ms; }
 /** "Typing" for a submitted message stops after this long. */
 export const TYPING_MAX_MS=10*60_000;
 
@@ -275,8 +296,14 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       } catch { /* A status failure must not stop the actual reply. */ }
     };
     if (job.state==="pending" && r.voice) {
+      // С50: a long transcription in one chat never holds the others — it runs in the background and is taken
+      // on a later pass.
+      const voice=r.voice;
+      const ready=await settled(key+":voice",()=>Promise.resolve().then(()=>transcribe?.(voice)));
+      if (!ready) continue;
       try {
-        const transcript = (await transcribe?.(r.voice))?.trim();
+        if ("error" in ready) throw ready.error;
+        const transcript = (ready.value as string|undefined)?.trim();
         if (!transcript) throw Error("voice_unavailable");
         if (!allowed()) {finish("revoked");continue;}
         if (r.searchBefore!==undefined) {
@@ -324,6 +351,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     }
     const localInputs:(ImageAttachment|ReturnType<typeof localFileInput>|ReturnType<typeof opaqueAttachmentInput>)[]=[];
     const remoteInputs:IsolatedAttachment[]=[];
+    let waiting=false;
     if (job.state==="pending" && r.examples?.length) {
       try {
         if (!receiveExample) throw Error("missing_receiver");
@@ -331,7 +359,10 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         let imageSize=0;
         for (const example of r.examples) {
           if (!allowed()) break;
-          const received=await receiveExample(example,r);
+          const got=await settled(key+":file:"+example.messageId,()=>receiveExample(example,r),true);
+          if (!got) {waiting=true; break;}
+          if ("error" in got) throw got.error;
+          const received=got.value as Awaited<ReturnType<typeof receiveExample>>;
           if (!allowed()) break;
           const image="type" in received ? received : example.image
             ? await readSavedImage(received,signal).catch(err=>{if (!example.document) throw err;})
@@ -349,6 +380,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           }
         }
         if (!allowed()) {finish("revoked");continue;}
+        // С50: a file of this message is still downloading — other chats go on; this one resumes on a later pass.
+        if (waiting) continue;
+        for (const k of [...slowWork.keys()]) if (k.startsWith(key+":file:")) slowWork.delete(k);
       } catch {
         if (signal.aborted) return;
         if (!allowed()) {finish("revoked");continue;}
