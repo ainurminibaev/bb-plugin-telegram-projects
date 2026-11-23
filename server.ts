@@ -45,6 +45,7 @@ const reactionsFrom=(c:{reactionChoice?:boolean;reactionSet?:string;decideComman
   currentReactions={options:parseReactionOptions(c.reactionSet),
     ...(c.reactionChoice!==false ? {chooser:decideChooser(c.decideCommand || "vallis-decide")} : {})});
 import { applyThreadTitles, rememberGroupTitle, threadTitlesPass } from "./thread-titles";
+import { groupModelCommand } from "./group-model";
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
@@ -2771,6 +2772,13 @@ export default async function plugin(bb: BbPluginApi) {
             const privateOwner=ownerId(),privateBot=botId();
             if (privateOwner && privateBot && cfg.chatEnabled && bridge &&
                 await forumCommand(privateOwner,privateBot,signal,u)) {
+              store.put("ingress:offset",u.update_id+1);
+              continue;
+            }
+            // С71: the owner's /model in a bound group or topic — this conversation's model or provider.
+            if (privateOwner && privateBot && cfg.chatEnabled && bridge && await groupModelCommand({store,sdk:bb.sdk as never,
+                owner:privateOwner,bot:privateBot,update:u,
+                send:(chat,topic)=>text=>sendOutboundMessage(telegram(botToken,signal,15000,()=>chat,apiRoot),{chatId:chat,topicId:topic,text})})) {
               store.put("ingress:offset",u.update_id+1);
               continue;
             }
