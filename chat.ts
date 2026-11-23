@@ -243,6 +243,47 @@ export class ChatBridge {
     messageId: number;
   }>();
   private nextObserve = 0;
+  // С72: the request flow to BB. With the thread:changed feed healthy, a quiet bridge reads only threads that changed
+  // or still work, every 2 s, and all of them on a safety pass every 12 s; without the feed — everything every 2 s.
+  private changeFeed = false;
+  private dirty = new Set<string>();
+  private busyThreads = new Set<string>();
+  private childParent = new Map<string, string>();
+  private lastFull = 0;
+  private lastObserveStart = 0;
+  private recentInputAt = 0;
+  private validCache = new Map<string, {t: any; at: number}>();
+  private childCache = new Map<string, Promise<any[]>>();
+  /** С72: a BB thread changed (thread:changed): it, and its parent when it is a known child, are read next. */
+  noteThreadChange(id: string) {
+    this.validCache.delete(id);
+    this.dirty.add(id);
+    const parent = this.childParent.get(id);
+    if (parent) this.dirty.add(parent);
+    this.d.wake?.();
+  }
+  /** С72: the change feed is up or down; back up after a break — events may be lost, a full pass at once. */
+  setChangeFeed(ok: boolean) {
+    if (ok && !this.changeFeed) this.lastFull = 0;
+    this.changeFeed = ok;
+    if (!ok) this.validCache.clear();
+    this.d.wake?.();
+  }
+  /** С72: 2 s while anything works or the feed is down; 12 s safety pass when everything is quiet. */
+  observeInterval() {
+    const busy = this.busyThreads.size > 0 || this.lanes.size > 0 || Date.now() - this.recentInputAt < 30_000;
+    return !this.changeFeed || busy ? 2000 : 12000;
+  }
+  private children(parentThreadId: string) {
+    let p = this.childCache.get(parentThreadId);
+    if (!p) {
+      p = this.d.sdk.threads.list({parentThreadId, archived: false, includeHidden: false, limit: 100, signal: this.d.signal})
+        .then((rows: any[]) => { for (const c of rows) this.childParent.set(c.id, parentThreadId); return rows; });
+      this.childCache.set(parentThreadId, p);
+      p.catch(() => this.childCache.delete(parentThreadId));
+    }
+    return p;
+  }
   private lanes = new Set<number>();
   private disposed = false;
   /** The last error with its place and time; cleared by the next success in the same conversation. */
@@ -628,7 +669,7 @@ export class ChatBridge {
     const parents = [parent.threadId!];
     const seen = new Set(parents);
     for (const parentThreadId of parents) {
-      const children = await this.d.sdk.threads.list({parentThreadId,archived:false,includeHidden:false,limit:100,signal:this.d.signal});
+      const children = await this.children(parentThreadId);
       const adopted = new Set<string>();
       if (parentThreadId === parent.threadId)
         for (const {key} of this.s.list(adoptedKey(parentThreadId, ""))) {
@@ -1019,6 +1060,7 @@ export class ChatBridge {
           state:"done", at:part.at, input:{...part.input,text:undefined,replyExcerpt:undefined,voice:undefined,attachment:undefined}
         });
       });
+      this.recentInputAt = Date.now();   // С72: an incoming message keeps the 2 s pace for a while
       const p = (parts.length === 1 ? this.handle(r.input) : this.handleInput(r.input, parts))
         .catch((e) => {
           this.setError(e instanceof Error ? e.name : "operation_failed", { topicId: r.input.topicId });
@@ -1056,13 +1098,16 @@ export class ChatBridge {
       });
       this.work.add(p);
     }
-    if (!this.observed && Date.now() >= this.nextObserve) {
+    const changed = this.changeFeed && this.dirty.size > 0 && Date.now() - this.lastObserveStart >= 500;
+    if (!this.observed && (Date.now() >= this.nextObserve || changed)) {
+      this.lastObserveStart = Date.now();
       this.nextObserve = Date.now() + 2000;
       this.observed = true;
       const p = this.observe()
         .catch(() => {})
         .finally(() => {
           this.observed = false;
+          this.nextObserve = this.lastObserveStart + this.observeInterval();
           this.work.delete(p);
         });
       this.work.add(p);
@@ -1211,7 +1256,10 @@ export class ChatBridge {
     if (b.threadId) keys.unshift(...this.linkRows(b.threadId));
     this.enqueue(b.topicId, text, keys);
   }
-  private async validThread(b: Binding, id: string, allowArchived = false) {
+  private async validThread(b: Binding, id: string, allowArchived = false, cached = false) {
+    // С72: a quiet thread checked within a minute is not read again; any change of it drops the entry.
+    const hit = cached && this.changeFeed ? this.validCache.get(id) : undefined;
+    if (hit && Date.now() - hit.at < 60_000 && hit.t.projectId === b.projectId) return hit.t;
     const t = await this.d.sdk.threads.get({
       threadId: id,
       signal: this.d.signal,
@@ -1221,6 +1269,7 @@ export class ChatBridge {
     if ((await sharedGroupThreads(this.s,this.d.sdk.threads,[id],this.d.signal)).has(id) ||
         this.s.get("group:thread:"+id)) throw Error("thread_not_available");
     this.s.put("chat:thread-project:" + id, b.projectId);
+    if (this.changeFeed) this.validCache.set(id, {t, at: Date.now()});
     return t;
   }
   private async sessions(b: Binding, offset = 0) {
@@ -2682,7 +2731,7 @@ export class ChatBridge {
     this.enqueue(b.topicId, text, keys, id, false, undefined, asyncDelivery?.route);
   }
   private async observeFailures(b: Binding, parent: any): Promise<void> {
-    const children = await this.d.sdk.threads.list({parentThreadId: b.threadId!, archived: false, includeHidden: false, limit: 100, signal: this.d.signal});
+    const children = await this.children(b.threadId!);
     const failed = [parent, ...children.filter(c => c.parentThreadId === b.threadId && c.visibility === "visible" && !c.archivedAt && !c.deletedAt)].filter(t => t.status === "error");
     for (const t of failed) {
       const events = await this.d.sdk.threads.events.list({threadId: t.id, order: "desc", limit: "30", types: ["provider/error", "turn/completed", "turn/started"], signal: this.d.signal});
@@ -2729,10 +2778,7 @@ export class ChatBridge {
   private async delegatedProgress(b: Binding): Promise<string[]> {
     if (!b.threadId) return [];
     // Follow actual direct descendants only; never discover unrelated chats.
-    const children = await this.d.sdk.threads.list({
-      parentThreadId: b.threadId, archived: false, includeHidden: false,
-      limit: 100, signal: this.d.signal,
-    });
+    const children = await this.children(b.threadId);
     const active = children.filter((child) =>
       child.parentThreadId === b.threadId && child.visibility === "visible" &&
       !child.archivedAt && !child.deletedAt &&
@@ -2886,12 +2932,19 @@ export class ChatBridge {
   async observe() {
     let bindingFailed = false;
     let bindingChecked = false;
+    // С72: a full pass without the feed or every 12 s; otherwise only threads that changed or still work.
+    const full = !this.changeFeed || Date.now() - this.lastFull >= 12_000;
+    if (full) this.lastFull = Date.now();
+    const focus = new Set([...this.dirty, ...this.busyThreads]);
+    this.dirty.clear();
+    this.childCache.clear();
     await this.separateQueuedTasks();
     const watches = this.deliveryWatches().filter(w=>!w.questionOnly);
     const observedBindings = [...watches, ...this.bindings().filter(b =>
       !watches.some(w => w.threadId === b.threadId && w.topicId === b.topicId))];
     for (const b of observedBindings) {
       if (!b.threadId) continue;
+      if (!full && !focus.has(b.threadId)) continue;
       const downloadProgressKey = "chat:download-progress:" + b.topicId + ":" + b.revision;
       if (this.lanes.has(b.topicId)) {
         const downloading = this.s.list<Inbox>("chat:in:").some(({value: r}) =>
@@ -2909,8 +2962,10 @@ export class ChatBridge {
       try {
         const bound = this.binding(b.topicId)?.threadId === b.threadId;
         // A watch of an archived thread is read once more so an undelivered result or question still goes out.
-        const t = await this.validThread(b, b.threadId, !bound);
+        const t = await this.validThread(b, b.threadId, !bound, !full);
         bindingChecked = true;
+        if (["active", "starting", "pending", "stopping"].includes(t.status)) this.busyThreads.add(b.threadId);
+        else this.busyThreads.delete(b.threadId);
         if (this.lastError?.code === "bound_thread_unavailable" && this.lastError.threadId === b.threadId) this.lastError = null;
         if (!await this.observeChildRoutes(b)) continue;
         const events = await this.d.sdk.threads.events.list({
@@ -3128,6 +3183,7 @@ export class ChatBridge {
         const activeTurn = this.s.get<string>("reply:active-turn:" + b.threadId);
         const deliverActive = this.canDeliver(b, activeTurn);
         try { if (deliverActive) delegated = await this.delegatedProgress(b); } catch { /* parent remains observable */ }
+        if (delegated.length) this.busyThreads.add(b.threadId);   // С72: children at work keep the 2 s live status
         // С46: the agent's own words about the request; a plain-words step second; «Думаю над ответом…» after a quiet pause.
         const live = progressText({agentLine: b.activity ? firstLine(b.activity) : undefined, step: b.toolActivity,
           startedAt: b.turnStartedAt ?? 0})?.replace(/^⏳ /, "");
@@ -3182,6 +3238,7 @@ export class ChatBridge {
         )
           this.save(b);
       } catch (e) {
+        this.busyThreads.delete(b.threadId);
         const bound = this.binding(b.topicId)?.threadId === b.threadId;
         // A deleted thread's watch (gone from BB or marked deleted) can never deliver again: finished, not an error.
         const gone = e instanceof Error && (e.message === "thread_archived" ||
@@ -3195,6 +3252,8 @@ export class ChatBridge {
       }
     }
     if (bindingChecked && !bindingFailed && this.lastError?.code === "bound_thread_unavailable") this.lastError = null;
+    // С72: threads no longer bound or watched do not keep the 2 s pace.
+    if (full) for (const id of [...this.busyThreads]) if (!observedBindings.some(b => b.threadId === id)) this.busyThreads.delete(id);
   }
   private async clearProgress(topicId: number, revision: string) {
     for (const { key, value } of this.s.list<Outbox>("chat:out:progress:")) {

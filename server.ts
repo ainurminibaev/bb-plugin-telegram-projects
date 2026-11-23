@@ -2594,6 +2594,21 @@ export default async function plugin(bb: BbPluginApi) {
           })
         : undefined;
       watcher?.on("error", () => {}); // Timed polling remains as recovery if filesystem events are lost.
+      // С72: thread changes wake the chat loop; while the feed is down the bridge reads everything every 2 s.
+      let feedUp = false;
+      const unsubscribeChanges = (() => {
+        try {
+          const offThreads = bb.sdk.subscribe({event: "thread:changed", callback: (e) => {
+            if (e.id) bridge?.noteThreadChange(e.id);
+          }});
+          const offConnection = bb.sdk.subscribe({event: "realtime:connection", callback: (e) => {
+            feedUp = e.state === "connected";
+            bridge?.setChangeFeed(feedUp);
+          }});
+          feedUp = true;
+          return () => { offThreads(); offConnection(); };
+        } catch { return () => {}; }
+      })();
       try {
         while (!signal.aborted) {
           const cfg = await settings.get();
@@ -2638,6 +2653,7 @@ export default async function plugin(bb: BbPluginApi) {
                 },
               });
               bridge.recover();
+              bridge.setChangeFeed(feedUp);
             }
             await publishControl(true, cfg.language);
             await bridge.tick();
@@ -2693,6 +2709,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       } finally {
         watcher?.close();
+        unsubscribeChanges();
         await bridge?.dispose();
       }
     },

@@ -477,6 +477,62 @@ test("an archived thread's undelivered final still goes out once, then its watch
     f.cleanup();
   }
 });
+test("С72: a quiet bridge reads a changed thread at once, a missed change on the safety pass; the feed down means 2 s", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn('turn');
+    const b = f.bridge as any;
+    b.setChangeFeed(true);
+    b.recentInputAt = 0;
+    await f.bridge.observe();                                         // the first pass after the feed came up is full
+    let reads = 0;
+    const get = f.sdk.threads.get;
+    f.sdk.threads.get = async (a: any) => { reads++; return get(a); };
+    // Quiet: nothing changed — a focused pass reads nothing.
+    await f.bridge.observe();
+    assert.equal(reads, 0);
+    assert.equal(b.observeInterval(), 12000);
+    // A missed change: the answer is there, no thread:changed came. The safety pass (12 s) delivers it.
+    f.setEvents([
+      {seq: 1, type: "item/completed", scope: {kind: "turn", turnId: "turn"}, data: {item: {type: "agentMessage", text: "Ответ без события"}}},
+      {seq: 2, type: "turn/completed", scope: {kind: "turn", turnId: "turn"}, data: {status: "completed"}},
+    ]);
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter((x) => x.text === "Ответ без события").length, 0);
+    b.lastFull = Date.now() - 13_000;
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter((x) => x.text === "Ответ без события").length, 1);
+    // The feed is down: every pass is full and the pace is 2 s.
+    b.setChangeFeed(false);
+    assert.equal(b.observeInterval(), 2000);
+    reads = 0;
+    await f.bridge.observe();
+    assert.ok(reads > 0);
+  } finally {
+    f.cleanup();
+  }
+});
+test("С72: thread:changed makes the next pass read that thread without waiting for the safety pass", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn('turn');
+    const b = f.bridge as any;
+    b.setChangeFeed(true);
+    await f.bridge.observe();
+    const [{value: bound}] = f.store.list<any>("chat:binding:");
+    f.setEvents([
+      {seq: 1, type: "item/completed", scope: {kind: "turn", turnId: "turn"}, data: {item: {type: "agentMessage", text: "Ответ по событию"}}},
+      {seq: 2, type: "turn/completed", scope: {kind: "turn", turnId: "turn"}, data: {status: "completed"}},
+    ]);
+    b.noteThreadChange(bound.threadId);
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.equal(f.sent.filter((x) => x.text === "Ответ по событию").length, 1);
+  } finally {
+    f.cleanup();
+  }
+});
 test("queued answer from old binding never enters new conversation", async () => {
   const f = fixture();
   try {
