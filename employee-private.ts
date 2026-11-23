@@ -11,7 +11,28 @@ type Access={owner:number;bot:number;subject:number;nonce:string;state:"pending"
   noticeId?:number;approvalUpdate?:number};
 type Dependencies={store:Store;owner:number;bot:number;transport:(chatId:number)=>Telegram;current:()=>boolean;
   /** Binds the person's private chat to an ordinary employee thread. Returns false while that is not possible. */
-  bindPerson:(subject:number,name:string)=>Promise<boolean>};
+  bindPerson:(subject:number,name:string)=>Promise<boolean>;
+  /** С62: asks the person's conversation to write first — a short greeting and what the agent can do. */
+  greetPerson?:(subject:number,name:string,talkedBefore:boolean)=>Promise<boolean>};
+const greetedKey=(bot:number,subject:number)=>`employee:private:greeted:${bot}:${subject}`;
+
+/**
+ * С62: right after approval the person gets a conversation and the agent writes first. The mark is put before the turn
+ * is sent, so a greeting is never asked twice; a failed bind leaves no mark and the next pass retries.
+ */
+export async function greetApproved(d:Dependencies,subject:number,name:string) {
+  if (!d.greetPerson || d.store.get(greetedKey(d.bot,subject)) || !hasAccess(d.store,d.bot,d.owner,subject)) return false;
+  const talkedBefore=!!d.store.get(privatePolicyKey(subject));
+  if (!talkedBefore && !await d.bindPerson(subject,name).catch(()=>false)) return false;
+  d.store.put(greetedKey(d.bot,subject),Date.now());
+  return d.greetPerson(subject,name,talkedBefore).catch(()=>false);
+}
+
+/** Approved people the agent has not been asked to greet yet (approved before С62, or a bind that failed). */
+export async function greetPendingApproved(d:Dependencies) {
+  for (const {value} of d.store.list<Access & {name?:string}>(`employee:private:access:${d.bot}:${d.owner}:`))
+    if (value.state==="approved" && positive(value.subject)) await greetApproved(d,value.subject,value.name ?? "");
+}
 const accessKey=(bot:number,owner:number,subject:number)=>`employee:private:access:${bot}:${owner}:${subject}`;
 const nonceKey=(bot:number,owner:number,nonce:string)=>`employee:private:decision:${bot}:${owner}:${nonce}`;
 export const privatePolicyKey=(subject:number)=>`group:policy:${subject}:0`;
@@ -62,7 +83,11 @@ export async function acceptPrivateEmployeeUpdate(d:Dependencies,update:any) {
       reply_markup:{inline_keyboard:next==="approved"?[[{text:"Отозвать доступ",callback_data:"ep:revoke:"+nonce}]]:[]}}).catch(()=>{});
     const status=next==="approved"?"Доступ разрешён.":next==="denied"?"В доступе отказано.":"Доступ отозван.";
     await tg("answerCallbackQuery",{callback_query_id:callback.id,text:status}).catch(()=>{});
-    if (d.current()) await transport(subject)("sendMessage",{chat_id:subject,text:status}).catch(()=>{});
+    if (d.current() && next!=="approved") await transport(subject)("sendMessage",{chat_id:subject,text:status}).catch(()=>{});
+    // С62: approved — the agent greets the person itself; the plain notice only when the greeting cannot be asked.
+    if (d.current() && next==="approved" && !await greetApproved(d,subject,row.name ?? ""))
+      await transport(subject)("sendMessage",{chat_id:subject,text:status}).catch(()=>{});
+    if (next==="revoked") d.store.del(greetedKey(bot,subject));
     return true;
   }
   const message=update.message??update.edited_message;
@@ -105,7 +130,7 @@ export async function acceptPrivateEmployeeUpdate(d:Dependencies,update:any) {
   });
   const username=/^[A-Za-z0-9_]{1,32}$/.test(message.from.username??"") ? " @"+message.from.username : "";
   await transport(subject)("sendMessage",{chat_id:subject,
-    text:"Доступ к сотруднику ещё не выдан. Обратитесь к администратору."}).catch(()=>{});
+    text:"Запрос отправлен владельцу. Отвечу, как только он подтвердит."}).catch(()=>{});
   if (!d.current()) return true;
   // The reservation precedes the send. An unknown Telegram outcome never creates a duplicate card.
   const sent=await transport(owner)("sendMessage",{chat_id:owner,text:`Запрос личного доступа: ${name||"пользователь"}${username}\nTelegram ID: ${subject}`,
