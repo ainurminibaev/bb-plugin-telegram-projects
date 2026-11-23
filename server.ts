@@ -2206,7 +2206,9 @@ export default async function plugin(bb: BbPluginApi) {
         }
         try {
           const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
-          if (opt.targets) return {exitCode:0,stdout:JSON.stringify(sendTargets(store,bot,owner,caller,p=>archive?.groupsOf(bot,p) ?? []))};
+          // Who started the current turn of a group conversation: rights follow the author, not the place (С44).
+          const author=ctx.threadId ? store.get<number>("group:turn-author:"+ctx.threadId) : undefined;
+          if (opt.targets) return {exitCode:0,stdout:JSON.stringify(sendTargets(store,bot,owner,caller,p=>archive?.groupsOf(bot,p) ?? [],author))};
           let target:{chat:number;topic:number};
           const answer=store.get<import("./send-command").Ask>(`send:ask:${bot}:${opt.answer}`);
           if (opt.answer) { if (!answer) return {exitCode:1,stderr:"no_open_question_for_this_answer"}; target=answer.origin; }
@@ -2215,7 +2217,7 @@ export default async function plugin(bb: BbPluginApi) {
           else if (opt.chat) { const chat=findGroup(store,bot,opt.chat); target=opt.topic ? findTopic(store,bot,chat,opt.topic) : {chat,topic:0}; }
           else if (opt.topic) target=findTopic(store,bot,undefined,opt.topic);
           else return {exitCode:2,stderr:"target_required: --chat, --topic, --person or --answer; see --targets"};
-          const refusal=sendRefusal(store,bot,owner,caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer);
+          const refusal=sendRefusal(store,bot,owner,caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author);
           if (refusal) return {exitCode:1,stderr:refusal};
           // The bridge's command gets no standard input: "-" cannot be read here.
           if (opt["text-file"]==="-") return {exitCode:2,stderr:"text_file_stdin_unsupported: pass the text with --text '…' (several lines are fine) or write it to a file and pass its path"};

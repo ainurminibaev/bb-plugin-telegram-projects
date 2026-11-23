@@ -21,7 +21,7 @@ import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumS
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
-import {DISCLOSURE,accessModeKey,activeGroupSettings,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
+import {DISCLOSURE,accessModeKey,activeGroupSettings,peopleNote,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
 import {voiceHeader,acknowledge,react,SERVICE_REACTIONS,stepLabel,firstLine,progressText,DEFAULT_REACTION_OPTIONS,type ReactionChooser,type ReactionOption,type Stage} from "./turn-feedback";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
@@ -389,6 +389,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const provider=(thread as {providerId?:string}).providerId;
       const role=senderRole(store,botId,owner,r.chatId,r.senderId,provider);
       if (role==="none") {finish("revoked");continue;}
+      store.put("group:turn-author:"+r.threadId,r.senderId);
       job.guest=role==="member" || !!policy.isolated;
       const settings=activeGroupSettings(store,botId,r.chatId);
       const title=store.get<{title?:string}>(`visibility:${botId}:group:${r.chatId}`)?.title ?? "эта группа";
@@ -397,7 +398,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const rulesBase=policy.privateChat
         ? `Личный чат в Telegram: пишет ${senderName}, у него есть доступ к тебе и он может тебе поручать. Отвечай ему здесь.\n${DISCLOSURE}`
         : rulesNote({title,settings,role,senderName});
-      const rules=asks ? rulesBase+"\n"+asks : rulesBase;
+      const people=policy.privateChat ? "" : peopleNote(store,botId,owner,r.senderId);
+      const rules=[rulesBase,people,asks].filter(Boolean).join("\n");
       const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
       if (!allowed() || !await safeToSend()) {finish("revoked");continue;}

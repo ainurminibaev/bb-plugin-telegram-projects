@@ -157,7 +157,7 @@ export function rulesNote(args: { title: string; settings?: GroupSettings; role:
 }
 
 /** What may be said in a conversation with anyone but the owner. The same for groups and private chats. */
-export const DISCLOSURE = "Раскрытие: рабочие сведения из личных переписок (срок, статус, решение, договорённость) можно использовать со ссылкой на источник — «такой-то сказал, будет завтра». Личное, мнения о людях, жалобы, просьбы «не передавай» и сам текст чужой лички не пересказывай никому, включая владельца; человек может сам попросить раскрыть своё. Ранее сказанное и присланное ищи командой `bb telegram-projects search-history [слова] [--author …] [--from …] [--to …] [--last N] [--files] [--file ЧАТ:СООБЩЕНИЕ]`, не проси прислать снова. Написать в тему группы или человеку в личку: `bb telegram-projects send ([--chat ГРУППА] [--topic ТЕМА] | --person ЧЕЛОВЕК) --text … [--ask]`; с --ask ответ вернётся сюда. Куда можно писать — `bb telegram-projects send --targets`; переспрашивай, только если имя неоднозначно. Темы своей группы (создать, переименовать, закрыть, открыть) — `bb telegram-projects topic …`; удаление — только владелец.";
+export const DISCLOSURE = "Раскрытие: рабочие сведения из личных переписок (срок, статус, решение, договорённость) можно использовать со ссылкой на источник — «такой-то сказал, будет завтра». Личное, мнения о людях, жалобы, просьбы «не передавай» и сам текст чужой лички не пересказывай никому, включая владельца; человек может сам попросить раскрыть своё. Ранее сказанное и присланное ищи командой `bb telegram-projects search-history [слова] [--author …] [--from …] [--to …] [--last N] [--files] [--file ЧАТ:СООБЩЕНИЕ]`, не проси прислать снова. Ответ, отчёт и напоминание идут туда, где дана просьба: просьба в группе «напиши/отпиши Олегу …» — пишешь Олегу в этой же группе, отметив его (@ник), даже если личка с ним открыта; в личку — только если прямо сказано «в личку». Написать в тему группы: `bb telegram-projects send [--chat ГРУППА] [--topic ТЕМА] --text …`; человеку в личку, когда это прямо попросили: `bb telegram-projects send --person ЧЕЛОВЕК --text … [--ask]`; с --ask ответ вернётся сюда. Куда можно писать — `bb telegram-projects send --targets`; переспрашивай, только если имя неоднозначно. Темы своей группы (создать, переименовать, закрыть, открыть) — `bb telegram-projects topic …`; удаление — только владелец.";
 
 type LegacySaved = { rules?: { members?: string[]; triggers?: string[]; sources?: string[] }; note?: string };
 
@@ -195,4 +195,25 @@ export function migrateLegacyRights(store: Store, bot: number, extraPeople: numb
   setAccess(store, bot, [...people.values()]);
   store.put(marker, Date.now());
   return true;
+}
+
+/**
+ * The place note's facts about people and memory (С43): from the current settings, by the author of the message.
+ * The owner learns who may write privately and whose requests wait; anyone else only that these details are not shown here.
+ */
+export function peopleNote(store: Store, bot: number, owner: number, sender: number) {
+  const lines: string[] = [];
+  if (sender === owner) {
+    lines.push("Пишет владелец.");
+    const open = accessList(store, bot).map((p) => p.name).filter(Boolean);
+    const waiting = store.list<{ state?: string; name?: string }>(`employee:private:access:${bot}:${owner}:`)
+      .map((r) => r.value).filter((v) => v.state === "pending").map((v) => v.name || "без имени");
+    lines.push(`Личка с тобой открыта: ${open.length ? open.join(", ") : "никому, кроме владельца"}.` +
+      (waiting.length ? ` Ждут одобрения владельца: ${waiting.join(", ")}.` : "") +
+      " Новый человек пишет тебе в личку «Старт» — владельцу приходит карточка, после одобрения разговор идёт.");
+  } else {
+    lines.push("Кому открыта личка с тобой, здесь не показываешь: так настроено. Человек может сам написать тебе в личку «Старт» — владелец решит.");
+  }
+  lines.push("Память: каждое сообщение и файл этого чата сохраняются в память переписки бота; из этого места поиск видит этот чат и то, что ему разрешено; чужие лички сюда не попадают. Что у тебя подключено — `bb personal-assistant tools --guest`.");
+  return lines.join("\n");
 }

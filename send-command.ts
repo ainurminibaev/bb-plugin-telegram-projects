@@ -83,7 +83,7 @@ const reachable=(store:Store,bot:number,owner:number,person:number)=>
 
 /** Undefined when allowed, otherwise the reason. */
 export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversation|undefined,target:SendTarget,
-  groupsOf:(person:number)=>number[],askId?:string):string|undefined {
+  groupsOf:(person:number)=>number[],askId?:string,author?:number):string|undefined {
   if (!caller) return "send_only_from_a_telegram_conversation";
   if (askId) {
     const ask=store.get<Ask>(askPrefix(bot)+askId);
@@ -101,18 +101,20 @@ export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversat
   if (!reachable(store,bot,owner,target.chat))
     return "person_has_not_started_the_bot: mention them in a group instead and tell who asked why";
   if (caller.kind==="owner") return;
-  if (caller.kind==="group" && groupsOf(target.chat).includes(caller.chat)) return;
+  // From a group a person's private chat is written only on the owner's own request (С44): the author decides, not the place.
+  if (caller.kind==="group" && groupsOf(target.chat).includes(caller.chat))
+    return author===owner ? undefined : "person_only_on_the_owners_request_from_a_group: answer in this group and mention them";
   if (caller.kind==="person" && caller.subject===target.chat) return;
   return "person_not_allowed_from_this_conversation";
 }
 
 /** Where this conversation may send, for the agent to pick names from. */
-export function sendTargets(store:Store,bot:number,owner:number,caller:Conversation|undefined,groupsOf:(person:number)=>number[]) {
+export function sendTargets(store:Store,bot:number,owner:number,caller:Conversation|undefined,groupsOf:(person:number)=>number[],author?:number) {
   const groups=store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`).map(r=>r.value)
     .filter(g=>!sendRefusal(store,bot,owner,caller,{chat:g.chat,topic:0},groupsOf))
     .map(g=>({chat:g.chat,title:g.title ?? String(g.chat),topics:groupTopics(store,bot,g.chat)}));
   const people=accessList(store,bot).map(p=>({...p,reachable:reachable(store,bot,owner,p.id)}))
-    .filter(p=>!p.reachable || !sendRefusal(store,bot,owner,caller,{chat:p.id,topic:0},groupsOf))
+    .filter(p=>!p.reachable || !sendRefusal(store,bot,owner,caller,{chat:p.id,topic:0},groupsOf,undefined,author))
     .map(p=>({id:p.id,name:p.name,...(!p.reachable && {note:"has not started the bot: mention them in a group"})}));
   return {groups,people};
 }
