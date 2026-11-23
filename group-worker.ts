@@ -24,10 +24,17 @@ import {DISCLOSURE,accessModeKey,authorStatus,activeGroupSettings,peopleNote,per
 import {voiceHeader,acknowledge,react,SERVICE_REACTIONS,stepLabel,firstLine,progressText,DEFAULT_REACTION_OPTIONS,type ReactionChooser,type ReactionOption,type Stage} from "./turn-feedback";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
+/** A submitted message without a turn for this long, while its thread is idle, is lost. */
+export const LOST_SUBMIT_MS=15*60_000;
+/** "Typing" for a submitted message stops after this long. */
+export const TYPING_MAX_MS=10*60_000;
+
 type Job = {
   route: GroupInput; ownerId:number; revision?:string;
   state:"pending"|"submitted"|"ready"|"sending"|"done"|"revoked";
   taskId?:string; progressId?:number|null;
+  /** When the message was given to the thread; a submitted message without a turn does not live forever. */
+  submittedAt?:number; resubmitted?:boolean;
   executionToken?:string; executorRetryAt?:number;
   pdfIndex?:number; failedPdfs?:string[];
   albumSent?:number[];
@@ -131,6 +138,8 @@ export function groupTyping(store:Store, owner:()=>number|undefined, bot:()=>num
     const topics=new Map<string,GroupInput>();
     for (const {value:job} of store.list<Job>(`group:in:${botId}:`)) {
       if (job.state!=="pending" && job.state!=="submitted") continue;
+      // "Typing" only while the message is fresh: a lost submission never shows it for hours.
+      if (job.state==="submitted" && Date.now()-(job.submittedAt ?? 0)>TYPING_MAX_MS) continue;
       const r=job.route;
       if (r.waitUntil && !r.voice && Date.now()<r.waitUntil) continue;
       const key=`group:policy:${r.chatId}:${r.topicId}`;
@@ -299,7 +308,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           if (isolatedResult.state!=="missing") {
             if (!allowed()) {finish("revoked");continue;}
             delete r.examples;
-            job.state="submitted";
+            job.state="submitted"; job.submittedAt=Date.now();
             store.put(key,job);
           } else isolatedResult=undefined;
         } catch {
@@ -366,7 +375,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           store.put(key,job);
           await executor.submit(job.executionToken,[r.text,taskNote].filter(Boolean).join("\n"),signal,remoteInputs);
           delete r.examples;
-          job.state="submitted";
+          job.state="submitted"; job.submittedAt=Date.now();
           store.put(key,job);
         }
         if (!job.executionToken) {finish("revoked");continue;}
@@ -413,7 +422,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       else delete job.busyLabel;
       job.cursor=latest[0]?.seq ?? 0;
       delete r.examples;
-      job.state="submitted";
+      job.state="submitted"; job.submittedAt=Date.now();
       store.put(key,job);
       // The mode persists for later messages of the thread, so every group message sets it.
       await sdk.threads.send({threadId:r.threadId,mode:busy ? "steer-if-active" : "queue-if-active",permissionMode,
@@ -457,6 +466,14 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         }
         job.cursor=e.seq;
         if (job.state!=="submitted") break;
+      }
+      // A message the thread never took up (no turn, the thread idle) is given once more, then closed honestly.
+      if (job.state==="submitted" && !job.turnId && Date.now()-(job.submittedAt ?? 0)>LOST_SUBMIT_MS) {
+        const t=await sdk.threads.get({threadId:r.threadId,signal}).catch(()=>undefined);
+        if (t && (t as {status?:string}).status!=="active") {
+          if (!job.resubmitted) {job.resubmitted=true; job.busyOnce=true; delete job.busyLabel; delete job.submittedAt; job.state="pending";}
+          else {job.answer="Это сообщение у меня потерялось и осталось без ответа — повторите его, пожалуйста."; job.stage="failed"; job.state="ready";}
+        }
       }
       store.put(key,job);
       if (job.state==="submitted") await updateProgress();

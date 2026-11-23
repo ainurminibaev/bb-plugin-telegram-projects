@@ -12,7 +12,7 @@ test("typing is scoped, deduplicated, renewed and stopped with the task",async t
   rows.set("group:policy:-10:3",policy);
   for(const [id,sender,topic] of [[1,7,3],[2,7,3],[3,8,3],[4,7,4]]) {
     rows.set("group:in:5:"+id,{route:{chatId:-10,topicId:topic,senderId:sender,threadId:"worker"},
-      revision:"a",ownerId:7,state:"submitted"});
+      revision:"a",ownerId:7,state:"submitted",submittedAt:Date.now()});
   }
   const actions:unknown[]=[];
   const controller=new AbortController();

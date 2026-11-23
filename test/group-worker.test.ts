@@ -486,3 +486,40 @@ test("a group message that arrives while the thread works joins the running turn
  assert.equal(sends[1].mode,"steer-if-active");
  assert.deepEqual(sent.sort(),["быстрый ответ","долгий ответ"],"each message gets its own answer; the enclosed one is not the long answer");
 });
+
+test("a message the thread never took up is given once more, then closed with an honest line; typing stops",async t=>{
+ let now=Date.now();
+ t.mock.method(Date,"now",()=>now);
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"}},7,5));
+ let sends=0;
+ // The thread accepts the message but never starts a turn for it, and stays idle.
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible",status:"idle"}),
+   events:{list:async()=>[]},send:async()=>{sends++;}}};
+ const sent:any[]=[];
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,()=>async <T>(m:string,p:any)=>{if(m==="sendMessage")sent.push(p);return {message_id:1} as T},new AbortController().signal);
+ await tick();
+ assert.equal(sends,1);
+ assert.equal(rows.get("group:in:5:8").state,"submitted");
+ now+=16*60_000;
+ await tick(); await tick();
+ assert.equal(sends,2,"given once more");
+ now+=16*60_000;
+ await tick(); await tick();
+ assert.equal(sends,2,"not a third time");
+ assert.equal(rows.has("group:in:5:8"),false);
+ assert.match(sent.at(-1).text,/потерялось/);
+ // Typing would not be sent for a submission older than the limit.
+ store.put("group:in:5:9",{route:{chatId:-1001,topicId:3,threadId:"t",senderId:7},ownerId:7,state:"submitted",submittedAt:now-11*60_000});
+ const typed:any[]=[];
+ const {groupTyping}=await import("../group-worker");
+ const ac=new AbortController();
+ groupTyping(store as any,()=>7,()=>5,()=>async <T>(m:string,p:any)=>{typed.push([m,p]);return {} as T},ac.signal);
+ await new Promise(r=>setTimeout(r,50)); ac.abort();
+ assert.equal(typed.length,0);
+});
