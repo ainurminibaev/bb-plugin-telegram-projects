@@ -96,6 +96,9 @@ export const FORWARD_COMMENT_MS = 10_000;
 // A question or forward that still arrives after the batch was dispatched joins
 // the running turn of that batch instead of becoming a separate task.
 export const FORWARD_FOLLOWUP_MS = 30_000;
+/** П5: how long, per try, a follow-up waits for the first message's turn to start (up to four tries). */
+export let FOLLOWUP_START_WAIT_MS = 2_500;
+export function setFollowupStartWait(ms: number) { FOLLOWUP_START_WAIT_MS = ms; }
 const FORWARD_PREFIX = "[Пересланное сообщение]\n";
 function collectionWindow(input: ChatInput, normalMs: number) {
   return input.forwarded && normalMs ? Math.max(normalMs, FORWARD_COMMENT_MS) : normalMs;
@@ -1844,7 +1847,16 @@ export class ChatBridge {
         parts.some(p => p.ownerId !== parts[0].ownerId) || this.routes.cancelled(prior.route)) return undefined;
     // П5: not only a forward and its question — any message of the owner that follows while that turn still runs
     // (a text, then a screenshot) is one task with it, not a second request with its own answer.
-    if (!(await this.runningTurnOf(b.threadId, prior.route))) return undefined;
+    // П5: the first message may still be starting its turn (the model has not taken it yet) — wait for it a little,
+    // instead of sending the follow-up as a second request with its own answer.
+    let running = await this.runningTurnOf(b.threadId, prior.route);
+    for (let i = 0; !running && i < 4 && !this.d.signal.aborted; i++) {
+      const thread = await this.d.sdk.threads.get({threadId: b.threadId, signal: this.d.signal}).catch(() => undefined) as {status?: string} | undefined;
+      if (thread?.status !== "active") break;
+      await new Promise(resolve => setTimeout(resolve, FOLLOWUP_START_WAIT_MS));
+      running = await this.runningTurnOf(b.threadId, prior.route);
+    }
+    if (!running) return undefined;
     const forwards = parts.filter(p => p.forwarded).length;
     const prefix = forwards === parts.length
       ? "Пересланное (дополнение к сообщению пользователя выше, это одно поручение):\n"

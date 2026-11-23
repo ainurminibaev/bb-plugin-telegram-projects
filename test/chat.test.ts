@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChatBridge, inputSchema, splitText, type ChatInput } from "../chat";
+import { ChatBridge, inputSchema, setFollowupStartWait, splitText, type ChatInput } from "../chat";
 import { TelegramFailure, type Store } from "../model";
 const OWNER_ID = 259034221;
 function fixture(receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{path: string; name: string; bytes: number; sha256: string}>, transcribe?: () => Promise<string>, collectMs = 0, captureOwnerGroupPost?: (threadId:string, owner:number)=>boolean) {
@@ -2430,6 +2430,29 @@ test("П5: a message that follows the owner's text while that turn runs joins it
     assert.equal(send.mode,"steer-if-active");
     assert.match(send.input[0].text,/^Дополнение к сообщению пользователя выше \(пришло следом/);
   } finally {f.cleanup();}
+});
+
+test("П5: a follow-up waits for the first message's turn that is still starting, then joins it", async () => {
+  setFollowupStartWait(5);
+  const f=fixture();
+  try {
+    await f.bridge.handle(f.input("start"));
+    const first={...f.input("Выполни шаги"),sentAt:500};
+    await f.bridge.handle(first);
+    const marker=f.calls.filter(c=>c[0]==="send").at(-1)[1].input[1];
+    f.thread.status="active";
+    let calls=0;
+    f.sdk.threads.events.list=async()=>(++calls<2) ? [
+      {seq:41,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"s-req",originPluginId:"telegram-projects",input:[marker]}},
+    ] : [
+      {seq:41,type:"client/turn/requested",scope:{kind:"thread"},data:{requestId:"s-req",originPluginId:"telegram-projects",input:[marker]}},
+      {seq:42,type:"turn/input/accepted",scope:{kind:"turn",turnId:"s-turn"},data:{clientRequestId:"s-req"}},
+    ];
+    await f.bridge.handle({...f.input("и ещё одно"),sentAt:506});
+    const send=f.calls.filter(c=>c[0]==="send").at(-1)[1];
+    assert.equal(send.mode,"steer-if-active");
+    assert.match(send.input[0].text,/^Дополнение к сообщению пользователя выше/);
+  } finally {f.cleanup(); setFollowupStartWait(2500);}
 });
 
 test("explicit delivery sends relative and empty-label images, videos and files[] like a routed answer", async () => {
