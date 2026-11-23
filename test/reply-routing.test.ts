@@ -236,7 +236,7 @@ test("worker's own child notices and coordinator messages keep a delegated turn 
   void store;
 });
 
-test("a mixed delegated turn is reported to its coordinator explicitly instead of being lost", () => {
+test("a message typed in BB into a delegated Telegram task keeps the task routed (С48)", () => {
   const {routes} = fixture();
   const parentMarker = routes.ingress("parent",tg);
   const token = parentMarker.text.match(/route:([^\]]+)/)![1];
@@ -246,10 +246,11 @@ test("a mixed delegated turn is reported to its coordinator explicitly instead o
   routes.accept("child","turn","work");
   routes.requested("child",{requestId:"owner-in-bb",initiator:"user",input:[{type:"text",text:"also do this"}]});
   routes.accept("child","turn","owner-in-bb");
-  assert.equal(routes.destination("child","turn"),undefined);
+  // С48: a message typed in BB into a busy Telegram task is a service message; the task keeps its destination.
+  assert.deepEqual(routes.destination("child","turn"),tg);
   routes.complete("child","turn","completed");
   const [report] = routes.reserveChildReports("parent",tg.chatId,tg.topicId);
-  assert.equal(report.value.mixed,true);
+  assert.equal(report.value.mixed,undefined);
   assert.deepEqual(report.value.route,tg);
   // Cancelled tasks stay silent.
   const c = fixture();

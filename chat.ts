@@ -440,8 +440,10 @@ export class ChatBridge {
       if (notice?.kind.startsWith("child-") && (subject?.kind === "thread" || subject?.kind === "thread-batch") &&
           (!subject.outcomes?.length || subject.outcomes.some(outcome => !("turnId" in outcome) || !outcome.turnId))) return {action: "proceed"};
     }
-    if (ctx.attempt === "join-turn" && await this.canJoinNativeAgent(ctx))
+    if (ctx.attempt === "join-turn" && await this.canJoinNativeAgent(ctx)) {
+      if (this.joinedTurn && this.routes.destination(ctx.thread.id, this.joinedTurn)?.kind === "telegram") this.acknowledgeSender(ctx);
       return {action: "proceed"};
+    }
     if (ctx.queuedMessages.length > 1) {
       // Core has already claimed these rows when invoking this hook. Record
       // the work; mutate the boundary only after returning wait releases them.
@@ -451,6 +453,22 @@ export class ChatBridge {
     if (ctx.attempt === "join-turn")
       return {action: "wait", reason: "Предыдущее поручение ещё выполняется; ответ останется в исходном интерфейсе.", sendAt: Date.now() + 1000};
     return {action: "proceed"};
+  }
+  /**
+   * С48: the sender of a message that joined a running Telegram task learns at once that it was delivered;
+   * the answer comes separately. Once per five minutes per pair of threads, so two agents never loop on it.
+   */
+  private joinedTurn: string | undefined;
+  private acknowledgeSender(ctx: MessageDispatchHookContext) {
+    const sender = ctx.senderThreadId;
+    if (!sender || sender === "mixed" || sender === ctx.thread.id) return;
+    const key = "reply:join-ack:" + ctx.thread.id + ":" + sender;
+    if (Date.now() - (this.s.get<number>(key) ?? 0) < 5 * 60_000) return;
+    this.s.put(key, Date.now());
+    const title = (ctx.thread as {title?: string}).title;
+    void Promise.resolve().then(() => this.d.sdk.threads.send({threadId: sender, mode: "queue-if-active", input: [{type: "text", mentions: [],
+      text: `[Мост Telegram] Твоё сообщение передано в идущее поручение треда${title ? ` «${title}»` : ""}; ответ придёт отдельно. Отвечать на это не нужно.`}]}))
+      .catch(() => {});
   }
   private async canJoinNativeAgent(ctx: MessageDispatchHookContext) {
     const sender=ctx.senderThreadId;
@@ -465,6 +483,8 @@ export class ChatBridge {
         types:["client/turn/requested","turn/input/accepted","turn/started","turn/completed"],
         signal:AbortSignal.any([this.d.signal,AbortSignal.timeout(1000)]),
       });
+      const started=[...events].sort((a,b)=>b.seq-a.seq).find(e=>e.type==="turn/started");
+      this.joinedTurn=started?.scope.kind==="turn" ? started.scope.turnId : undefined;
       return this.routes.canJoinNativeAgent(ctx.thread.id,sender,events);
     } catch {
       return false;

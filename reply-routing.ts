@@ -334,6 +334,9 @@ export class ReplyRoutes {
         this.unroutedNotice(threadId, data.requestId);
       else if (data.initiator === "agent" && data.senderThreadId)
         this.store.put(this.auxiliaryKey(threadId, data.requestId), {kind: "agent", senderThreadId: data.senderThreadId});
+      // С48: a person typing in BB into a thread busy with a Telegram task adds to it; the task keeps its destination.
+      else if (data.initiator === "user" && !data.senderThreadId && !data.originPluginId)
+        this.store.put(this.auxiliaryKey(threadId, data.requestId), {kind: "bb-user"});
       return true;
     }
     const token = this.markerId(data.input ?? []);
@@ -415,6 +418,7 @@ export class ReplyRoutes {
       // the task's result still goes where the task came from.
       const primaryRoute = this.routeOf(threadId, turn.requestIds[0]);
       return !(aux?.kind === "child-notice" ||
+        (aux?.kind === "bb-user" && primaryRoute?.kind === "telegram") ||
         (aux?.kind === "agent" && ((delegatedBy && aux.senderThreadId === delegatedBy) || primaryRoute?.kind === "telegram")));
     });
   }
