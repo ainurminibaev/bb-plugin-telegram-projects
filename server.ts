@@ -982,6 +982,11 @@ export default async function plugin(bb: BbPluginApi) {
   // Every conversation of an employee is an ordinary thread in its own project: the same
   // environment, agent and instructions as the owner's private chat. A person's private chat and
   // each group topic get one thread, created on first use.
+  // The rules in force from the platform plugin (0.4.4); a platform without them (older version) gives nothing.
+  async function turnRulesOf(projectId:string) {
+    return bb.sdk.plugins.callRpc({pluginId:"personal-assistant",method:"turnRules",input:{projectId},
+      outputSchema:z.object({version:z.string(),text:z.string()}).nullable()}).catch(()=>null);
+  }
   // С43/С67: the owner's answer to a question from another conversation comes to that conversation as a turn.
   async function deliverOwnerAnswer(ask:import("./send-command").Ask,answer:string,via:"button"|"text",who?:string) {
     const bot=botId(), owner=ownerId();
@@ -2585,7 +2590,7 @@ export default async function plugin(bb: BbPluginApi) {
                   groupTransport,signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined,cfg.language as "ru"|"en"),cfg.telegramFileHostId,
-                  (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum,()=>currentReactions);
+                  (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum,()=>currentReactions,turnRulesOf);
                 await deliverScheduledResults(store,bb.sdk,groupTransport,signal,
                   ()=>ownerId()===owner && botId()===bot && !stateTransferBusy);
               } catch (error) { ingressError = safeError(error); }

@@ -2037,6 +2037,12 @@ export class ChatBridge {
     // Questions to the owner from other conversations (С43): the owner's turn knows them and returns the answer.
     const ownerAsks=input.chatId===this.d.owner() ? ownerAskNotes(this.s,input.chatId,Date.now(),input.replyTo) : "";
     if (ownerAsks) text=text+"\n\n"+ownerAsks;
+    // The rules in force (0.9.59): in full once per edit, otherwise one line; the session keeps what it started with.
+    // Asked early, alongside the thread checks, so the turn's timing does not change.
+    const rulesAsk = b.threadId && b.projectId && typeof this.d.sdk.plugins?.callRpc === "function"
+      ? Promise.resolve().then(() => this.d.sdk.plugins.callRpc({pluginId:"personal-assistant",method:"turnRules",input:{projectId:b!.projectId!},
+          outputSchema:z.object({version:z.string(),text:z.string()}).nullable()})).catch(() => null)
+      : undefined;
     if (b.threadId) {
       const pending = await this.d.sdk.threads.interactions.list({
         threadId: b.threadId,
@@ -2060,16 +2066,27 @@ export class ChatBridge {
       const metadata = busy ? this.routes.busyIngress(b.threadId, own, originalDigest) :
         [this.routes.ingress(b.threadId, followUp?.route ?? own, undefined, undefined, followUp ? undefined : originalDigest)];
       if (albumChanged(this.s,input.albumKey)) return;
+      let rulesVersion: string | undefined;
+      let rulesInput: string | undefined;
+      const inForce = rulesAsk ? await rulesAsk as {version?: unknown; text?: unknown} | null : null;
+      if (inForce && typeof inForce.version === "string" && typeof inForce.text === "string") {
+        rulesInput = this.s.get<string>("chat:rules-version:" + b.threadId) === inForce.version
+          ? `Правила организации без изменений (версия ${inForce.version}).`
+          : `Правила обновлены (версия ${inForce.version}) и действуют с этого хода. Прежние формулировки правил в этом разговоре отменены — следуй этим:\n\n${inForce.text}`;
+        rulesVersion = inForce.version;
+      }
       const dispatched = await this.d.sdk.threads.send({
         threadId: b.threadId,
         mode: busy || followUp ? "steer-if-active" : "queue-if-active",
         input: [{ type: "text", text: followUp ? followUp.prefix + text : await this.withCatchUp(b.threadId, text), mentions: [] },
+          ...(rulesInput ? [{type:"text" as const,visibility:"agent-only" as const,text:rulesInput,mentions:[]}] : []),
           ...(albumImages??[]),...metadata],
       });
       if (dispatched?.delivery === "queued")
         this.enqueue(b.topicId, this.tr("Сообщение в очереди. Помощник получит его, когда BB разрешит продолжить."),
           undefined, "event:" + b.revision + ":queued:" + input.updateId, false, undefined, own);
       if (!input.albumId) this.rememberDispatch(b.threadId, parts ?? [input], followUp?.route ?? own);
+      if (rulesVersion) this.s.put("chat:rules-version:" + b.threadId, rulesVersion);
     } else {
       if (!b.ready) {
         await this.menu(b);

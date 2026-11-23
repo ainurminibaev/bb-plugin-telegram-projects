@@ -523,3 +523,32 @@ test("a message the thread never took up is given once more, then closed with an
  await new Promise(r=>setTimeout(r,50)); ac.abort();
  assert.equal(typed.length,0);
 });
+
+test("the rules in force come with the turn: in full once per version, then one line (0.9.59)",async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true,projectId:"group-project"});
+ const events:any[]=[]; const inputs:any[]=[];
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),
+   events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+   send:async(q:any)=>{inputs.push(q.input);const id="turn"+inputs.length;
+     const ev=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:id}});
+     ev("client/turn/requested",{requestId:id,originPluginId:"telegram-projects",input:q.input});ev("turn/input/accepted",{clientRequestId:id});
+     ev("item/completed",{item:{type:"agentMessage",text:"ok"}});ev("turn/completed",{status:"completed"});}}};
+ let rules={version:"v1aaaaaaaaaa",text:"Принцип: делай там, где просят."};
+ const tick=()=>processGroupInputs(store as any,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal,
+   undefined,undefined,undefined,false,undefined,undefined,async()=>rules);
+ const say=(id:number)=>acceptGroupUpdate(store,{update_id:id,message:{message_id:id,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"+id}},7,5);
+ const ruleText=(i:number)=>inputs[i].map((x:any)=>x.text??"").join("\n");
+ say(10); await tick();
+ assert.match(ruleText(0),/Правила обновлены \(версия v1aaaaaaaaaa\)[\s\S]*делай там, где просят/);
+ say(11); await tick();
+ assert.match(ruleText(1),/Правила организации без изменений \(версия v1aaaaaaaaaa\)/);
+ assert.doesNotMatch(ruleText(1),/делай там, где просят/);
+ rules={version:"v2bbbbbbbbbb",text:"Принцип: новое правило."};
+ say(12); await tick();
+ assert.match(ruleText(2),/Правила обновлены \(версия v2bbbbbbbbbb\)[\s\S]*новое правило/);
+});

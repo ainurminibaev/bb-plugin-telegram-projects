@@ -172,7 +172,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   transcribe?:(voice:NonNullable<GroupInput["voice"]>)=>Promise<string>, fileHostId?:string,
   receiveExample?:(example:GroupExample,route:GroupInput)=>Promise<SavedTelegramFile|ImageAttachment>, visibleProgress=false,
   verifyOwnerForum?:(policy:GroupTopicPolicy)=>Promise<boolean>,
-  reactions?:()=>{chooser?:ReactionChooser;options:ReactionOption[]}) {
+  reactions?:()=>{chooser?:ReactionChooser;options:ReactionOption[]},
+  /** The rules in force for a project and their fingerprint, from the platform plugin (0.4.4); null outside an organization. */
+  turnRules?:(projectId:string)=>Promise<{version:string;text:string}|null>) {
   const routes=new ReplyRoutes(store);
   type Cleanup={chatId:number;messageId:number;retryAt?:number};
   for (const {key,value} of store.list<Cleanup>(`group:cleanup:${botId}:`)) {
@@ -415,6 +417,13 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       // С55: the owner wrote without a mention; the agent decides whether the message is meant for it.
       const unaddressed=r.ownerUnaddressed ? "Владелец написал в группе без отметки. Если реплика обращена не к тебе (он говорит с другими людьми), ничего не делай и ответь ровно "+NO_REPLY+"." : "";
       const rules=[rulesBase,people,asks,unaddressed].filter(Boolean).join("\n");
+      // A running session keeps the rules it started with: the rules in force come with the turn — in full once per edit,
+      // otherwise one line (0.9.59).
+      const rulesVersionKey="group:rules-version:"+r.threadId;
+      const inForce=policy.projectId && turnRules ? await turnRules(policy.projectId).catch(()=>null) : null;
+      const rulesInForce=!inForce ? "" : store.get<string>(rulesVersionKey)===inForce.version
+        ? `Правила организации без изменений (версия ${inForce.version}).`
+        : `Правила обновлены (версия ${inForce.version}) и действуют с этого хода. Прежние формулировки правил в этом разговоре отменены — следуй этим:\n\n${inForce.text}`;
       const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
       if (!allowed() || !await safeToSend()) {finish("revoked");continue;}
@@ -431,7 +440,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       // The mode persists for later messages of the thread, so every group message sets it.
       await sdk.threads.send({threadId:r.threadId,mode:busy ? "steer-if-active" : "queue-if-active",permissionMode,
         input:[{type:"text",text:r.text,mentions:[]},...localInputs,...metadata,{type:"text" as const,visibility:"agent-only" as const,text:rules,mentions:[]},
+          ...(rulesInForce ? [{type:"text" as const,visibility:"agent-only" as const,text:rulesInForce,mentions:[]}] : []),
           ...(taskNote ? [{type:"text" as const,visibility:"agent-only" as const,text:taskNote,mentions:[]}] : [])]});
+      if (inForce) store.put(rulesVersionKey,inForce.version);
     }
     if (job.state==="submitted") {
       const events=await sdk.threads.events.list({threadId:r.threadId,afterSeq:String(job.cursor??0),limit:"100",signal,
@@ -456,7 +467,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
             if (e.type==="item/started" && GROUP_TOOL_ITEMS.has(e.data.item.type)) job.step=stepLabel(e.data.item as never);
             if (e.type==="item/completed" && e.data.item.type==="agentMessage" && !e.data.item.parentToolCallId) {
               const text=e.data.item.text;
-              job.agentLine??=firstLine(stripTelegramMarkers(text)) || undefined;
+              job.agentLine??=firstLine(stripTelegramMarkers(text).replace(/\[\/?telegram-answer(?::[a-f0-9-]+)?\]/g,"").trim()) || undefined;
               // Answers to other messages that joined this turn are not this message's answer.
               const own=label ? busyAnswerText(text,label) : undefined;
               if (own || !isBusyAnswer(text)) {job.turnId=turn; job.answer=own ?? text;}
