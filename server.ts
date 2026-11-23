@@ -982,7 +982,7 @@ export default async function plugin(bb: BbPluginApi) {
   // environment, agent and instructions as the owner's private chat. A person's private chat and
   // each group topic get one thread, created on first use.
   // С62: the person's conversation writes first after approval: a greeting, then the agent finds out what the person needs.
-  async function greetPerson(subject:number,name:string,talkedBefore:boolean) {
+  async function greetPerson(subject:number,name:string,talkedBefore:boolean,late=false) {
     const threadId=store.get<GroupTopicPolicy>(`group:policy:${subject}:0`)?.threadId;
     if (!threadId) return false;
     const who=name || "этот человек";
@@ -990,7 +990,9 @@ export default async function plugin(bb: BbPluginApi) {
       `Владелец открыл ${who} личку с тобой.`,
       talkedBefore
         ? "Вы уже переписывались. Если о себе и своих возможностях ты ему ещё не рассказывал — напиши одно короткое сообщение: кто ты и с чем можешь помочь, своими словами. Если рассказывал — ничего не отправляй."
-        : "Напиши ему первым одно короткое сообщение: приветствие, кто ты и с чем можешь помочь, своими словами, и спроси, что ему нужно от этой лички.",
+        : late
+          ? "Он нажал «Старт» и был одобрен раньше, но ответа от тебя не получил. Напиши ему первым одно короткое сообщение своими словами: извинись, что не ответил сразу, одной фразой — что было не так (без внутренних подробностей: после одобрения ответ не ушёл), кто ты и с чем можешь помочь, и спроси, что ему нужно."
+          : "Напиши ему первым одно короткое сообщение: приветствие, кто ты и с чем можешь помочь, своими словами, и спроси, что ему нужно от этой лички.",
       `Отправка: bb telegram-projects send --person ${subject} --text "…" (без неё сообщение до него не дойдёт).`,
       "Затем держи в ведении (навык task-tracking), пока не выяснишь, что ему нужно, и не поможешь: сроков нет, проверка — при ежедневной сверке.",
     ].join("\n")}]});
