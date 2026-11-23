@@ -137,6 +137,12 @@ function contextMediaForReply(store:Store, policy:GroupTopicPolicy, lines:TopicL
   return people.size===1 && files.length===1 ? {file:files[0]} : {ambiguous:true};
 }
 
+/** The topic of a group message: in a forum General is 0 (a reply there may carry a thread id that is no topic). */
+export function messageTopic(m: any): number {
+  if (m?.chat?.is_forum === true) return m.is_topic_message === true ? (m.message_thread_id ?? 0) : 0;
+  return m?.message_thread_id ?? 0;
+}
+
 export type Ingress =
   | {kind: "group"; ownerTopicText?: string; ownerUnaddressed?: true; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; ownText?: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
@@ -159,12 +165,12 @@ export function routeUpdate(
   const callbackId = cq ? String(cq.id) : undefined;
   if (group && !cq && (m?.chat?.type === "supergroup" || m?.chat?.type === "group" ||
       (group.privateChat && m?.chat?.type === "private" && m.chat.id === from?.id))) {
-    const topicId = m.message_thread_id ?? 0;
+    const topicId = messageTopic(m);
     if (!owner || m.chat.id !== group.chatId || topicId !== group.topicId ||
         !group.threadId || !Number.isSafeInteger(from?.id) || from.id <= 0 ||
         from.is_bot || m.sender_chat || !canInvokeGroup(group, owner, from.id))
       return {kind: "ignore"};
-    if (group.ownerSharedProject && (m.is_topic_message!==true || !originalPerson(m))) return {kind:"ignore"};
+    if (group.ownerSharedProject && ((m.is_topic_message===true)!==(topicId>0) || !originalPerson(m))) return {kind:"ignore"};
     const text = m.text ?? m.caption ?? "";
     const v = m.voice;
     const voice = v?.file_id ? {fileId:v.file_id, mime:v.mime_type ?? "audio/ogg", size:v.file_size ?? 0, duration:v.duration ?? 0} : undefined;
@@ -364,7 +370,7 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       !Number.isSafeInteger(message?.message_id) || message.message_id <= 0 ||
       !["group", "supergroup", "private"].includes(message?.chat?.type)) return false;
   const chatId = message.chat.id;
-  const topicId = message.message_thread_id ?? 0;
+  const topicId = messageTopic(message);
   const privateChat = message.chat.type === "private";
   if (!Number.isSafeInteger(chatId) || !Number.isSafeInteger(topicId) || topicId < 0) return false;
   if (privateChat ? guest || chatId <= 0 || chatId === owner || message.from?.id !== chatId || topicId !== 0 : chatId >= 0) return false;
@@ -374,7 +380,8 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     const bound = store.get<GroupTopicPolicy>(`group:policy:${chatId}:${topicId}`);
     if (!bound || (bound.ownerId !== undefined && owner !== bound.ownerId) || bound.botId !== botId || typeof bound.ownerOnly !== "boolean" ||
         typeof bound.requireMention !== "boolean" || !bound.botUsername || privateChat !== (bound.privateChat === true)) return;
-    if (bound.ownerSharedProject && (!isSharedOwnerPolicy(bound) || guest || message.is_topic_message!==true ||
+    // A topic message for a topic, General (0) without one.
+    if (bound.ownerSharedProject && (!isSharedOwnerPolicy(bound) || guest || (message.is_topic_message===true)!==(topicId>0) ||
         !originalPerson(message) || message.from.id!==owner)) return;
     // Who may call the bot here follows the access list and the group settings.
     const policy = effectiveGroupPolicy(store, bound, owner);

@@ -56,7 +56,7 @@ test("shared binding keeps the private project visible and protects existing or 
   assert.throws(()=>bindGroupTopic(store,{...policy,threadId:"private"},project),/private_thread_or_project/);
   store.put("reply:watch:older",{threadId:"former-private"});
   assert.throws(()=>bindGroupTopic(store,{...policy,threadId:"former-private"},project),/private_thread_or_project/);
-  for (const extra of [{ownerOnly:false},{allowedSenderIds:[20]},{isolated:true},{topicId:0},{deliverySources:["private-source"]}]) {
+  for (const extra of [{ownerOnly:false},{allowedSenderIds:[20]},{isolated:true},{topicId:1},{deliverySources:["private-source"]}]) {
     assert.throws(()=>bindGroupTopic(store,{...policy,...extra},project),/private_owner_forum_binding_required/);
   }
   bindGroupTopic(store,policy,project);
@@ -91,6 +91,20 @@ test("shared topic accepts only original scoped owner input, even with permissiv
   assert.deepEqual(store.list("group:in:"),[]);
   assert.ok(post({}));
   assert.equal(store.list<{route:{threadId:string}}>("group:in:")[0].value.route.threadId,"topic-a");
+});
+
+test("General (topic 0) of the shared owner forum is bound and takes the owner's plain messages; topics do not leak in",()=>{
+  const {store,post}=fixture();
+  bindGroupTopic(store,{...policy,topicId:0,threadId:"general",revision:"rev-g",requireMention:false},project);
+  const general=(extra:object={})=>post({is_topic_message:undefined,message_thread_id:undefined,text:"Что по выпуску?",entities:[],...extra});
+  assert.equal(general({from:{id:22}}),false);                                  // only the owner
+  assert.ok(general());
+  // A reply inside General carries a thread id that is no topic: still General.
+  assert.ok(general({message_thread_id:77,reply_to_message:{chat,from:{id:owner},message_id:77}}));
+  const routes=store.list<{route:{threadId:string;topicId:number}}>("group:in:").map(r=>r.value.route);
+  assert.deepEqual(routes.map(r=>[r.threadId,r.topicId]),[["general",0],["general",0]]);
+  // A topic message never goes to General.
+  assert.equal(post({message_thread_id:5}),false);
 });
 
 test("owner-only forum answers return to the exact topic once and stop when its audience changes",async()=>{

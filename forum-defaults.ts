@@ -77,10 +77,11 @@ export function forumName(store:Store,bot:number,chat:number,topic:number) {
 
 export function describeForumTopic(store:Store,bot:number,owner:number,update:any) {
   const message=update.message;
-  const chat=message?.chat?.id,topic=message?.message_thread_id;
+  // General is topic 0: its messages carry no topic (a reply there may carry a thread id that is no topic).
+  const chat=message?.chat?.id,topic=message?.is_topic_message===true ? message?.message_thread_id : 0;
   if (message?.chat?.type!=="supergroup" || message.chat.is_forum!==true ||
-      message.is_topic_message!==true || !Number.isSafeInteger(chat) || chat>=0 ||
-      !Number.isSafeInteger(topic) || topic<2 || !Number.isSafeInteger(update.update_id)) return;
+      !Number.isSafeInteger(chat) || chat>=0 ||
+      !Number.isSafeInteger(topic) || (topic<2 && topic!==0) || !Number.isSafeInteger(update.update_id)) return;
   const key=`group:policy:${chat}:${topic}`;
   const policy=store.get<GroupTopicPolicy>(key);
   if ((policy && (policy.botId!==bot || (policy.ownerId!==undefined && policy.ownerId!==owner))) ||
@@ -92,19 +93,20 @@ export function describeForumTopic(store:Store,bot:number,owner:number,update:an
     rememberForumName(store,bot,chat,topic,edit?.name??creation?.name,update.update_id,
       creation && message.message_id===topic ? true : undefined,
       creation && message.message_id===topic ? message.date : undefined);
-  const metadata=store.get<TopicMetadata>(forumNameKey(bot,chat,topic));
+  const metadata=store.get<TopicMetadata>(forumNameKey(bot,chat,topic)) ?? (topic===0 ? {name:"General",updateId:0} : undefined);
   return {chat,topic,policy,metadata,service:!!(creation || edit)};
 }
 
 
 export function inheritableForumTopic(store:Store,bot:number,owner:number,topic:ReturnType<typeof describeForumTopic>) {
-  if (!topic || topic.policy || topic.topic<2 ||
+  if (!topic || topic.policy || (topic.topic<2 && topic.topic!==0) ||
       isTopicPaused(store,bot,topic.chat,topic.topic) || store.get(forumOptOutKey(bot,topic.chat,topic.topic))) return;
   const defaults=forumDefaults(store,bot,owner,topic.chat);
   if (!defaults) return;
   // Explicit defaults keep their boundary (topics created after they were set); the default pickup takes any topic
   // the bridge sees that has no binding and was not unbound on purpose, including one created before the update.
-  if (!defaults.implicit && (!topic.metadata?.created || !topic.metadata.creationDate || topic.metadata.creationDate<defaults.since)) return;
+  // General exists from the start: the pickup always covers it.
+  if (!defaults.implicit && topic.topic!==0 && (!topic.metadata?.created || !topic.metadata.creationDate || topic.metadata.creationDate<defaults.since)) return;
   return {source:defaults.source,metadata:topic.metadata ?? {name:"Тема",updateId:0}};
 }
 

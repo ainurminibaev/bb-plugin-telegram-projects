@@ -275,3 +275,26 @@ test("П29: a topic whose thread was archived gets a new thread with the same se
   assert.equal(await reviveArchivedForumTopic(store,deps,{chat,topic:21,policy:active}),false);   // not archived: nothing
   assert.equal(bound.length,0);
 });
+
+test("General: the pickup covers General (topic 0) too, also under explicit defaults; a topic reply is not General", () => {
+  const store=plainStore();
+  employeeTopic(store,2); employeeTopic(store,17);
+  const general=(extra:object={})=>({update_id:990,message:{message_id:990,date:now,chat:forum(chat),
+    from:{id:member,first_name:"M"},text:"hi",...extra}});
+  const topic=describeForumTopic(store,5,owner,general());
+  assert.equal(topic?.topic,0);
+  assert.equal(topic?.metadata?.name,"General");
+  const inherit=inheritableForumTopic(store,5,owner,topic);
+  assert.ok(inherit);
+  assert.equal(inheritedForumPolicy(inherit.source,0,{threadId:"g",projectId:"employee-project"},"rev").topicId,0);
+  // A reply inside General carries a thread id but is no topic message: still General.
+  assert.equal(describeForumTopic(store,5,owner,general({message_thread_id:55,reply_to_message:{message_id:55}}))?.topic,0);
+  // Explicit defaults keep their boundary for topics, but General is always covered.
+  store.put(`group:forum-defaults:5:${chat}`,{sourceTopicId:17,managers:[owner],since:Date.now()/1000+3600});
+  assert.equal(forumDefaults(store,5,owner,chat)?.implicit,false);
+  assert.ok(inheritableForumTopic(store,5,owner,describeForumTopic(store,5,owner,general())));
+  assert.equal(inheritableForumTopic(store,5,owner,describeForumTopic(store,5,owner,topicMessage(43))),undefined);
+  // Unbound on purpose: General stays unbound.
+  store.put(`group:forum-opt-out:5:${chat}:0`,true);
+  assert.equal(inheritableForumTopic(store,5,owner,describeForumTopic(store,5,owner,general())),undefined);
+});

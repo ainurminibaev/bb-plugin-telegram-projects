@@ -32,7 +32,7 @@ export async function sharedGroupThreads(store:Store,threads:BbPluginApi["sdk"][
 
 export function isSharedOwnerPolicy(policy:GroupTopicPolicy) {
   return policy.ownerSharedProject===true && policy.ownerOnly && !!policy.ownerId &&
-    policy.topicId>1 && /^-100[1-9]\d*$/.test(String(policy.chatId)) &&
+    (policy.topicId>1 || policy.topicId===0) && /^-100[1-9]\d*$/.test(String(policy.chatId)) &&   // a topic or General
     !policy.isolated && !policy.allowedSenderIds?.length && !policy.deliverySources?.length &&
     (!policy.searchableHistory || policy.includeTopicContext===true) &&
     (!policy.retainFullHistory || policy.searchableHistory===true);
