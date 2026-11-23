@@ -2150,7 +2150,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name:"send",
         summary:"Send a message or file to a group topic or a person with access; --ask remembers the question so the answer comes back",
-        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON|owner | --answer ASK) (--text TEXT | --text-file PATH, not stdin) [--file PATH] [--ask]",
+        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON|owner | --answer ASK) (--text TEXT | --text-file PATH, not stdin) [--file PATH] [--reply-to MESSAGE] [--ask]",
       },
       {
         name:"topic",
@@ -2243,7 +2243,7 @@ export default async function plugin(bb: BbPluginApi) {
         } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
       }
       if(argv[0]==="send"){
-        // bb telegram-projects send (--chat C [--topic T] | --person P | --answer ASK) (--text T | --text-file F) [--file PATH] [--ask]
+        // bb telegram-projects send (--chat C [--topic T] | --person P | --answer ASK) (--text T | --text-file F) [--file PATH] [--reply-to MESSAGE] [--ask]
         const owner=ownerId(),bot=botId();
         if (!ctx.threadId || !owner || !bot) return {exitCode:1,stderr:"run_from_a_conversation_thread"};
         const opt:Record<string,string>={}; let ask=false;
@@ -2303,6 +2303,8 @@ export default async function plugin(bb: BbPluginApi) {
             return delivered ? {exitCode:0,stdout:JSON.stringify({sent:true,deliveredTo:"conversation"})} : {exitCode:1,stderr:"asking_conversation_unavailable"};
           }
           const tg=telegram(botToken,lifetime.signal,60_000,()=>target.chat,apiRoot);
+          // С56: a PDF as a reply to the scheme picture sent just before (its messageId from the first send).
+          const replyTo=opt["reply-to"] && /^\d+$/.test(opt["reply-to"]) ? Number(opt["reply-to"]) : undefined;
           let remembered:string|undefined;
           if (ask && caller && !opt.answer) {
             const origin=caller.kind==="owner" ? {chat:owner,topic:0} : caller.kind==="group" ? {chat:caller.chat,topic:caller.topic ?? 0} : {chat:caller.subject,topic:0};
@@ -2315,8 +2317,8 @@ export default async function plugin(bb: BbPluginApi) {
           // A person's own message goes to the owner as it is, before the question (С67).
           if (ownerAsk?.turn && ownerAsk.turn.chat>0) await forwardOriginal(chat=>telegram(botToken,lifetime.signal,60_000,()=>chat,apiRoot),owner,ownerAsk.turn);
           const buttons=ownerAsk && remembered ? askButtons(remembered) : undefined;
-          const messageId=file || !text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file})
-            : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,markdown:text,...(buttons && {replyMarkup:buttons})})).at(-1);
+          const messageId=file || !text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file,replyTo})
+            : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text,...(buttons && {replyMarkup:buttons})})).at(-1);
           if (ownerAsk && remembered && messageId) rememberAskMessage(store,bot,messageId,remembered);
           if (opt.answer) closeAsk(store,bot,opt.answer);
           return {exitCode:0,stdout:JSON.stringify({sent:true,messageId,...(remembered && {ask:remembered})})};
