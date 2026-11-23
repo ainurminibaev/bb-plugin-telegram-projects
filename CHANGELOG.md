@@ -1,3 +1,8 @@
+# 0.9.62
+
+- Far fewer requests to BB (С72). The bridge reads a thread when BB reports it changed (thread:changed), and threads still at work every 2 s for the live status; when everything is quiet a full safety pass runs every 12 s (quiet children once a minute). Without the realtime feed, after a break or with no subscription it reads everything every 2 s as before; after a reconnect a full pass runs at once. Scheduled results read changed threads (all of them once a minute); the consent watch reads only threads with a group turn or an open consent. On the stand: 3716 → 160 requests a minute.
+- `send`: General of a forum is a target like any topic; a group's name follows its current Telegram title.
+
 # 0.9.61
 
 - Forwarded messages say whose words they carry (С73): the author of the original and when — a person, a bot, a chat or channel, a hidden author — and the agent's own earlier message is named as its own. The agent never takes a forwarded message for the words or the decision of whoever forwarded it.
