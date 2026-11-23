@@ -1,3 +1,8 @@
+# 0.9.59
+
+- The rules in force come with every Telegram turn — groups, people's chats and the owner's chat. A running agent session keeps the instructions it started with, so later edits of the rules never reached long conversations. The bridge asks the platform plugin (`turnRules`, personal-assistant 0.4.4) for the rules in force and their fingerprint: a conversation that has not had this version gets the full text, visible to the agent only, marked «rules updated, in force from this turn, earlier wording cancelled»; the same version costs one line. Without the platform's rules nothing changes.
+- The live status line never shows the bridge's service marker.
+
 # 0.9.58
 
 - A question to the owner from a group or a person's chat comes with «Да» and «Нет» buttons and without service numbers. It says where it comes from, who asks and their status (the owner, an approved person or a group member), and links the original group message; a person's own message is forwarded before it (quoted, if Telegram does not allow forwarding).
