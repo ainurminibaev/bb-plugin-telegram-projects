@@ -1,3 +1,4 @@
+import {rememberGroupTitle} from "../thread-titles";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {askNotes,ownerAskNotes,findGroup,findPerson,findTopic,openAsks,rememberAsk,sendRefusal,sendTargets} from "../send-command";
@@ -129,4 +130,19 @@ test("a question to the owner from a person's private chat reaches the owner's t
   assert.match(notes,new RegExp("--answer "+ask.id));
   assert.equal(sendRefusal(s as never,BOT,OWNER,{kind:"owner"},{chat:ALICE,topic:0},()=>[],ask.id),undefined);
   assert.equal(ownerAskNotes(s as never,ALICE),"");
+});
+
+test("General of a forum is a send target like a topic; a group without topics has none; the group's name follows Telegram",()=>{
+  const s=setup() as any;
+  s.put(`group:topic-name:${BOT}:${TEAM}:64`,{name:"Стенд: этап 2"});
+  s.put(`group:policy:${TEAM}:0`,{chatId:TEAM,topicId:0,threadId:"thr_general"});
+  s.put(`group:policy:${OTHER}:0`,{chatId:OTHER,topicId:0,threadId:"thr_other"});
+  assert.deepEqual(findTopic(s,BOT,TEAM,"General"),{chat:TEAM,topic:0});
+  const owner=sendTargets(s,BOT,OWNER,{kind:"owner"},groupsOf);
+  assert.ok(owner.groups.find((g:any)=>g.chat===TEAM).topics.some((t:any)=>t.topic===0 && t.name==="General"));
+  assert.deepEqual(owner.groups.find((g:any)=>g.chat===OTHER).topics,[]);   // no topics: the group itself
+  // Any group message carries the current title: a group renamed before is found by its new name.
+  assert.equal(rememberGroupTitle(s,BOT,{message:{chat:{id:TEAM,type:"supergroup",title:"Новый штурвал"},text:"hi"}}),TEAM);
+  assert.equal(findGroup(s,BOT,"новый штурвал"),TEAM);
+  assert.equal(rememberGroupTitle(s,BOT,{message:{chat:{id:TEAM,type:"supergroup",title:"Новый штурвал"},text:"hi"}}),undefined);
 });

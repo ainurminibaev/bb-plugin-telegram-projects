@@ -62,7 +62,10 @@ export function groupTopics(store:Store,bot:number,chat:number) {
   const ids=new Set<number>([
     ...store.list<{name?:string}>(`group:topic-name:${bot}:${chat}:`).map(r=>Number(r.key.split(":").at(-1))),
     ...store.list<{topicId:number}>(`group:policy:${chat}:`).map(r=>r.value.topicId)]);
-  return [...ids].filter(t=>Number.isSafeInteger(t) && t>0).map(t=>({topic:t,name:forumName(store,bot,chat,t) ?? (t===1 ? "General" : "")}));
+  // General (topic 0) of a forum is a target like any topic; in a group without topics 0 is the group itself.
+  const forum=[...ids].some(t=>t>1);
+  return [...ids].filter(t=>Number.isSafeInteger(t) && (t>0 || (t===0 && forum)))
+    .map(t=>({topic:t,name:forumName(store,bot,chat,t) ?? (t<=1 ? "General" : "")}));
 }
 
 /** A topic by ID or part of its name, in one group or, without a group, in every group the bot is in. */

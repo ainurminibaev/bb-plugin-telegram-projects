@@ -109,7 +109,8 @@ export async function threadTitlesPass(store: Store, sdk: Sdk, bot: number) {
 export function rememberGroupTitle(store: Store, bot: number, update: any): number | undefined {
   const m = update?.message;
   const chat = m?.chat?.id;
-  const title = clean(m?.new_chat_title);
+  // A rename, or simply the title every group message carries: the stored name follows Telegram's current one.
+  const title = clean(m?.new_chat_title) || (["group", "supergroup"].includes(m?.chat?.type) ? clean(m?.chat?.title) : "");
   if (!title || !Number.isSafeInteger(chat)) return;
   const key = `visibility:${bot}:group:${chat}`;
   const seen = store.get<Record<string, unknown>>(key);
