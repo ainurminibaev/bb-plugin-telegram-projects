@@ -99,13 +99,15 @@ test("only authentic new topics inherit, across independently named groups and e
     caption_entities:[{type:"mention",offset:0,length:"@alpha_bot".length}],photo:[{file_id:"other-group-photo"}]}),owner,f.bot);
   acceptGroupUpdate(f.store,f.update(member,chat,caption,{text:undefined,caption,message_thread_id:newTopic,
     caption_entities:[{type:"mention",offset:0,length:"@alpha_bot".length}],photo:[{file_id:"forbidden-photo"}]}),owner,f.bot);
-  const routes=f.store.list<{route:{threadId:string;chatId:number;topicId:number;text:string;examples:unknown[]}}>("group:in:");
+  const routes=f.store.list<{route:{threadId:string;chatId:number;topicId:number;text:string;ownText?:string;examples:unknown[]}}>("group:in:");
   assert.equal(routes.length,1);
   const route=routes[0].value.route;
   assert.equal(route.threadId,dest.threadId);
   assert.equal(route.chatId,second);
   assert.equal(route.topicId,newTopic);
   assert.match(route.text,/Название темы Telegram \(справочные данные\): "Одинаковая"/);
+  // С45: the reaction is chosen by the person's own words, without the context the bridge adds for the agent.
+  assert.equal(route.ownText,caption);
   assert.match(JSON.stringify(route.examples),/other-group-photo/);
   assert.doesNotMatch(JSON.stringify(route.examples),/forbidden-photo/);
 });

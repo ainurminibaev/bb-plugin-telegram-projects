@@ -250,7 +250,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     if (r.updateId>0 && !job.acked && !r.ownerUnaddressed) {
       job.acked=true; job.startedAt??=Date.now(); store.put(key,job);
       const set=reactions?.();
-      void acknowledge(reactTg,r.chatId,r.messageId,r.text,set?.chooser,set?.options ?? DEFAULT_REACTION_OPTIONS,
+      void acknowledge(reactTg,r.chatId,r.messageId,r.ownText ?? r.text,set?.chooser,set?.options ?? DEFAULT_REACTION_OPTIONS,
         ()=>!!store.get(reactionKey),[],signal).catch(()=>{});
     }
     // С46: one live status message: the agent's first line and the current step; guests see the step only.
