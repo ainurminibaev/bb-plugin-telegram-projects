@@ -16,6 +16,7 @@ import { ChatPairs, OWNER_MESSAGE } from "./chat-pair";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
 import { markdownExcerpt } from "./events";
+import { ownerAskNotes } from "./send-command";
 import { bbText } from "./bb-mentions";
 import { localArtifacts, renderTelegramParts, cleanAssistantText, publicActivity, ARTIFACT_EXTENSIONS } from "./telegram-ux";
 import type { BbPluginApi, MessageDispatchHookContext, MessageDispatchHookDecision } from "@get-bb/plugin-sdk";
@@ -2033,6 +2034,9 @@ export class ChatBridge {
        this.d.captureOwnerGroupPost?.(b.threadId,input.chatId))) && input.originalText && (!parts || parts.length===1) && text===input.text?.trim() &&
       !input.forwarded && !input.attachment && !input.voice && !input.replyTo
       ? createHash("sha256").update(text).digest("hex") : undefined;
+    // Questions to the owner from other conversations (С43): the owner's turn knows them and returns the answer.
+    const ownerAsks=input.chatId===this.d.owner() ? ownerAskNotes(this.s,input.chatId) : "";
+    if (ownerAsks) text=text+"\n\n"+ownerAsks;
     if (b.threadId) {
       const pending = await this.d.sdk.threads.interactions.list({
         threadId: b.threadId,

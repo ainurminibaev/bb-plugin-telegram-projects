@@ -83,7 +83,7 @@ const reachable=(store:Store,bot:number,owner:number,person:number)=>
 
 /** Undefined when allowed, otherwise the reason. */
 export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversation|undefined,target:SendTarget,
-  groupsOf:(person:number)=>number[],askId?:string,author?:number):string|undefined {
+  groupsOf:(person:number)=>number[],askId?:string,author?:number,ask?:boolean):string|undefined {
   if (!caller) return "send_only_from_a_telegram_conversation";
   if (askId) {
     const ask=store.get<Ask>(askPrefix(bot)+askId);
@@ -97,7 +97,9 @@ export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversat
     if (caller.kind==="group" && caller.chat===target.chat) return;
     return "group_not_allowed_from_this_conversation";
   }
-  if (target.chat===owner) return caller.kind==="owner" ? undefined : "owner_only_through_an_open_question";
+  // Any conversation may ask the owner (С43): a question whose answer comes back here, never a plain message.
+  if (target.chat===owner) return caller.kind==="owner" || ask ? undefined :
+    "owner_only_with_a_question: send --person owner --ask --text '<what is asked, who asks, yes or no>'; the answer comes back here";
   if (!reachable(store,bot,owner,target.chat))
     return "person_has_not_started_the_bot: mention them in a group instead and tell who asked why";
   if (caller.kind==="owner") return;
@@ -132,6 +134,13 @@ export function rememberAsk(store:Store,bot:number,target:number,origin:SendTarg
 export function closeAsk(store:Store,bot:number,id:string) { store.del(askPrefix(bot)+id); }
 
 /** One line per open question for this conversation's turn notes. */
+/** Questions to the owner from other conversations, for the owner's own turn: the answer goes back with --answer. */
+export function ownerAskNotes(store:Store,owner:number,now=Date.now()) {
+  return store.list<Ask>("send:ask:").map(r=>r.value).filter(a=>a.target===owner && now-a.at<ASK_DAYS*86400_000).map(a=>
+    `Открытый вопрос владельцу из другого разговора: «${a.question}». Если владелец отвечает на него, передай ответ туда: `+
+    `bb telegram-projects send --answer ${a.id} --text "…"`).join("\n");
+}
+
 export function askNotes(store:Store,bot:number,target:number) {
   return openAsks(store,bot,target).map(a=>
     `Открытый вопрос по просьбе другого разговора: «${a.question}». Когда получишь ответ, передай его туда: `+

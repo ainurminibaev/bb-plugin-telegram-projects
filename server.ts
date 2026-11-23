@@ -2218,8 +2218,16 @@ export default async function plugin(bb: BbPluginApi) {
           else if (opt.chat) { const chat=findGroup(store,bot,opt.chat); target=opt.topic ? findTopic(store,bot,chat,opt.topic) : {chat,topic:0}; }
           else if (opt.topic) target=findTopic(store,bot,undefined,opt.topic);
           else return {exitCode:2,stderr:"target_required: --chat, --topic, --person or --answer; see --targets"};
-          const refusal=sendRefusal(store,bot,owner,caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author);
+          const refusal=sendRefusal(store,bot,owner,caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author,ask);
           if (refusal) return {exitCode:1,stderr:refusal};
+          // A question to the owner from another conversation says where it comes from; the answer returns there.
+          if (target.chat===owner && caller?.kind!=="owner" && !opt.answer && (opt.text || opt["text-file"])) {
+            const from=caller?.kind==="person" ? "лички «"+(accessList(store,bot).find(p=>p.id===caller.subject)?.name ?? caller.subject)+"»"
+              : "группы «"+(store.get<{title?:string}>(`visibility:${bot}:group:${caller?.kind==="group" ? caller.chat : 0}`)?.title ?? "группа")+"»";
+            const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
+            opt.text=`Вопрос из ${from}: ${body.length>3500 ? body.slice(0,3500)+"…" : body}\nОтветьте мне здесь — передам ответ туда.`;
+            delete opt["text-file"];
+          }
           // The bridge's command gets no standard input: "-" cannot be read here.
           if (opt["text-file"]==="-") return {exitCode:2,stderr:"text_file_stdin_unsupported: pass the text with --text '…' (several lines are fine) or write it to a file and pass its path"};
           const text=opt["text-file"] ? await readFile(opt["text-file"],"utf8") : opt.text;

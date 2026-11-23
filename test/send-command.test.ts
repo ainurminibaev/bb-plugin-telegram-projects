@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {askNotes,findGroup,findPerson,findTopic,openAsks,rememberAsk,sendRefusal,sendTargets} from "../send-command";
+import {askNotes,ownerAskNotes,findGroup,findPerson,findTopic,openAsks,rememberAsk,sendRefusal,sendTargets} from "../send-command";
 import {setAccess} from "../rights";
 import {learnTopicName} from "../forum-defaults";
 import {migrateGroupChat} from "../group-migration";
@@ -35,7 +35,10 @@ test("who may send where follows the calling conversation",()=>{
   assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,OWNER),undefined,"group: the owner's own request");
   assert.match(no({kind:"group",chat:OTHER},{chat:ALICE,topic:0})!,/person_not_allowed/);
   assert.match(no({kind:"person",subject:ALICE},{chat:TEAM,topic:0})!,/group_not_allowed/);
-  assert.match(no({kind:"group",chat:TEAM},{chat:OWNER,topic:0})!,/owner_only_through_an_open_question/);
+  // С43: any conversation asks the owner only with a question whose answer comes back.
+  assert.match(no({kind:"group",chat:TEAM},{chat:OWNER,topic:0})!,/owner_only_with_a_question: send --person owner --ask/);
+  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"person",subject:ALICE},{chat:OWNER,topic:0},groupsOf,undefined,undefined,true),undefined);
+  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OWNER,topic:0},groupsOf,undefined,ALICE,true),undefined);
   assert.match(no({kind:"group",chat:TEAM},{chat:-1009,topic:0})!,/bot_is_not_in_this_group/);
 });
 
@@ -105,4 +108,17 @@ test("the same question asked again stays one open question",()=>{
   assert.equal(openAsks(s,BOT,ALICE).length,1);
   rememberAsk(s,BOT,ALICE,{chat:OWNER,topic:0},"а макет?");
   assert.equal(openAsks(s,BOT,ALICE).length,2);
+});
+
+test("a question to the owner from a person's private chat reaches the owner's turn and its answer goes back",()=>{
+  const rows=new Map<string,any>();
+  const s={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v);},del:(k:string)=>{rows.delete(k);},
+    atomic:(f:()=>void)=>f(),list:<T>(p:string)=>[...rows].filter(([k])=>k.startsWith(p)).map(([key,value])=>({key,value:value as T}))};
+  const OWNER=7, ALICE=11, BOT=5;
+  const ask=rememberAsk(s as never,BOT,OWNER,{chat:ALICE,topic:0},"Вопрос из лички «Алиса»: закрыть задачу 12? да/нет");
+  const notes=ownerAskNotes(s as never,OWNER);
+  assert.match(notes,/закрыть задачу 12/);
+  assert.match(notes,new RegExp("--answer "+ask.id));
+  assert.equal(sendRefusal(s as never,BOT,OWNER,{kind:"owner"},{chat:ALICE,topic:0},()=>[],ask.id),undefined);
+  assert.equal(ownerAskNotes(s as never,ALICE),"");
 });
