@@ -194,3 +194,82 @@ test("inherited bindings require a distinct isolated executor for the exact topi
     if (savedPrivate===undefined) delete process.env[privateKey]; else process.env[privateKey]=savedPrivate;
   }
 });
+
+// ---------- С54 / П29: picking up new topics by default; a topic with an archived thread ----------
+import {forumAutoKey,forumAutoOffKey,forumDefaults,reviveArchivedForumTopic} from "../forum-defaults";
+
+function plainStore() {
+  const rows=new Map<string,unknown>();
+  const store:Store={get:key=>structuredClone(rows.get(key)) as never,put:(key,value)=>{rows.set(key,structuredClone(value));},
+    del:key=>{rows.delete(key);},atomic:fn=>fn(),
+    list:prefix=>[...rows].filter(([key])=>key.startsWith(prefix)).map(([key,value])=>({key,value:structuredClone(value) as never}))};
+  return store;
+}
+const employeeTopic=(store:Store,topicId:number,extra:Partial<GroupTopicPolicy>={})=>{
+  const p:GroupTopicPolicy={botId:5,botUsername:"alpha_bot",ownerId:owner,chatId:chat,topicId,threadId:`emp-${topicId}`,
+    requireMention:true,ownerOnly:false,includeTopicContext:true,allowedSenderIds:[],inOwnerProject:true,revision:`r-${topicId}`,
+    acceptAfterSecond:1000+topicId,...extra} as GroupTopicPolicy;
+  bindGroupTopic(store,p,"employee-project");
+  return p;
+};
+const topicMessage=(topicId:number,created?:boolean)=>({update_id:900+topicId,message:{message_id:900+topicId,date:now,
+  chat:forum(chat),from:{id:member,first_name:"M"},message_thread_id:topicId,is_topic_message:true,text:"hi",
+  ...(created ? {forum_topic_created:{name:"Новая тема"},message_id:topicId} : {})}});
+
+test("С54: a group bound before the update picks up a new topic by default, with the group's mention rule", () => {
+  const store=plainStore();
+  employeeTopic(store,2); employeeTopic(store,17);            // stored by an older bridge: no defaults key at all
+  const d=forumDefaults(store,5,owner,chat);
+  assert.equal(d?.implicit,true);
+  assert.equal(d?.source.topicId,17);                          // the latest bound topic is the template
+  const topic=describeForumTopic(store,5,owner,topicMessage(40));   // a topic created by hand, creation unseen
+  const inherit=inheritableForumTopic(store,5,owner,topic);
+  assert.ok(inherit);
+  const policy=inheritedForumPolicy(inherit.source,40,{threadId:"new",projectId:"employee-project"},"rev");
+  assert.equal(policy.requireMention,true);                     // answering with or without mention is unchanged
+  assert.equal(policy.inOwnerProject,true);
+});
+
+test("С54: the pickup can be turned off for the bridge or for one group; an unbound topic stays unbound", () => {
+  const store=plainStore();
+  employeeTopic(store,2);
+  store.put(forumAutoOffKey(5,chat),true);
+  assert.equal(forumDefaults(store,5,owner,chat),undefined);
+  store.del(forumAutoOffKey(5,chat));
+  store.put(forumAutoKey,false);
+  assert.equal(forumDefaults(store,5,owner,chat),undefined);
+  store.put(forumAutoKey,true);
+  store.put(`group:forum-opt-out:5:${chat}:41`,true);          // a topic unbound on purpose
+  assert.equal(inheritableForumTopic(store,5,owner,describeForumTopic(store,5,owner,topicMessage(41))),undefined);
+});
+
+test("С54: a separate-executor topic is not a template; explicit defaults keep their boundary", () => {
+  const store=plainStore();
+  employeeTopic(store,3,{isolated:true,inOwnerProject:undefined});
+  assert.equal(forumDefaults(store,5,owner,chat),undefined);
+});
+
+test("П29: a topic whose thread was archived gets a new thread with the same settings", async () => {
+  const store=plainStore();
+  const p=employeeTopic(store,21,{ownerSharedProject:true,inOwnerProject:undefined,requireMention:false,ownerOnly:true,
+    projectId:"assistant"} as never);
+  const bound:GroupTopicPolicy[]=[];
+  const spawned:any[]=[];
+  const threads={
+    get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"employee-project",environmentId:"env",providerId:"claude-code",
+      title:"Master Marketplace",archivedAt:threadId===p.threadId ? "2026-11-23" : null}),
+    spawn:async(a:any)=>{spawned.push(a);return {id:"fresh",projectId:a.projectId};},
+  };
+  const deps={owner,bot:5,check:async()=>{},current:()=>true,signal:new AbortController().signal,threads,
+    bind:(policy:GroupTopicPolicy)=>{bound.push(policy);}};
+  const live=store.get<GroupTopicPolicy>(`group:policy:${chat}:21`);
+  assert.equal(await reviveArchivedForumTopic(store,deps,{chat,topic:21,policy:live,metadata:{name:"Master Marketplace"}}),true);
+  assert.equal(spawned[0].environment.environmentId,"env");
+  assert.equal(spawned[0].providerId,"claude-code");
+  assert.deepEqual([bound[0].threadId,bound[0].requireMention,bound[0].ownerOnly,bound[0].acceptAfterSecond],
+    ["fresh",false,true,live.acceptAfterSecond]);
+  bound.length=0;
+  const active={...live,threadId:"alive"};
+  assert.equal(await reviveArchivedForumTopic(store,deps,{chat,topic:21,policy:active}),false);   // not archived: nothing
+  assert.equal(bound.length,0);
+});

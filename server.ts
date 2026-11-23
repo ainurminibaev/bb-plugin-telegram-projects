@@ -1,10 +1,10 @@
 import {TOPIC_ACTIONS,topicRefusal,type TopicAction} from "./topic-command";
 import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
-import {learnTopicName,rememberForumName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,type ForumDefaults} from "./forum-defaults";
+import {learnTopicName,rememberForumName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,forumAutoOffKey,forumAutoKey,reviveArchivedForumTopic,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
 import {applyForumTopicChange,handleOwnerForumCommand} from "./forum-commands";
-import {topicStateKey} from "./topic-lifecycle";
+import {topicStateKey,isTopicPaused} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
@@ -431,6 +431,9 @@ export default async function plugin(bb: BbPluginApi) {
     voiceRouterPath: {
       type: "string", label: "Local voice router executable (empty: BB transcription)", default: "",
     },
+    autoTopics: {
+      type: "boolean", label: "New forum topics are picked up automatically (each gets its own thread); off — only bound topics", default: true,
+    },
     reactionChoice: {
       type: "boolean", label: "Reactions: a quick model picks the reaction (vallis-decide); off — 👀 only", default: true,
     },
@@ -758,8 +761,18 @@ export default async function plugin(bb: BbPluginApi) {
       return bridge.proveOwnerForumRequest(threadId,token,owner);
     },
   });
+  const forumCheck=(owner:number,bot:number,signal:AbortSignal)=>(chatId:number)=>
+    checkOwnerForum(telegram(botToken,signal,15_000,()=>chatId,apiRoot),chatId,owner,bot,{shared:true}).then(()=>{});
+  const forumCurrent=(owner:number,bot:number)=>()=>ownerId()===owner && botId()===bot && !stateTransferBusy;
+  const reviveForumTopic=(owner:number,bot:number,signal:AbortSignal,topic:NonNullable<ReturnType<typeof describeForumTopic>>)=>
+    reviveArchivedForumTopic(store,{owner,bot,check:forumCheck(owner,bot,signal),current:forumCurrent(owner,bot),
+      threads:bb.sdk.threads as never,signal,bind:(policy,projectId)=>bindGroupTopic(store,policy,projectId)},topic);
   async function inheritForumTopic(owner:number,bot:number,signal:AbortSignal,update:unknown) {
     const topic=describeForumTopic(store,bot,owner,update);
+    if (topic?.policy && !topic.service) {
+      await reviveForumTopic(owner,bot,signal,topic);
+      return false;
+    }
     const candidate=inheritableForumTopic(store,bot,owner,topic);
     if (!topic || !candidate) return topic?.service??false;
     const {chat,topic:topicId}=topic;
@@ -777,9 +790,9 @@ export default async function plugin(bb: BbPluginApi) {
         !!inheritableForumTopic(store,bot,owner,topic);
     };
     let projectId=executor?.projectId,threadId=executor?.threadId;
-    if (source.ownerSharedProject) {
-      const tg=telegram(botToken,signal,15_000,()=>chat,apiRoot);
-      await checkOwnerForum(tg,chat,owner,bot,{shared:true});
+    if (source.ownerSharedProject || !source.isolated) {
+      // С54: a shared owner topic and an ordinary local topic get a new thread next to the template's thread.
+      if (source.ownerSharedProject) await checkOwnerForum(telegram(botToken,signal,15_000,()=>chat,apiRoot),chat,owner,bot,{shared:true});
       const sourceThread=await bb.sdk.threads.get({threadId:source.threadId,signal});
       if (!sourceThread.environmentId || sourceThread.projectId!==source.projectId || sourceThread.visibility!=="visible" ||
           sourceThread.archivedAt || sourceThread.deletedAt || sourceThread.parentThreadId || !current()) return topic.service;
@@ -1821,7 +1834,9 @@ export default async function plugin(bb: BbPluginApi) {
       const owner=ownerId(),bot=botId();
       if (!owner || !bot || stateTransferBusy) throw Error("bot_unavailable");
       const key=forumDefaultsKey(bot,chatId);
-      if (!enabled) {store.del(key);return {enabled:false};}
+      // С54: turning off also stops the default pickup for this group; turning on clears that.
+      if (!enabled) {store.atomic(()=>{store.del(key);store.put(forumAutoOffKey(bot,chatId),true);});return {enabled:false};}
+      store.del(forumAutoOffKey(bot,chatId));
       const sourceKey=`group:policy:${chatId}:${sourceTopicId}`;
       const source=store.get<GroupTopicPolicy>(sourceKey);
       if (!source || source.ownerId!==owner || source.botId!==bot || !source.projectId ||
@@ -2675,6 +2690,8 @@ export default async function plugin(bb: BbPluginApi) {
               store.put(privacyKey(me.id), !me.readsAllGroups);
               if (ownerId()) await sendGroupVisibility();
             }
+            // С54: the bridge-wide switch of the default topic pickup (stored so the pure checks see it).
+            if (store.get(forumAutoKey)!==(cfg.autoTopics!==false)) store.put(forumAutoKey,cfg.autoTopics!==false);
             if (privateOwner && privateBot && cfg.chatEnabled && bridge) {
               activeTelegramWrites++;
               try {
