@@ -24,7 +24,7 @@ import {cleanInbox} from "./inbox-retention";
 import {allInboxes, inboxFor} from "./project-inbox";
 import {openTopicSearch,historyPrefix,topicPassages} from "./topic-search";
 import { transcribeWithVoiceRouter } from "./voice-router";
-import {MAX_INCOMING_BYTES, maxRoutedDocumentBytes, safeTelegramFilename, saveLocalTelegramFile, setUploadLimit, telegramApiRoot as checkedApiRoot, uploadLimit } from "./telegram-files";
+import {MAX_INCOMING_BYTES, maxRoutedDocumentBytes, openInboxDirs, safeTelegramFilename, saveLocalTelegramFile, setUploadLimit, telegramApiRoot as checkedApiRoot, uploadLimit } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
 import { translate } from "./locale";
 import {
@@ -57,7 +57,7 @@ import {
   type Events,
 } from "./events";
 import { makeChatControlPublisher, writeJsonAtomic } from "./json-file";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomInt } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -636,19 +636,20 @@ export default async function plugin(bb: BbPluginApi) {
         const info=await telegram(botToken,signal,60_000,undefined,apiRoot)<{file_path?:string}>("getFile",{file_id:f.file_id});
         if (!info.file_path) throw Error("file_unavailable");
         const dir=join(inboxRoot,"archive",String(bot),String(args.file.chat),String(args.file.message));
-        await mkdir(dir,{recursive:true,mode:0o750});
+        await openInboxDirs(inboxRoot,dir);
         const name=safeTelegramFilename(f.file_name || info.file_path.split("/").at(-1) || "file");
         const path=join(dir,name);
         if (checkedApiRoot(await apiRoot())!=="https://api.telegram.org") {
           // A local Telegram server keeps the file on disk and returns its absolute path: copy it with the usual checks.
           if (!cfg.telegramLocalRoot) throw Error("attachment_local_api_required");
-          const saved=await saveLocalTelegramFile({sourcePath:info.file_path,localRoot:cfg.telegramLocalRoot,inboxRoot:dir,
+          const saved=await saveLocalTelegramFile({sourcePath:info.file_path,localRoot:cfg.telegramLocalRoot,inboxRoot:dir,inboxBase:inboxRoot,
             threadId,updateId:args.file.message,fileId:f.file_id,name,expectedBytes:f.file_size||undefined,signal});
           return JSON.stringify({path:saved.path,name,kind:f.file_kind,size:f.file_size});
         }
         const res=await fetch(`${checkedApiRoot(await apiRoot())}/file/bot${await botToken()}/${info.file_path}`,{signal});
         if (!res.ok) throw Error("file_download_failed");
         await writeFile(path,Buffer.from(await res.arrayBuffer()),{mode:0o640});
+        await chmod(path,0o640);
         return JSON.stringify({path,name,kind:f.file_kind,size:f.file_size});
       }
       const {file:_file,...query}=args;
@@ -907,7 +908,7 @@ export default async function plugin(bb: BbPluginApi) {
     const file = await tg("getFile", {file_id:incoming.fileId});
     if (typeof file.file_path !== "string") throw Error("attachment_file_invalid");
     return saveLocalTelegramFile({sourcePath:file.file_path,
-      localRoot:c.telegramLocalRoot, inboxRoot:scope ? join(inboxRoot,...scope) : inboxRoot,
+      localRoot:c.telegramLocalRoot, inboxRoot:scope ? join(inboxRoot,...scope) : inboxRoot, inboxBase:inboxRoot,
       threadId:isolated ? "isolated:"+threadId : threadId, updateId:updateId, fileId:incoming.fileId, name:incoming.name,
       expectedBytes:incoming.size || undefined, maxBytes, signal:fileSignal});
   }
@@ -929,7 +930,7 @@ export default async function plugin(bb: BbPluginApi) {
     const getFile=telegram(requestToken,signal,30_000,undefined,async()=>"https://api.telegram.org");
     if (file.size>maxRoutedDocumentBytes) throw Error("attachment_too_large");
     return receiveCloudTelegramDocument(requestToken,await getFile("getFile",{file_id:file.fileId}),{
-      ...file,updateId,threadId:"isolated:"+threadId,inboxRoot:join(inboxRoot,...scope),signal,
+      ...file,updateId,threadId:"isolated:"+threadId,inboxRoot:join(inboxRoot,...scope),inboxBase:inboxRoot,signal,
     },fetch,!!file.pdf);
   }
   async function receiveGroupFile(file:import("./ingress").GroupExample,

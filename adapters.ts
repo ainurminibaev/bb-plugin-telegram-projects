@@ -54,7 +54,7 @@ export async function downloadGroupImage(token:TokenSource, file:CloudFile,
 }
 
 type CloudAttachment = {
-  fileId:string; name:string; size:number; threadId:string; updateId:number; inboxRoot:string; signal:AbortSignal;
+  fileId:string; name:string; size:number; threadId:string; updateId:number; inboxRoot:string; inboxBase?:string; signal:AbortSignal;
 };
 export function receiveCloudTelegramPdf(token:TokenSource,file:CloudFile,input:CloudAttachment,request=fetch) {
   return receiveCloudTelegramDocument(token,file,input,request,true);
@@ -71,7 +71,7 @@ export async function receiveCloudTelegramDocument(token:TokenSource,file:CloudF
   try {
     const sourcePath=join(staging,"document");
     await writeFile(sourcePath,data,{mode:0o600,flag:"wx"});
-    return await saveLocalTelegramFile({sourcePath,localRoot:staging,inboxRoot:input.inboxRoot,
+    return await saveLocalTelegramFile({sourcePath,localRoot:staging,inboxRoot:input.inboxRoot,inboxBase:input.inboxBase,
       threadId:input.threadId,updateId:input.updateId,fileId:input.fileId,name:input.name,
       expectedBytes:data.length,maxBytes:maxRoutedDocumentBytes,signal:input.signal});
   } finally {
