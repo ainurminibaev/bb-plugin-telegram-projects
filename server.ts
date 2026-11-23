@@ -5,7 +5,7 @@ import {learnTopicName,rememberForumName,describeForumTopic,inheritedForumPolicy
 import {handleDelegatedForumCommand} from "./forum-delegation";
 import {applyForumTopicChange,handleOwnerForumCommand} from "./forum-commands";
 import {topicStateKey} from "./topic-lifecycle";
-import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "./employee-private";
+import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
 import {conversationOf,conversationOfThread,guardGroupMemory,readableChats} from "./archive-access";
@@ -949,6 +949,21 @@ export default async function plugin(bb: BbPluginApi) {
   // Every conversation of an employee is an ordinary thread in its own project: the same
   // environment, agent and instructions as the owner's private chat. A person's private chat and
   // each group topic get one thread, created on first use.
+  // С62: the person's conversation writes first after approval: a greeting, then the agent finds out what the person needs.
+  async function greetPerson(subject:number,name:string,talkedBefore:boolean) {
+    const threadId=store.get<GroupTopicPolicy>(`group:policy:${subject}:0`)?.threadId;
+    if (!threadId) return false;
+    const who=name || "этот человек";
+    await bb.sdk.threads.send({threadId,mode:"queue-if-active",input:[{type:"text",mentions:[],text:[
+      `Владелец открыл ${who} личку с тобой.`,
+      talkedBefore
+        ? "Вы уже переписывались. Если о себе и своих возможностях ты ему ещё не рассказывал — напиши одно короткое сообщение: кто ты и с чем можешь помочь, своими словами. Если рассказывал — ничего не отправляй."
+        : "Напиши ему первым одно короткое сообщение: приветствие, кто ты и с чем можешь помочь, своими словами, и спроси, что ему нужно от этой лички.",
+      `Отправка: bb telegram-projects send --person ${subject} --text "…" (без неё сообщение до него не дойдёт).`,
+      "Затем держи в ведении (навык task-tracking), пока не выяснишь, что ему нужно, и не поможешь: сроков нет, проверка — при ежедневной сверке.",
+    ].join("\n")}]});
+    return true;
+  }
   async function bindConversation(owner:number,bot:number,c:{chatId:number;topicId:number;title:string;
     privateChat?:boolean;allowedSenderIds?:number[];acceptAfterSecond?:number},signal:AbortSignal) {
     if (store.get(`group:policy:${c.chatId}:${c.topicId}`)) return true;
@@ -2596,12 +2611,24 @@ export default async function plugin(bb: BbPluginApi) {
           : [ownerId()!, ...accessList(store,botId()!).map(p=>p.id)];
         return sendVisibilityUpdates(store,botId()!,chat=>telegram(botToken,signal,15000,()=>chat,apiRoot),managers);
       };
+      let greetSweepAt=0;
       while (!signal.aborted) {
         const cfg = await settings.get();
         store.put(accessModeKey, cfg.accessPermissionMode);
         store.put(installKindKey, cfg.installKind);
         consentTtlMs = Math.max(1, Number(cfg.consentMinutes) || 30) * 60_000;
         if (botId() && ownerId()) migrateLegacyRights(store, botId()!, profilePeople());
+        // С62: people approved earlier (or whose conversation could not be made then) get their greeting, once.
+        if (!legacyOperations && cfg.employeePrivateRequests && cfg.installKind==="employee" && cfg.chatEnabled && bridge &&
+            botId() && ownerId() && Date.now()-greetSweepAt>60_000) {
+          greetSweepAt=Date.now();
+          const owner=ownerId()!, bot=botId()!;
+          await greetPendingApproved({store,owner,bot,transport:chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),
+            current:()=>ownerId()===owner && botId()===bot && !stateTransferBusy,
+            bindPerson:(subject,name)=>bindConversation(owner,bot,{chatId:subject,topicId:0,
+              title:"Личка: "+(name||subject),privateChat:true,allowedSenderIds:[subject],acceptAfterSecond:0},signal),
+            greetPerson}).catch(()=>{});
+        }
         // Hold updates until the chat bridge exists, so none is consumed and lost.
         if (!cfg.enabled || stateTransferBusy || (cfg.chatEnabled && ownerId() && !bridge)) {
           ingressError = null;
@@ -2647,6 +2674,7 @@ export default async function plugin(bb: BbPluginApi) {
                   transport:chatId=>telegram(botToken,signal,15000,()=>chatId,apiRoot),
                   bindPerson:(subject,name)=>bindConversation(privateOwner,privateBot,{chatId:subject,topicId:0,
                     title:"Личка: "+(name||subject),privateChat:true,allowedSenderIds:[subject],acceptAfterSecond:0},signal),
+                  greetPerson,
               },u)) {
                 store.put("ingress:offset",u.update_id+1);
                 chatWake?.();

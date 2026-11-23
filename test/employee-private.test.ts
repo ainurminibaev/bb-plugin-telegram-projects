@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {acceptPrivateEmployeeUpdate,privatePolicyKey} from "../employee-private";
+import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from "../employee-private";
+import {sendRefusal} from "../send-command";
 import {acceptGroupUpdate} from "../ingress";
 import {bindGroupTopic} from "../group-worker";
 import {accessList,hasAccess} from "../rights";
@@ -11,11 +12,12 @@ function memoryStore(){
   return {rows,get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
     list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
 }
-function harness(){
+function harness(greet=false){
   const store=memoryStore();
   store.put("rights:install-kind","employee");
   const sent:any[]=[];
   const binds:number[]=[];
+  const greetings:{subject:number;talkedBefore:boolean}[]=[];
   const transport=(chat:number)=>(async(method:string,p:any)=>{sent.push({chat,method,...p});return {message_id:sent.length};}) as any;
   const d={store:store as any,owner:OWNER,bot:BOT,transport,current:()=>true,
     bindPerson:async(subject:number,name:string)=>{
@@ -24,19 +26,20 @@ function harness(){
         allowedSenderIds:[subject],requireMention:false,includeTopicContext:true,searchableHistory:true,retainFullHistory:true,
         botId:BOT,botUsername:"acme_bot",ownerId:OWNER,revision:"r-"+name},PROJECT);
       return true;
-    }};
+    },
+    ...(greet && {greetPerson:async(subject:number,_name:string,talkedBefore:boolean)=>{greetings.push({subject,talkedBefore});return true;}})};
   let seq=0;
   const say=(from:number,text:string)=>{const u={update_id:++seq,message:{message_id:100+seq,date:2_000_000_000,
     chat:{id:from,type:"private"},from:{id:from,first_name:"Алиса"},text}};return {u,handled:acceptPrivateEmployeeUpdate(d,u)};};
   const tap=(from:number,data:string,messageId:number)=>acceptPrivateEmployeeUpdate(d,{update_id:++seq,
     callback_query:{id:"c"+seq,from:{id:from},data,message:{message_id:messageId,chat:{id:from,type:"private"}}}});
-  return {store,sent,binds,say,tap};
+  return {store,sent,binds,say,tap,d,greetings};
 }
 
 test("a stranger gets one notice and the owner one card with buttons",async()=>{
   const h=harness();
   assert.equal(await h.say(ALICE,"привет").handled,true);
-  assert.match(h.sent.find(x=>x.chat===ALICE).text,/Доступ к сотруднику ещё не выдан/);
+  assert.match(h.sent.find(x=>x.chat===ALICE).text,/Запрос отправлен владельцу/);
   const card=h.sent.find(x=>x.chat===OWNER);
   assert.match(card.text,/Запрос личного доступа: Алиса/);
   assert.deepEqual(card.reply_markup.inline_keyboard[0].map((b:any)=>b.text),["Разрешить","Отказать"]);
@@ -107,4 +110,34 @@ test("a private chat is never accepted as a group without a private binding",()=
   assert.equal(acceptGroupUpdate(h.store as any,u,OWNER,BOT),false);
   h.store.put(`group:policy:${ALICE}:0`,{chatId:ALICE,topicId:0,threadId:"t",botId:BOT,botUsername:"b",ownerOnly:false,requireMention:false});
   assert.equal(acceptGroupUpdate(h.store as any,u,OWNER,BOT),false,"a group binding cannot capture a private chat");
+});
+
+test("С62: on approval the person gets a conversation at once and the agent is asked to write first, once",async()=>{
+  const h=harness(true);
+  await h.say(ALICE,"/start").handled;
+  const card=h.sent.find(x=>x.chat===OWNER);
+  const allow=card.reply_markup.inline_keyboard[0][0].callback_data;
+  assert.equal(await h.tap(OWNER,allow,h.sent.indexOf(card)+1),true);
+  assert.deepEqual(h.binds,[ALICE],"the conversation exists before the person writes again");
+  assert.deepEqual(h.greetings,[{subject:ALICE,talkedBefore:false}]);
+  assert.equal(h.sent.some(x=>x.chat===ALICE && x.text==="Доступ разрешён."),false,"the agent's greeting replaces the plain notice");
+  assert.equal(sendRefusal(h.store as any,BOT,OWNER,{kind:"person",subject:ALICE},{chat:ALICE,topic:0},()=>[]),undefined);
+  await greetPendingApproved(h.d as any);
+  assert.equal(h.greetings.length,1,"no second greeting");
+});
+
+test("С62: people approved before the greeting existed get it once; an existing conversation is reused",async()=>{
+  const h=harness(true);
+  const BOB=22;
+  for (const [who,talked] of [[ALICE,false],[BOB,true]] as const) {
+    h.store.put(`employee:private:access:${BOT}:${OWNER}:${who}`,{owner:OWNER,bot:BOT,subject:who,nonce:"n"+who,state:"approved",name:"P"+who});
+    if (talked) await h.d.bindPerson(who,"P"+who);
+  }
+  h.store.put(`rights:${BOT}:access`,[{id:ALICE,name:"P21"},{id:BOB,name:"P22"}]);
+  // Approved but not bound yet: writing first is allowed.
+  assert.equal(sendRefusal(h.store as any,BOT,OWNER,{kind:"owner"},{chat:ALICE,topic:0},()=>[]),undefined);
+  await greetPendingApproved(h.d as any);
+  assert.deepEqual(h.greetings.sort((a,b)=>a.subject-b.subject),[{subject:ALICE,talkedBefore:false},{subject:BOB,talkedBefore:true}]);
+  await greetPendingApproved(h.d as any);
+  assert.equal(h.greetings.length,2);
 });

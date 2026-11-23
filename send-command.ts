@@ -78,8 +78,10 @@ export function findTopic(store:Store,bot:number,chat:number|undefined,what:stri
   throw Error((hits.length ? "topic_ambiguous: " : "topic_unknown; known topics: ")+list);
 }
 
+// С62: a person with access who started the bot (a conversation, or an approved request) can be written to first.
 const reachable=(store:Store,bot:number,owner:number,person:number)=>
-  hasAccess(store,bot,owner,person) && !!store.get(privatePolicyKey(person));
+  hasAccess(store,bot,owner,person) && (!!store.get(privatePolicyKey(person)) ||
+    store.get<{state?:string}>(`employee:private:access:${bot}:${owner}:${person}`)?.state==="approved");
 
 /** Undefined when allowed, otherwise the reason. */
 export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversation|undefined,target:SendTarget,
