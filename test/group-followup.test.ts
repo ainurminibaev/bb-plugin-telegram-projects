@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {deliverGroupResults,queueGroupReminder,type GroupOrigin} from "../group-result";
 import {processGroupInputs} from "../group-worker";
+import {setAccess} from "../rights";
 
 function fixture(answer:string, snapshot?:string) {
   const rows=new Map<string,any>(snapshot ? JSON.parse(snapshot) : []);
@@ -78,4 +79,16 @@ test("a restart after the due time starts exactly one turn, and revoked access s
   await revoked.tick();
   assert.equal(queueGroupReminder(revoked.store as any,7,5,args).state,"revoked");
   assert.equal(revoked.inputs.length,0);
+});
+
+test("a member allowed to call the bot here may ask for a later check; others may not",async()=>{
+  const f=fixture("Проверил: файл пришёл.");
+  f.store.put("group:origin:task",{...f.store.get<GroupOrigin>("group:origin:task"),sender:8});
+  assert.throws(()=>queueGroupReminder(f.store as any,7,5,args),/group_task_unavailable/);
+  setAccess(f.store as any,5,[{id:8,name:"Лена"}]);
+  assert.equal(queueGroupReminder(f.store as any,7,5,args).state,"queued");
+  await f.tick();
+  assert.equal(f.inputs.length,1);
+  assert.equal(f.sent.length,1);
+  assert.equal(f.sent[0].reply_parameters.message_id,10);
 });

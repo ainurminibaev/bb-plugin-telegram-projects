@@ -10,6 +10,7 @@ import {sourcesVisible} from "./source-access";
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {z} from "zod";
 import {canInvokeGroup, type GroupTopicPolicy} from "./ingress";
+import {effectiveGroupPolicy,senderRole} from "./rights";
 import {groupExecutor} from "./isolated-client";
 import {TelegramFailure, type Store, type Telegram} from "./model";
 
@@ -27,13 +28,19 @@ export type GroupOrigin = {
   threadId:string; revision:string; projectId:string; executionToken?:string;
 };
 
-function groupBindingActive(store:Store,origin:GroupOrigin) {
+/**
+ * The task's group binding is still the one it was given in. Returns to the owner's messages need the owner;
+ * the agent's own follow-up (participants=true) serves anyone who may still call the bot in this group.
+ */
+function groupBindingActive(store:Store,origin:GroupOrigin,participants=false) {
   const {chatId,topicId,threadId,projectId,owner,bot,sender}=origin;
   const key=`group:policy:${chatId}:${topicId}`;
   const policy=store.get<GroupTopicPolicy>(key);
-  return !!policy && policy.revision===origin.revision && policy.ownerId===owner && policy.botId===bot &&
-    policy.threadId===threadId && policy.projectId===projectId && (sender===owner || policy.isolated===true) &&
-    canInvokeGroup(policy,owner,sender) && groupThreadMatches(store,policy,projectId);
+  if (!policy || policy.revision!==origin.revision || policy.ownerId!==owner || policy.botId!==bot ||
+      policy.threadId!==threadId || policy.projectId!==projectId || !groupThreadMatches(store,policy,projectId)) return false;
+  if (sender===owner || policy.isolated===true) return canInvokeGroup(policy,owner,sender);
+  return participants && senderRole(store,bot,owner,chatId,sender)!=="none" &&
+    canInvokeGroup(effectiveGroupPolicy(store,policy,owner),owner,sender);
 }
 
 // A binding confirms the return address only. Delivery additionally checks the live worker.
@@ -129,7 +136,7 @@ export function queueGroupReminder(store:Store,owner:number,bot:number,args:z.in
     assertTopicQueueWritable(store,origin);
     if(args.waitingFor==="checkpoint" && (!groupBindingActive(store,origin) || !checkpoint(origin.projectId)))
       throw Error("checkpoint_unavailable");
-    if(args.waitingFor==="agent" && !groupBindingActive(store,origin)) throw Error("group_task_unavailable");
+    if(args.waitingFor==="agent" && !groupBindingActive(store,origin,true)) throw Error("group_task_unavailable");
     store.put(key,{state:"queued",text:args.text,dueAt:args.dueAt,waitingFor:args.waitingFor});
     store.put("group:reminder-queue:"+args.taskId,true);
   });
@@ -162,7 +169,7 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     const {chatId,topicId,threadId,projectId,bot,owner,sender}=origin;
     if (isTopicPaused(store,bot,chatId,topicId)) continue;
     const policyKey=`group:policy:${chatId}:${topicId}`;
-    const allowed=()=>current(origin) && groupBindingActive(store,origin);
+    const allowed=()=>current(origin) && groupBindingActive(store,origin,scheduled?.waitingFor==="agent");
     if (!allowed()) {finish("revoked");continue;}
     const sourceAllowed=()=>sourcesVisible(store.get<GroupTopicPolicy>(policyKey)?.deliverySources,bot,chatId,topicId);
     if (!sourceAllowed()) {finish("source_unavailable");continue;}

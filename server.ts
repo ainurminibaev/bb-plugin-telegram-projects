@@ -44,7 +44,7 @@ import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
 import { acceptGroupUpdate, contextMediaPrefix, offsetForServer, routeUpdate, skipExcludedForumUpdate, unboundAddressedGroupMessage, type GroupTopicPolicy } from "./ingress";
-import { accessList, accessModeKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, setAccess } from "./rights";
+import { accessList, accessModeKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, senderRole, setAccess } from "./rights";
 import { handleConsentCallback, watchConsents } from "./consent";
 import { handleSetupUpdate, notifyGroupsAdded, welcomeScreen } from "./setup-screens";
 import { menuCommands } from "./commands";
@@ -728,19 +728,22 @@ export default async function plugin(bb: BbPluginApi) {
   // Only the bound group thread may schedule, only for the task of the owner's current request.
   bb.agents.registerTool({
     name:"telegram_group_followup",
-    description:"Schedule one follow-up turn of this employee for the current Telegram group task. At dueAt the employee itself re-reads the topic and its tools and answers under the original message, or stays silent with NO_REPLY. Use only when the owner asked for a later check in this group request.",
+    description:"Schedule one follow-up turn of this employee for the current Telegram group task. At dueAt the employee itself re-reads the topic and its tools and answers under the original message, or stays silent with NO_REPLY. Use only when the person who wrote this group request (the owner or a member allowed to call you here) asked for a later check.",
     parameters:groupFollowUpInput,
     async execute(args,{threadId}) {
       const owner=ownerId(),bot=botId();
       if (!owner || !bot || !bridge || stateTransferBusy) throw Error("bot_unavailable");
       const policyKey=store.get<string>("group:thread:"+threadId);
       const origin=store.get<{threadId:string;sender:number;owner:number;bot:number}>("group:origin:"+args.taskId);
-      if (!policyKey || !origin || origin.threadId!==threadId || origin.owner!==owner || origin.bot!==bot || !hasAccess(store,bot,owner,origin.sender))
-        throw Error("owner_group_request_required");
+      // Anyone who may call the bot in this group may ask for a later check here, not only the owner.
+      const chat=store.get<GroupTopicPolicy>(policyKey ?? "")?.chatId;
+      if (!policyKey || !origin || origin.threadId!==threadId || origin.owner!==owner || origin.bot!==bot || chat===undefined ||
+          senderRole(store,bot,owner,chat,origin.sender)==="none")
+        throw Error("group_request_required");
       const active=store.list<{taskId?:string;state:string;ownerId:number;route:{threadId:string;senderId:number}}>(`group:in:${bot}:`)
         .some(({value:j})=>j.taskId===args.taskId && j.state==="submitted" && j.ownerId===owner &&
           j.route.threadId===threadId && j.route.senderId===origin.sender);
-      if (!active) throw Error("owner_group_request_required");
+      if (!active) throw Error("group_request_required");
       if (args.dueAt<=Date.now()) throw Error("due_time_in_past");
       const receipt=queueGroupReminder(store,owner,bot,{taskId:args.taskId,dueAt:args.dueAt,waitingFor:"agent",text:args.text});
       chatWake?.();
