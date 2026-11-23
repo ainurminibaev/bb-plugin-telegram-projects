@@ -1,3 +1,11 @@
+# 0.9.64
+
+- A message the owner sends right after another, while the first one's turn is still starting, joins that task too instead of becoming a second request with its own answer (П5). Tests; not yet checked live.
+- When a message from another thread joins a running Telegram task, the bridge itself tells the sender thread once that it was passed on and the answer will come separately (С48), also for group and topic threads.
+- A long voice or file download in one chat no longer holds up answers in other chats and topics (С50): slow work goes to the background after a short grace. Tests.
+- A task's answer no longer comes twice in a topic when a subthread's completion notice joins the running turn.
+- Agent bots in groups (С74), off by default: with an empty `agentBots` setting every bot's message is dropped as before. When listed, an agent bot's message addressed to ours is taken like a participant's, without reactions, and a bot-to-bot chain in a topic stops after `agentChainLimit` replies (3 by default) until a person writes. Tests; not checked live.
+
 # 0.9.63
 
 - A message from another thread (the employee, the assistant, a coordinator, a worker) to an agent busy with a Telegram task no longer waits for the end of the turn (С48): it joins the running turn as a service message (the sender's `bb thread tell` reports it delivered at once), and the task's answer still goes to the chat it came from, without that exchange. The place note asks the agent to answer the sender at once with `bb thread tell` and keep it out of the reply to the person.
