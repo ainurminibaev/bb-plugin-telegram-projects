@@ -411,7 +411,11 @@ export class ReplyRoutes {
         if (primary?.kind === "bb" || (primary?.kind === "telegram" && incoming?.kind === "telegram" &&
             primary.chatId === incoming.chatId && primary.topicId === incoming.topicId)) return false;
       }
-      return !(aux?.kind === "child-notice" || (aux?.kind === "agent" && delegatedBy && aux.senderThreadId === delegatedBy));
+      // С48: another thread's message steered into a Telegram task is answered to that thread;
+      // the task's result still goes where the task came from.
+      const primaryRoute = this.routeOf(threadId, turn.requestIds[0]);
+      return !(aux?.kind === "child-notice" ||
+        (aux?.kind === "agent" && ((delegatedBy && aux.senderThreadId === delegatedBy) || primaryRoute?.kind === "telegram")));
     });
   }
   canJoinNativeAgent(threadId:string,senderThreadId:string,
@@ -446,6 +450,9 @@ export class ReplyRoutes {
       if (!request) return false;
       if (request.originPluginId) {
         if (delegated && id===primary) continue;
+        // С48: any other thread may join a running Telegram task as a service message; it does not own the answer.
+        if (id===primary && request.originPluginId==="telegram-projects" && turn?.requestIds.includes(id) &&
+            this.routeOf(threadId,id)?.kind==="telegram") continue;
         // An addressed Telegram check-in already proven auxiliary leaves the
         // BB or delegated turn's exact original destination intact.
         if (!turn || !turn.requestIds.includes(id) || this.owningRequests(threadId,turn).includes(id)) return false;

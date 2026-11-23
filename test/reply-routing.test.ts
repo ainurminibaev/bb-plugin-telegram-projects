@@ -227,12 +227,12 @@ test("worker's own child notices and coordinator messages keep a delegated turn 
   assert.equal(reports[0].value.turnId,"t7");
   assert.equal(reports[0].value.mixed,undefined);
   assert.deepEqual(reports[0].value.route,tg);
-  // A message from an unrelated thread or the owner typing in BB still conflicts.
+  // С48: a message from an unrelated thread joins as a service message; the Telegram task keeps its destination.
   const other = fixture();
   other.routes.record("w","tg",tg); other.routes.accept("w","t","tg");
   other.routes.requested("w",{requestId:"stranger",initiator:"agent",senderThreadId:"elsewhere"});
   other.routes.accept("w","t","stranger");
-  assert.equal(other.routes.destination("w","t"),undefined);
+  assert.deepEqual(other.routes.destination("w","t"),tg);
   void store;
 });
 

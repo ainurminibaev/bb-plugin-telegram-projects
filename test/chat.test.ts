@@ -1209,7 +1209,8 @@ test("joining requires the original coordinator for a Telegram delegation and pr
     const decide=(ctx:object={})=>f.bridge.admitDispatch({...h.dispatch,...ctx} as any);
     assert.equal((await decide()).action,"wait","stale observer cannot authorize Telegram steering");
     routes.accept("thr_one",h.scope.turnId,"delegated");
-    assert.equal((await decide({senderThreadId:"thr_other"})).action,"wait");
+    // С48: another thread may join a running Telegram task as a service message.
+    assert.equal((await decide({senderThreadId:"thr_other"})).action,"proceed");
     assert.equal((await decide()).action,"proceed");
     const clarification=h.requested("clarification",5,{target:{kind:"auto",expectedTurnId:h.scope.turnId}});
     routes.requested("thr_one",clarification.data);
