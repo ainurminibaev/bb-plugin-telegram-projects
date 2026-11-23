@@ -2,7 +2,7 @@ import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import type {Store,Telegram} from "./model";
 import type {GroupTopicPolicy} from "./ingress";
 import {NO_REPLY} from "./group-result";
-import {stripTelegramMarkers,isBusyAnswer} from "./reply-routing";
+import {ReplyRoutes,stripTelegramMarkers,isBusyAnswer} from "./reply-routing";
 import {sendFormattedText} from "./outbound-message";
 
 // A schedule set in a group or a person's chat runs as an ordinary turn of that conversation's thread; a subthread's
@@ -46,7 +46,12 @@ export async function deliverScheduledResults(store:Store,sdk:Pick<BbPluginApi["
         if (run && e.type==="turn/completed") {
           delete runs[run[0]];
           const text=stripTelegramMarkers(run[1].text ?? "").trim();
-          if (e.data.status==="completed" && text && text!==NO_REPLY && !store.get(sentKey(threadId,turnId)) && allowed()) {
+          // A notice that joined a turn of a Telegram task (a subthread finished while the task ran): that task's own
+          // delivery sends the answer; sending it here too gave the topic two identical messages.
+          const telegramTask=new ReplyRoutes(store).destination(threadId,turnId)?.kind==="telegram" ||
+            store.list<{state?:string;route?:{threadId?:string}}>("group:in:").some(({value:j})=>
+              j.route?.threadId===threadId && (j.state==="submitted" || j.state==="ready" || j.state==="sending"));
+          if (!telegramTask && e.data.status==="completed" && text && text!==NO_REPLY && !store.get(sentKey(threadId,turnId)) && allowed()) {
             store.put(sentKey(threadId,turnId),Date.now());
             const tg=transport(policy.chatId);
             try {

@@ -40,4 +40,12 @@ test("a schedule's result goes to the topic where it was set; silent runs and ot
   ev("turn/completed",{status:"completed"},"td");
   await run(); await run();
   assert.deepEqual(sent.map(p=>[p.chat_id,p.message_thread_id,p.text]),[[-1001,7,"Статус: всё по плану"],[-1001,7,"Подтред посчитал: 16 файлов"]]);
+  // A subthread's notice that joined a running Telegram task: the task's own delivery answers, nothing twice.
+  store.put("group:in:5:77",{state:"submitted",route:{threadId:"t"}});
+  ev("client/turn/requested",{requestId:"e",initiator:"system",systemMessageKind:"child-completed"});
+  ev("turn/input/accepted",{clientRequestId:"e"},"te");
+  ev("item/completed",{item:{type:"agentMessage",text:"Итог поручения из Telegram"}},"te");
+  ev("turn/completed",{status:"completed"},"te");
+  await run(); await run();
+  assert.equal(sent.length,2,"not sent a second time");
 });
