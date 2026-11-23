@@ -16,7 +16,9 @@ import {currentGroup} from "./group-migration";
 // A question sent for another conversation is remembered, so the answer can go back there.
 
 export type SendTarget={chat:number;topic:number};
-export type Ask={id:string;target:number;origin:SendTarget;question:string;at:number};
+export type Ask={id:string;target:number;origin:SendTarget;question:string;at:number;
+  /** The message in the asking conversation the answer goes under (the request this question came from). */
+  replyTo?:number};
 const ASK_DAYS=7;
 const askPrefix=(bot:number)=>`send:ask:${bot}:`;
 
@@ -140,10 +142,20 @@ export function closeAsk(store:Store,bot:number,id:string) { store.del(askPrefix
 
 /** One line per open question for this conversation's turn notes. */
 /** Questions to the owner from other conversations, for the owner's own turn: the answer goes back with --answer. */
-export function ownerAskNotes(store:Store,owner:number,now=Date.now()) {
-  return store.list<Ask>("send:ask:").map(r=>r.value).filter(a=>a.target===owner && now-a.at<ASK_DAYS*86400_000).map(a=>
-    `Открытый вопрос владельцу из другого разговора: «${a.question}». Если владелец отвечает на него, передай ответ туда: `+
-    `bb telegram-projects send --answer ${a.id} --text "…"`).join("\n");
+export function ownerAskNotes(store:Store,owner:number,now=Date.now(),replyTo?:number) {
+  const asks=store.list<Ask>("send:ask:").map(r=>r.value).filter(a=>a.target===owner && now-a.at<ASK_DAYS*86400_000);
+  if (!asks.length) return "";
+  // A reply to the question message itself names the question; otherwise several open questions are never guessed.
+  const replied=replyTo===undefined ? undefined : store.list<string>("send:ask-msg:").find(r=>r.key.endsWith(":"+replyTo))?.value;
+  const own=replied ? asks.find(a=>a.id===replied) : undefined;
+  if (own) return `Владелец ответил на вопрос из другого разговора: «${own.question.slice(0,300)}». Передай его ответ туда: `+
+    `bb telegram-projects send --answer ${own.id} --text "<ответ владельца его словами>"`;
+  return [
+    ...asks.map(a=>`Открытый вопрос владельцу из другого разговора: «${a.question.slice(0,300)}». Ответ владельца на него: bb telegram-projects send --answer ${a.id} --text "…"`),
+    asks.length>1
+      ? "Открыт не один вопрос: если по сообщению владельца не ясно, к какому из них ответ, не угадывай — попроси его нажать «Да» или «Нет» под нужным вопросом или ответить на него реплаем."
+      : "Если сообщение владельца не про этот вопрос — ничего туда не передавай.",
+  ].join("\n");
 }
 
 export function askNotes(store:Store,bot:number,target:number) {

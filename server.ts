@@ -11,6 +11,7 @@ import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} fro
 import {conversationOf,conversationOfThread,guardGroupMemory,readableChats} from "./archive-access";
 import {closeAsk,findGroup,findPerson,findTopic,rememberAsk,sendRefusal,sendTargets} from "./send-command";
 import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
+import {acceptOwnerAskCallback,answerTurnText,askButtons,forwardOriginal,ownerQuestion,queueAnswerTurn,rememberAskMessage,turnMessageKey} from "./owner-ask";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
 import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
@@ -981,6 +982,22 @@ export default async function plugin(bb: BbPluginApi) {
   // Every conversation of an employee is an ordinary thread in its own project: the same
   // environment, agent and instructions as the owner's private chat. A person's private chat and
   // each group topic get one thread, created on first use.
+  // С43/С67: the owner's answer to a question from another conversation comes to that conversation as a turn.
+  async function deliverOwnerAnswer(ask:import("./send-command").Ask,answer:string,via:"button"|"text",who?:string) {
+    const bot=botId(), owner=ownerId();
+    if (!bot || !owner || !answer.trim()) return false;
+    const sender=ask.target===owner ? {id:owner,name:"Владелец"} : {id:ask.target,name:who ?? "Собеседник"};
+    if (queueAnswerTurn(store,bot,owner,ask,answerTurnText(ask,answer.trim(),via,who),sender)) {
+      closeAsk(store,bot,ask.id); chatWake?.(); return true;
+    }
+    // Without the original message (an older question) the answer still reaches the conversation as a turn.
+    const threadId=store.get<GroupTopicPolicy>(`group:policy:${ask.origin.chat}:${ask.origin.topic}`)?.threadId;
+    if (!threadId) return false;
+    await bb.sdk.threads.send({threadId,mode:"queue-if-active",input:[{type:"text",mentions:[],
+      text:answerTurnText(ask,answer.trim(),via,who)+"\nОтветь человеку явной отправкой (bb telegram-projects send …)."}]});
+    closeAsk(store,bot,ask.id);
+    return true;
+  }
   // С62: the person's conversation writes first after approval: a greeting, then the agent finds out what the person needs.
   async function greetPerson(subject:number,name:string,talkedBefore:boolean,late=false) {
     const threadId=store.get<GroupTopicPolicy>(`group:policy:${subject}:0`)?.threadId;
@@ -2238,13 +2255,17 @@ export default async function plugin(bb: BbPluginApi) {
           else return {exitCode:2,stderr:"target_required: --chat, --topic, --person or --answer; see --targets"};
           const refusal=sendRefusal(store,bot,owner,caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author,ask);
           if (refusal) return {exitCode:1,stderr:refusal};
-          // A question to the owner from another conversation says where it comes from; the answer returns there.
+          // A question to the owner from another conversation (С43, С67): where it comes from, who asks and their status,
+          // the original request (a link, or the person's message forwarded), then buttons; the answer returns there.
+          let ownerAsk:{turn?:import("./owner-ask").TurnMessage}|undefined;
           if (target.chat===owner && caller?.kind!=="owner" && !opt.answer && (opt.text || opt["text-file"])) {
-            const from=caller?.kind==="person" ? "лички «"+(accessList(store,bot).find(p=>p.id===caller.subject)?.name ?? caller.subject)+"»"
+            const place=caller?.kind==="person" ? "лички «"+(accessList(store,bot).find(p=>p.id===caller.subject)?.name ?? caller.subject)+"»"
               : "группы «"+(store.get<{title?:string}>(`visibility:${bot}:group:${caller?.kind==="group" ? caller.chat : 0}`)?.title ?? "группа")+"»";
             const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
-            opt.text=`Вопрос из ${from}: ${body.length>3500 ? body.slice(0,3500)+"…" : body}\nОтветьте мне здесь — передам ответ туда.`;
+            const turn=ctx.threadId ? store.get<import("./owner-ask").TurnMessage>(turnMessageKey(ctx.threadId)) : undefined;
+            opt.text=ownerQuestion({store,bot,owner,place,turn,body});
             delete opt["text-file"];
+            ownerAsk={turn};
           }
           // The bridge's command gets no standard input: "-" cannot be read here.
           if (opt["text-file"]==="-") return {exitCode:2,stderr:"text_file_stdin_unsupported: pass the text with --text '…' (several lines are fine) or write it to a file and pass its path"};
@@ -2258,15 +2279,31 @@ export default async function plugin(bb: BbPluginApi) {
             file={name,kind:photo ? "photo" : "document",data:new Blob([new Uint8Array(bytes)],{type:photo ? "image/"+(name.toLowerCase().endsWith("png") ? "png" : "jpeg") : "application/octet-stream"}),
               sha256:createHash("sha256").update(bytes).digest("hex"),bytes:bytes.length};
           }
+          // The owner's answer to a question of another conversation goes to that conversation as a turn: it carries on.
+          // Any answer to a question asked from a group or a person's chat comes back there as a turn (the agent there carries on);
+          // an answer to the owner's own question is posted to the owner's chat as before.
+          if (opt.answer && answer && answer.origin.chat!==owner) {
+            const who=answer.target===owner ? "Владелец" : (accessList(store,bot).find(p=>p.id===answer.target)?.name ?? "Собеседник");
+            const delivered=await deliverOwnerAnswer(answer,text ?? "","text",who);
+            return delivered ? {exitCode:0,stdout:JSON.stringify({sent:true,deliveredTo:"conversation"})} : {exitCode:1,stderr:"asking_conversation_unavailable"};
+          }
           const tg=telegram(botToken,lifetime.signal,60_000,()=>target.chat,apiRoot);
-          const messageId=file || !text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file})
-            : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,markdown:text})).at(-1);
-          if (opt.answer) closeAsk(store,bot,opt.answer);
           let remembered:string|undefined;
           if (ask && caller && !opt.answer) {
             const origin=caller.kind==="owner" ? {chat:owner,topic:0} : caller.kind==="group" ? {chat:caller.chat,topic:caller.topic ?? 0} : {chat:caller.subject,topic:0};
-            remembered=rememberAsk(store,bot,target.chat,origin,text ?? opt.file ?? "").id;
+            const asked=rememberAsk(store,bot,target.chat,origin,text ?? opt.file ?? "");
+            remembered=asked.id;
+            // The answer will go under the request this question came from.
+            const turn=ctx.threadId ? store.get<import("./owner-ask").TurnMessage>(turnMessageKey(ctx.threadId)) : undefined;
+            if (turn && turn.chat===origin.chat && turn.topic===origin.topic) store.put(`send:ask:${bot}:${asked.id}`,{...asked,replyTo:turn.message});
           }
+          // A person's own message goes to the owner as it is, before the question (С67).
+          if (ownerAsk?.turn && ownerAsk.turn.chat>0) await forwardOriginal(chat=>telegram(botToken,lifetime.signal,60_000,()=>chat,apiRoot),owner,ownerAsk.turn);
+          const buttons=ownerAsk && remembered ? askButtons(remembered) : undefined;
+          const messageId=file || !text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file})
+            : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,markdown:text,...(buttons && {replyMarkup:buttons})})).at(-1);
+          if (ownerAsk && remembered && messageId) rememberAskMessage(store,bot,messageId,remembered);
+          if (opt.answer) closeAsk(store,bot,opt.answer);
           return {exitCode:0,stdout:JSON.stringify({sent:true,messageId,...(remembered && {ask:remembered})})};
         } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
       }
@@ -2711,6 +2748,12 @@ export default async function plugin(bb: BbPluginApi) {
             const privateOwner=ownerId(),privateBot=botId();
             if (privateOwner && privateBot && cfg.chatEnabled && bridge &&
                 await forumCommand(privateOwner,privateBot,signal,u)) {
+              store.put("ingress:offset",u.update_id+1);
+              continue;
+            }
+            // The owner's «Да / Нет» under a question from another conversation (any kind of install).
+            if (privateOwner && privateBot && cfg.chatEnabled && bridge && await acceptOwnerAskCallback({store,bot:privateBot,owner:privateOwner,
+                tg:telegram(botToken,signal,15000,()=>privateOwner,apiRoot),deliver:deliverOwnerAnswer},u)) {
               store.put("ingress:offset",u.update_id+1);
               continue;
             }

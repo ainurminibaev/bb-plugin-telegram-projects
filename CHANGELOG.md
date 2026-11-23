@@ -1,3 +1,11 @@
+# 0.9.58
+
+- A question to the owner from a group or a person's chat comes with «Да» and «Нет» buttons and without service numbers. It says where it comes from, who asks and their status (the owner, an approved person or a group member), and links the original group message; a person's own message is forwarded before it (quoted, if Telegram does not allow forwarding).
+- The answer — a button, or a reply in the owner's chat — comes back to the asking conversation as a turn, so the agent there carries on and reports where the request was made. The same for a person's answer to a question asked from a group («спишись с X»).
+- Several open questions are never guessed: a reply to a question names it; otherwise the agent asks the owner to press the button under the right one.
+- The place note: «спишись / договорись / реши с X» is a conversation in X's private chat when it is open, the result goes back where it was asked.
+- Groups: the reaction is chosen by the person's own words, not the whole turn text.
+
 # 0.9.57
 
 - Reactions and a live status (С45, С46): every message that reaches the agent gets a sign at once, then a chosen reaction; a long turn shows one status message with its current step. The same in private chats, groups and topics.

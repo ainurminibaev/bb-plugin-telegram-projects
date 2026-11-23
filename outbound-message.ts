@@ -117,6 +117,8 @@ type MessagePayload = {
   file?:Pick<OutboundFile,"kind"|"name"|"data">;
   /** The text is Telegram HTML made by renderTelegramParts (the same formatting as a private chat). */
   html?:boolean;
+  /** Buttons under a text message. */
+  replyMarkup?:Record<string,unknown>;
 };
 
 /** The words of Telegram HTML without tags: sent when Telegram rejects the formatting. */
@@ -126,7 +128,7 @@ export function plainFromHtml(html:string) {
 }
 
 export function outboundMessagePayload(args:MessagePayload):{method:string;body:Record<string,unknown>} {
-  const {chatId,topicId,replyTo,text,file,html}=args;
+  const {chatId,topicId,replyTo,text,file,html,replyMarkup}=args;
   if (!checkOutboundContent({text,artifact:file})) throw Error("outbound_content_invalid");
   const target={
     chat_id:chatId,
@@ -134,7 +136,7 @@ export function outboundMessagePayload(args:MessagePayload):{method:string;body:
     ...(replyTo!==undefined && {reply_parameters:{message_id:replyTo,allow_sending_without_reply:false}}),
   };
   if (!file)
-    return {method:"sendMessage",body:{...target,text,...(html && {parse_mode:"HTML"}),link_preview_options:{is_disabled:true}}};
+    return {method:"sendMessage",body:{...target,text,...(html && {parse_mode:"HTML"}),...(replyMarkup && {reply_markup:replyMarkup}),link_preview_options:{is_disabled:true}}};
   return {method:file.kind==="photo" ? "sendPhoto" : "sendDocument",body:{
     ...target,...(text!==undefined && {caption:text}),
     [file.kind]:file.data,[file.kind+"_filename"]:file.name,
@@ -161,10 +163,12 @@ export async function sendOutboundMessage(tg:Telegram,args:Omit<MessagePayload,"
  * Agent text to a group or a person: the same formatting as the owner's private chat (bold, italic, lists, code, links).
  * A part Telegram rejects as formatting goes as plain words. Returns the sent message IDs in order.
  */
-export async function sendFormattedText(tg:Telegram,args:{chatId:number;topicId:number;replyTo?:number;markdown:string}) {
+export async function sendFormattedText(tg:Telegram,args:{chatId:number;topicId:number;replyTo?:number;markdown:string;replyMarkup?:Record<string,unknown>}) {
   const ids:number[]=[];
-  for (const part of renderTelegramParts(cleanAssistantText(args.markdown).trim())) {
-    const target={chatId:args.chatId,topicId:args.topicId,replyTo:args.replyTo};
+  const parts=renderTelegramParts(cleanAssistantText(args.markdown).trim());
+  for (const [index,part] of parts.entries()) {
+    // Buttons go under the last part only.
+    const target={chatId:args.chatId,topicId:args.topicId,replyTo:args.replyTo,...(index===parts.length-1 && args.replyMarkup && {replyMarkup:args.replyMarkup})};
     ids.push(await sendOutboundMessage(tg,{...target,text:part,html:true}).catch(error=>{
       if (error instanceof TelegramFailure && error.code==="telegram_400") return sendOutboundMessage(tg,{...target,text:plainFromHtml(part)});
       throw error;

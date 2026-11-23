@@ -16,6 +16,7 @@ import {routedArtifactKind,routedCaption} from "./routed-message";
 import {ReplyRoutes, busyAnswerText, isBusyAnswer, stripTelegramMarkers} from "./reply-routing";
 import {voiceTranscripts} from "./archive";
 import {askNotes} from "./send-command";
+import {turnMessageKey} from "./owner-ask";
 import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumScope, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
@@ -399,6 +400,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const role=senderRole(store,botId,owner,r.chatId,r.senderId,provider);
       if (role==="none") {finish("revoked");continue;}
       store.put("group:turn-author:"+r.threadId,r.senderId);
+      // С67: the message this turn answers, for a question to the owner (a link to it, or the message itself forwarded).
+      store.put(turnMessageKey(r.threadId),{chat:r.chatId,topic:r.topicId,message:r.messageId,sender:r.senderId,
+        ...(r.senderName && {senderName:r.senderName}),text:String(r.ownText ?? r.text ?? "").slice(0,1500)});
       job.guest=role==="member" || !!policy.isolated;
       const settings=activeGroupSettings(store,botId,r.chatId);
       const title=store.get<{title?:string}>(`visibility:${botId}:group:${r.chatId}`)?.title ?? "эта группа";

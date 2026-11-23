@@ -2035,7 +2035,7 @@ export class ChatBridge {
       !input.forwarded && !input.attachment && !input.voice && !input.replyTo
       ? createHash("sha256").update(text).digest("hex") : undefined;
     // Questions to the owner from other conversations (С43): the owner's turn knows them and returns the answer.
-    const ownerAsks=input.chatId===this.d.owner() ? ownerAskNotes(this.s,input.chatId) : "";
+    const ownerAsks=input.chatId===this.d.owner() ? ownerAskNotes(this.s,input.chatId,Date.now(),input.replyTo) : "";
     if (ownerAsks) text=text+"\n\n"+ownerAsks;
     if (b.threadId) {
       const pending = await this.d.sdk.threads.interactions.list({
