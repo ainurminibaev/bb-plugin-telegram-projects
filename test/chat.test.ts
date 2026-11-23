@@ -263,6 +263,34 @@ test("retired delivery watcher cannot leave a stale error on a healthy successor
     assert.equal(f.bridge.status().lastError, null);
   } finally {f.cleanup();}
 });
+test("a delivery watch of an archived thread is finished, not an error; an error says what, where and when", async () => {
+  const f = fixture();
+  try {
+    f.store.put("chat:binding:100", {topicId: 100, projectId: "proj_one", threadId: "thr_one", revision: "current", ready: false, cursor: 99});
+    f.store.put("reply:watch:arch", {owner: OWNER_ID, topicId: 100, projectId: "proj_one", threadId: "arch", revision: "arch", cursor: 99});
+    const original = f.sdk.threads.get;
+    let broken = false;
+    f.sdk.threads.get = async (a: any) => {
+      if (a.threadId === "arch") return {...(await original({threadId: "thr_one"})), id: "arch", archivedAt: 1};
+      if (a.threadId === "thr_one" && broken) throw Error("timeout");
+      return original(a);
+    };
+    await f.bridge.observe();
+    assert.equal(f.store.get("reply:watch:arch"), undefined);       // dropped: an archived thread delivers nothing more
+    assert.equal(f.bridge.status().lastError, null);
+    broken = true;
+    await f.bridge.observe();
+    const e = f.bridge.status().lastErrorDetail!;
+    assert.equal(e.code, "bound_thread_unavailable");
+    assert.equal(e.topicId, 100);
+    assert.equal(e.threadId, "thr_one");
+    assert.match(e.at, /^\d{4}-\d\d-\d\dT/);
+    broken = false;
+    (f.bridge as any).enqueue(100, "ответ");                          // the next delivery to the same conversation
+    await f.bridge.flush();
+    assert.equal(f.bridge.status().lastErrorDetail, null);
+  } finally {f.cleanup();}
+});
 test("custom Telegram topic can bind a project before sending", async () => {
   const f = fixture();
   try {

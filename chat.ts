@@ -222,7 +222,11 @@ export class ChatBridge {
   private nextObserve = 0;
   private lanes = new Set<number>();
   private disposed = false;
-  private lastError: string | null = null;
+  /** The last error with its place and time; cleared by the next success in the same conversation. */
+  private lastError: { code: string; topicId?: number; threadId?: string; at: number } | null = null;
+  private setError(code: string, where: { topicId?: number; threadId?: string } = {}) {
+    this.lastError = { code, ...where, at: Date.now() };
+  }
   private work = new Set<Promise<void>>();
   private observed = false;
   private flushing = false;
@@ -994,7 +998,7 @@ export class ChatBridge {
       });
       const p = (parts.length === 1 ? this.handle(r.input) : this.handleInput(r.input, parts))
         .catch((e) => {
-          this.lastError = e instanceof Error ? e.name : "operation_failed";
+          this.setError(e instanceof Error ? e.name : "operation_failed", { topicId: r.input.topicId });
           this.enqueue(
             r.input.topicId,
             this.tr(
@@ -1189,13 +1193,8 @@ export class ChatBridge {
       threadId: id,
       signal: this.d.signal,
     });
-    if (
-      t.projectId !== b.projectId ||
-      t.deletedAt ||
-      t.archivedAt ||
-      t.visibility === "hidden"
-    )
-      throw Error("thread_not_available");
+    if (t.deletedAt || t.archivedAt) throw Error("thread_archived");
+    if (t.projectId !== b.projectId || t.visibility === "hidden") throw Error("thread_not_available");
     if ((await sharedGroupThreads(this.s,this.d.sdk.threads,[id],this.d.signal)).has(id) ||
         this.s.get("group:thread:"+id)) throw Error("thread_not_available");
     this.s.put("chat:thread-project:" + id, b.projectId);
@@ -2885,6 +2884,7 @@ export class ChatBridge {
       try {
         const t = await this.validThread(b, b.threadId);
         bindingChecked = true;
+        if (this.lastError?.code === "bound_thread_unavailable" && this.lastError.threadId === b.threadId) this.lastError = null;
         if (!await this.observeChildRoutes(b)) continue;
         const events = await this.d.sdk.threads.events.list({
           threadId: b.threadId,
@@ -3149,14 +3149,18 @@ export class ChatBridge {
           this.binding(b.topicId)?.revision === b.revision
         )
           this.save(b);
-      } catch {
-        if (this.binding(b.topicId)?.threadId === b.threadId || this.s.get("reply:watch:" + b.revision)) {
+      } catch (e) {
+        const bound = this.binding(b.topicId)?.threadId === b.threadId;
+        // A delivery watch of an archived thread can never deliver again: it is finished, not an error.
+        if (!bound && e instanceof Error && e.message === "thread_archived" && this.s.get("reply:watch:" + b.revision)) {
+          this.s.del("reply:watch:" + b.revision);
+        } else if (bound || this.s.get("reply:watch:" + b.revision)) {
           bindingFailed = true;
-          this.lastError = "bound_thread_unavailable";
+          this.setError("bound_thread_unavailable", { topicId: b.topicId, threadId: b.threadId });
         }
       }
     }
-    if (bindingChecked && !bindingFailed && this.lastError === "bound_thread_unavailable") this.lastError = null;
+    if (bindingChecked && !bindingFailed && this.lastError?.code === "bound_thread_unavailable") this.lastError = null;
   }
   private async clearProgress(topicId: number, revision: string) {
     for (const { key, value } of this.s.list<Outbox>("chat:out:progress:")) {
@@ -3508,6 +3512,9 @@ export class ChatBridge {
           this.s.put(key, { ...o, sentId: last || -1, text: "", keys: undefined });
           if (last > 0 && o.coversChildResults) this.routes.finalDelivered(key);
         });
+        // A delivery to the conversation where the last error was clears it.
+        if (last > 0 && this.lastError && (this.lastError.topicId === undefined || this.lastError.topicId === o.topicId))
+          this.lastError = null;
         if (key.startsWith("chat:out:progress:") && o.revision)
           this.s.put("chat:progress:" + o.topicId + ":" + o.revision, last);
         if ((key.startsWith("chat:out:event:") || key.startsWith("chat:out:end:")) && o.revision)
@@ -3534,7 +3541,8 @@ export class ChatBridge {
   }
   status() {
     return {
-      lastError: this.lastError,
+      lastError: this.lastError?.code ?? null,
+      lastErrorDetail: this.lastError ? { ...this.lastError, at: new Date(this.lastError.at).toISOString() } : null,
       deliveryErrors: this.s
         .list<Outbox>("chat:out:")
         .filter((x) => !x.value.sentId && x.value.error)

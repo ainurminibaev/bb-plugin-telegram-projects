@@ -114,6 +114,9 @@ const statusSchema = z.object({
   ),
   chatQueue: z.number(),
   chatError: z.string().nullable(),
+  /** The last error with where and when; cleared by the next success in the same conversation. */
+  chatLastError: z.object({ code: z.string(), topicId: z.number().optional(), threadId: z.string().optional(), at: z.string(),
+    text: z.string() }).nullable().optional(),
   enabled: z.boolean(),
   bot: z.string(),
   topicsEnabled: z.boolean(),
@@ -1140,6 +1143,13 @@ export default async function plugin(bb: BbPluginApi) {
       chatBindings: bridge?.status().bindings ?? [],
       chatQueue: bridge?.status().outgoing ?? 0,
       chatError: bridge?.status().lastError ?? null,
+      chatLastError: (() => {
+        const e = bridge?.status().lastErrorDetail;
+        if (!e) return null;
+        const where = [e.topicId !== undefined ? (e.topicId ? `тема ${e.topicId}` : "личка") : "", e.threadId ? `тред ${e.threadId}` : ""]
+          .filter(Boolean).join(", ");
+        return { ...e, text: `последняя ошибка: ${e.code}${where ? ", " + where : ""}, ${e.at.slice(0, 16).replace("T", " ")} UTC` };
+      })(),
       enabled: cfg.enabled,
       bot: username,
       topicsEnabled,
