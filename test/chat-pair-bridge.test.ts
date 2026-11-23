@@ -100,8 +100,8 @@ test("мост: лимит Claude — сообщение уходит в Codex �
     assert.match(replay.input[0].text, /ласточка/);
     assert.match(replay.input[1].text, /^\[bb-telegram-reply-route:/);
     assert.equal(f.queues.thr_claude.length, 0);
-    assert.equal(f.threads.thr_codex.title, "🟢 Действующий · Личный помощник · Codex");
-    assert.equal(f.threads.thr_claude.title, "⏳ Ждёт лимита · Личный помощник · Claude");
+    assert.equal(f.threads.thr_codex.title, "Личный помощник · 🟢 Действующий · Codex");
+    assert.equal(f.threads.thr_claude.title, "Личный помощник · ⏳ Ждёт лимита · Claude");
 
     // Codex ответил; лимит Claude снялся; на границе хода — возврат.
     f.events.thr_codex.push({seq: 1, type: "item/completed", createdAt: Date.now(),
@@ -118,8 +118,8 @@ test("мост: лимит Claude — сообщение уходит в Codex �
     const next = f.sends.filter(s => s.threadId === "thr_claude").at(-1);
     assert.ok(next, "сообщение ушло в Claude");
     assert.match(next.input[0].text, /Пока ты был в резерве[\s\S]*ласточка[\s\S]*Какое кодовое слово\?/);
-    assert.equal(f.threads.thr_claude.title, "🟢 Действующий · Личный помощник · Claude");
-    assert.equal(f.threads.thr_codex.title, "⏸ Резерв · Личный помощник · Codex");
+    assert.equal(f.threads.thr_claude.title, "Личный помощник · 🟢 Действующий · Claude");
+    assert.equal(f.threads.thr_codex.title, "Личный помощник · ⏸ Резерв · Codex");
   } finally { f.cleanup(); }
 });
 

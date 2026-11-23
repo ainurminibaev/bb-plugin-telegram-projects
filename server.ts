@@ -255,7 +255,7 @@ export const rpcContract = defineRpcContract({
   /** Постоянная пара тредов чата: основной и резервный, переключение по лимиту. */
   configureChatPair: {
     input: z.object({topicId: z.number().int().nonnegative(), primaryThreadId: z.string().min(1),
-      fallbackThreadId: z.string().min(1)}).strict(),
+      fallbackThreadId: z.string().min(1), name: z.string().trim().min(1).max(60).optional()}).strict(),
     output: z.object({configured: z.literal(true)}),
   },
   removeChatPair: {input: z.object({topicId: z.number().int().nonnegative()}).strict(), output: z.boolean()},
@@ -1947,9 +1947,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (!bridge) throw Error("telegram_chat_unavailable");
       return bridge.spawnDelegated(args);
     },
-    configureChatPair: async ({topicId, primaryThreadId, fallbackThreadId}) => {
+    configureChatPair: async ({topicId, primaryThreadId, fallbackThreadId, name}) => {
       if (!bridge) throw Error("telegram_chat_unavailable");
-      await bridge.pairs.configure(topicId, primaryThreadId, fallbackThreadId);
+      await bridge.pairs.configure(topicId, primaryThreadId, fallbackThreadId, name);
       return {configured: true as const};
     },
     removeChatPair: async ({topicId}) => {

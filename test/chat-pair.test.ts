@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ChatPairs, baseTitle, type PairDeps } from "../chat-pair";
+import { ChatPairs, baseTitle, pairTitle, type PairDeps } from "../chat-pair";
 import type { Store } from "../model";
 
 function memStore(): Store {
@@ -143,14 +143,29 @@ test("baseTitle снимает пометку состояния", () => {
   assert.equal(baseTitle("🟢 Действующий · Личный помощник · Claude"), "Личный помощник · Claude");
   assert.equal(baseTitle("⏳ Ждёт лимита · Личный помощник · Codex"), "Личный помощник · Codex");
   assert.equal(baseTitle("Личный помощник"), "Личный помощник");
+  assert.equal(baseTitle("Мистер Пятница · 🟢 Действующий · Claude"), "Мистер Пятница · Claude");
+  assert.equal(pairTitle("Мистер Пятница · Codex", "⏸ Резерв"), "Мистер Пятница · ⏸ Резерв · Codex");
 });
 
 test("настройка пары ставит пометки обоим тредам", async () => {
   const w = world();
   const pairs = new ChatPairs(w.deps);
   await pairs.configure(0, "claude", "codex");
-  assert.equal(w.threads.get("claude")!.title, "🟢 Действующий · Личный помощник · Claude");
-  assert.equal(w.threads.get("codex")!.title, "⏸ Резерв · Личный помощник · Codex");
+  assert.equal(w.threads.get("claude")!.title, "Личный помощник · 🟢 Действующий · Claude");
+  assert.equal(w.threads.get("codex")!.title, "Личный помощник · ⏸ Резерв · Codex");
+});
+
+test("имя помощника — настройка пары: переименование без смены пометок и тредов", async () => {
+  const w = world();
+  const pairs = new ChatPairs(w.deps);
+  await pairs.configure(0, "claude", "codex");
+  await pairs.configure(0, "claude", "codex", "Мистер Пятница");
+  assert.equal(w.threads.get("claude")!.title, "Мистер Пятница · 🟢 Действующий · Claude");
+  assert.equal(w.threads.get("codex")!.title, "Мистер Пятница · ⏸ Резерв · Codex");
+  await pairs.configure(0, "claude", "codex");            // без имени — имя из нынешнего названия
+  assert.equal(w.threads.get("codex")!.title, "Мистер Пятница · ⏸ Резерв · Codex");
+  await pairs.configure(0, "claude", "codex", "Личный помощник");   // откат той же настройкой
+  assert.equal(w.threads.get("claude")!.title, "Личный помощник · 🟢 Действующий · Claude");
 });
 
 test("лимит действующего: переключение, переотправка с маршрутом, без «⚠️»", async () => {
@@ -169,8 +184,8 @@ test("лимит действующего: переключение, перео�
   assert.equal((w.queues.get("claude") ?? []).length, 0, "повтор на старом треде снят — ответа не будет дважды");
   assert.equal(w.notices.length, 1);
   assert.match(w.notices[0], /^Claude в лимите до .*Пока отвечает Codex\.$/);
-  assert.equal(w.threads.get("codex")!.title, "🟢 Действующий · Личный помощник · Codex");
-  assert.equal(w.threads.get("claude")!.title, "⏳ Ждёт лимита · Личный помощник · Claude");
+  assert.equal(w.threads.get("codex")!.title, "Личный помощник · 🟢 Действующий · Codex");
+  assert.equal(w.threads.get("claude")!.title, "Личный помощник · ⏳ Ждёт лимита · Claude");
   assert.equal(w.threads.get("kid")!.parentThreadId, "claude", "законченный подтред не переезжает: перенос будил бы действующий тред");
   assert.equal(await pairs.onLimit(w.binding as never, "claude", "t1"), true, "повторный разбор того же сбоя — без действий");
   assert.equal(w.sent.length, 1);
@@ -189,8 +204,8 @@ test("оба в лимите: одна строка с временем, соо�
   assert.match(w.notices.at(-1)!, /^Лимит исчерпан на всех аккаунтах\. Продолжу в .* по Москве, сообщение сохранено\.$/);
   assert.equal(w.queues.get("codex")!.length, 1, "штатный повтор остаётся");
   assert.equal(pairs.get(0)!.waiting?.turnId, "t2");
-  assert.equal(w.threads.get("codex")!.title, "🟢 Действующий · Личный помощник · Codex");
-  assert.equal(w.threads.get("claude")!.title, "⏳ Ждёт лимита · Личный помощник · Claude");
+  assert.equal(w.threads.get("codex")!.title, "Личный помощник · 🟢 Действующий · Codex");
+  assert.equal(w.threads.get("claude")!.title, "Личный помощник · ⏳ Ждёт лимита · Claude");
 });
 
 test("ожидание: второй тред освободился раньше — сообщение уходит туда", async () => {
@@ -234,8 +249,8 @@ test("возврат на основной на границе хода, со с
   assert.match(prefix, /Пока ты был в резерве/);
   assert.match(prefix, /ласточка/);
   assert.equal(await pairs.catchUpPrefix("claude"), "", "сводка отдаётся один раз");
-  assert.equal(w.threads.get("claude")!.title, "🟢 Действующий · Личный помощник · Claude");
-  assert.equal(w.threads.get("codex")!.title, "⏸ Резерв · Личный помощник · Codex");
+  assert.equal(w.threads.get("claude")!.title, "Личный помощник · 🟢 Действующий · Claude");
+  assert.equal(w.threads.get("codex")!.title, "Личный помощник · ⏸ Резерв · Codex");
 });
 
 test("десять переключений подряд: новых тредов нет, пометки верные", async () => {
@@ -249,8 +264,8 @@ test("десять переключений подряд: новых тредо�
     await pairs.manualSwitch(0, from, from === "claude" ? "codex" : "claude");
     const active = w.binding.threadId!;
     const other = active === "claude" ? "codex" : "claude";
-    assert.ok(w.threads.get(active)!.title.startsWith("🟢 Действующий · "));
-    assert.ok(w.threads.get(other)!.title.startsWith("⏸ Резерв · "));
+    assert.ok(w.threads.get(active)!.title.includes(" · 🟢 Действующий · "));
+    assert.ok(w.threads.get(other)!.title.includes(" · ⏸ Резерв · "));
   }
   assert.equal(w.threads.size, before);
   assert.equal(w.spawned, 0);

@@ -20,7 +20,7 @@ export type ChatPair = {
   projectId: string;
   primary: string;
   fallback: string;
-  /** Название без пометки состояния, по треду. */
+  /** Название без пометки состояния, по треду: «<имя> · <модель>». Пометка ставится между ними. */
   titles: Record<string, string>;
   /** Названия тредов до пары: возвращаются при снятии пары. */
   original?: Record<string, string>;
@@ -97,10 +97,15 @@ const sameDay = (a: number, b: number) => new Date(a + 3 * 3600_000).toISOString
 const when = (ms: number) => sameDay(ms, Date.now())
   ? new Date(ms).toLocaleTimeString("ru-RU", {timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit"}) : msk(ms);
 
-/** Снять пометку состояния с названия: «🟢 Действующий · X» → «X». */
+/** Снять пометку состояния с названия, где бы она ни стояла:
+ *  «Имя · 🟢 Действующий · Claude» и прежнее «🟢 Действующий · Имя · Claude» → «Имя · Claude». */
 export function baseTitle(title: string) {
-  for (const m of MARKS) if (title.startsWith(m + " · ")) return title.slice(m.length + 3);
-  return title;
+  return title.split(" · ").filter(part => !(MARKS as string[]).includes(part)).join(" · ");
+}
+/** Название треда пары: «<имя> · <пометка> · <модель>» — имя первым, модель в конце. */
+export function pairTitle(base: string, mark: string) {
+  const i = base.lastIndexOf(" · ");
+  return i < 0 ? `${base} · ${mark}` : `${base.slice(0, i)} · ${mark} · ${base.slice(i + 3)}`;
 }
 export const providerLabel = (providerId: string) =>
   providerId === "codex" ? "Codex" : providerId === "claude-code" ? "Claude" : providerId;
@@ -124,7 +129,8 @@ export class ChatPairs {
     return ("thread" in r ? r.thread : r) as unknown as ThreadRow;
   }
 
-  async configure(topicId: number, primary: string, fallback: string) {
+  /** name — имя помощника (настройка установки); не задано — имя из нынешнего названия треда. */
+  async configure(topicId: number, primary: string, fallback: string, name?: string) {
     const b = this.d.binding(topicId);
     if (!b?.threadId) throw Error("pair_binding_missing");
     if (primary === fallback) throw Error("pair_same_thread");
@@ -139,9 +145,10 @@ export class ChatPairs {
     }
     const old = this.get(topicId);
     const base = (t: ThreadRow) => {
-      const raw = baseTitle(t.title ?? "Личный помощник");
       const tail = " · " + providerLabel(t.providerId);
-      return raw.endsWith(tail) ? raw : raw + tail;
+      const raw = baseTitle(t.title ?? "Личный помощник");
+      const own = raw.endsWith(tail) ? raw.slice(0, -tail.length) : raw;
+      return (name?.trim() || own || "Личный помощник") + tail;
     };
     const pair: ChatPair = {topicId, projectId: b.projectId, primary, fallback,
       titles: {[primary]: base(p), [fallback]: base(f)},
@@ -193,7 +200,7 @@ export class ChatPairs {
       const mark = this.mark(p, id, active);
       if (marks[id] === mark) continue;
       try {
-        await this.d.sdk.threads.update({threadId: id, title: `${mark} · ${p.titles[id]}`});
+        await this.d.sdk.threads.update({threadId: id, title: pairTitle(p.titles[id], mark)});
         marks[id] = mark; changed = true;
       } catch { /* название — не повод сорвать переключение */ }
     }
