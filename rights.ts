@@ -23,6 +23,8 @@ export type GroupSettings = {
   memory?: "shared" | "separate";
   /** С55: the owner reaches the agent here without a mention; on unless switched off. */
   ownerNoMention?: boolean;
+  /** С66: the group's name in thread titles; empty — its Telegram title. */
+  shortName?: string;
 };
 export type Person = { id: number; name: string };
 export type SenderRole = "access" | "member" | "none";

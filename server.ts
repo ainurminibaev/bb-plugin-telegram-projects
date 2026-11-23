@@ -44,6 +44,7 @@ const reactionsFrom=(c:{reactionChoice?:boolean;reactionSet?:string;decideComman
   (currentIconChooser=c.topicIcons===false ? undefined : decideChoice(c.decideCommand || "vallis-decide"),
   currentReactions={options:parseReactionOptions(c.reactionSet),
     ...(c.reactionChoice!==false ? {chooser:decideChooser(c.decideCommand || "vallis-decide")} : {})});
+import { applyThreadTitles, rememberGroupTitle, threadTitlesPass } from "./thread-titles";
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
@@ -136,7 +137,7 @@ const personSchema = z.object({ id: z.number().int().positive().safe(), name: z.
 const groupRightsSchema = z.object({
   version: z.number(), who: z.enum(["access", "all"]), reply: z.enum(["mention", "auto"]),
   members: z.enum(["silent", "read", "propose"]), zones: z.array(z.string().max(64)).max(50), note: z.string().max(500),
-  ownerNoMention: z.boolean().optional(),
+  ownerNoMention: z.boolean().optional(), shortName: z.string().max(64).optional(),
 });
 export const rpcContract = defineRpcContract({
   rightsAccess: { input: z.null(), output: z.array(personSchema) },
@@ -145,7 +146,8 @@ export const rpcContract = defineRpcContract({
   rightsGroupSet: {
     input: z.object({ chatId: z.number().int(), who: z.enum(["access", "all"]).optional(), reply: z.enum(["mention", "auto"]).optional(),
       members: z.enum(["silent", "read", "propose"]).optional(), zones: z.array(z.string().max(64)).max(50).optional(),
-      note: z.string().max(500).optional(), ownerNoMention: z.boolean().optional() }).strict(),
+      note: z.string().max(500).optional(), ownerNoMention: z.boolean().optional(),
+      shortName: z.string().max(64).optional() }).strict(),
     output: groupRightsSchema,
   },
   reconcileEmployeeTicket:{input:z.object({idempotencyKey:z.string().regex(/^[a-f0-9]{32}$/)}).strict(),output:z.object({state:z.string(),messageId:z.number().optional()})},
@@ -821,6 +823,7 @@ export default async function plugin(bb: BbPluginApi) {
       const policy=inheritedForumPolicy(source,topicId,{threadId,projectId},crypto.randomUUID());
       bindGroupTopic(store,policy,projectId);
       store.del(journal);
+      void applyThreadTitles(store,bb.sdk,bot,chat).catch(()=>{});   // С66: «<тема> — группа «…»»
       // С58: only on the topic's creation message, and only when it has no icon yet — a person's icon is kept.
       const created=(update as {message?:{forum_topic_created?:{name?:string;icon_custom_emoji_id?:string}}})?.message?.forum_topic_created;
       if (created) void chooseTopicIcon(telegram(botToken,signal,15_000,()=>chat,apiRoot),chat,topicId,
@@ -1714,7 +1717,9 @@ export default async function plugin(bb: BbPluginApi) {
     rightsGroup: async ({ chatId }) => botId() ? groupSettings(store, botId()!, chatId) ?? null : null,
     rightsGroupSet: async ({ chatId, ...change }) => {
       if (!botId()) throw Error("bot_unavailable");
-      return saveGroupSettings(store, botId()!, chatId, change);
+      const saved = saveGroupSettings(store, botId()!, chatId, change);
+      if (change.shortName !== undefined) void applyThreadTitles(store, bb.sdk, botId()!, chatId).catch(() => {});   // С66
+      return saved;
     },
     reconcileEmployeeTicket: async ({idempotencyKey})=>{
       const read=()=>{
@@ -1879,6 +1884,7 @@ export default async function plugin(bb: BbPluginApi) {
       bindGroupTopic(store,{ownerSharedProject,ownerTopicManagerProjectId,addressName,deliverySources:deliverySources ? [...new Set(deliverySources)].sort() : store.get<{deliverySources?:string[]}>(`group:policy:${chatId}:${topicId}`)?.deliverySources,isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},projectId);
       store.del(forumOptOutKey(bot,chatId,topicId));
+      void applyThreadTitles(store,bb.sdk,bot,chatId).catch(()=>{});   // С66
       return warning ? {bound:true as const,warning} : {bound:true as const};
     },
     setForumTopicDefaults: async ({chatId,sourceTopicId,enabled,managers,closeManagers,deleteManagers})=>{
@@ -2796,9 +2802,16 @@ export default async function plugin(bb: BbPluginApi) {
             // С54: the bridge-wide switch of the default topic pickup (stored so the pure checks see it).
             if (store.get(forumAutoKey)!==(cfg.autoTopics!==false)) store.put(forumAutoKey,cfg.autoTopics!==false);
             if (privateOwner && privateBot && cfg.chatEnabled && bridge) {
+              // С66: thread titles follow the place — once for threads bound before, then on a rename of a topic or group.
+              void threadTitlesPass(store,bb.sdk,privateBot).catch(()=>{});
+              const renamedGroup=rememberGroupTitle(store,privateBot,u);
+              const renamedTopic=(u as {message?:{forum_topic_edited?:{name?:string};chat?:{id?:number}}}).message;
+              if (renamedGroup!==undefined) void applyThreadTitles(store,bb.sdk,privateBot,renamedGroup).catch(()=>{});
               activeTelegramWrites++;
               try {
                 if (await inheritForumTopic(privateOwner,privateBot,signal,u)) {
+                  if (renamedTopic?.forum_topic_edited?.name && Number.isSafeInteger(renamedTopic.chat?.id))
+                    void applyThreadTitles(store,bb.sdk,privateBot,renamedTopic.chat!.id!).catch(()=>{});
                   store.put("ingress:offset",u.update_id+1);
                   continue;
                 }
