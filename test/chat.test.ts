@@ -276,7 +276,7 @@ test("a delivery watch of an archived thread is finished, not an error; an error
       return original(a);
     };
     await f.bridge.observe();
-    assert.equal(f.store.get("reply:watch:arch"), undefined);       // dropped: an archived thread delivers nothing more
+    assert.equal(f.store.get("reply:watch:arch"), undefined);       // read once more, then finished
     assert.equal(f.bridge.status().lastError, null);
     broken = true;
     await f.bridge.observe();
@@ -440,6 +440,36 @@ test("only final agent text sent once, not tool commentary or previous turns", a
     await f.bridge.flush();
     assert.equal(f.sent.filter((x) => x.text === "Готовый ответ").length, 1);
     assert.equal(f.sent.filter((x) => x.text === "Проверяю").length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+test("an archived thread's undelivered final still goes out once, then its watch is finished", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn('turn');
+    const [{key, value: bound}] = f.store.list<any>("chat:binding:");
+    // The topic moved on to another thread; the old one keeps a delivery watch and is archived before its answer went out.
+    f.store.put("reply:watch:" + bound.revision, {...bound, owner: OWNER_ID});
+    f.store.put(key, {...bound, threadId: "thr_next", revision: "next"});
+    const original = f.sdk.threads.get;
+    f.sdk.threads.get = async (a: any) => {
+      const t = await original(a.threadId === "thr_next" ? {...a, threadId: bound.threadId} : a);
+      return a.threadId === bound.threadId ? {...t, archivedAt: 1, status: "idle"} : {...t, id: a.threadId};
+    };
+    f.setEvents([
+      {seq: 1, type: "item/completed", scope: {kind: "turn", turnId: "turn"}, data: {item: {type: "agentMessage", text: "Итог из архива"}}},
+      {seq: 2, type: "turn/completed", scope: {kind: "turn", turnId: "turn"}, data: {status: "completed"}},
+    ]);
+    await f.bridge.observe();
+    await f.bridge.flush();
+    assert.equal(f.sent.filter((x) => x.text === "Итог из архива").length, 1);
+    await f.bridge.observe();                                         // nothing left to send: finished
+    assert.equal(f.store.get("reply:watch:" + bound.revision), undefined);
+    await f.bridge.flush();
+    assert.equal(f.sent.filter((x) => x.text === "Итог из архива").length, 1);
+    assert.equal(f.bridge.status().lastError, null);
   } finally {
     f.cleanup();
   }

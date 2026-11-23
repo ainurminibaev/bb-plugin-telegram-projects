@@ -1188,12 +1188,12 @@ export class ChatBridge {
     if (b.threadId) keys.unshift(...this.linkRows(b.threadId));
     this.enqueue(b.topicId, text, keys);
   }
-  private async validThread(b: Binding, id: string) {
+  private async validThread(b: Binding, id: string, allowArchived = false) {
     const t = await this.d.sdk.threads.get({
       threadId: id,
       signal: this.d.signal,
     });
-    if (t.deletedAt || t.archivedAt) throw Error("thread_archived");
+    if (t.deletedAt || (t.archivedAt && !allowArchived)) throw Error("thread_archived");
     if (t.projectId !== b.projectId || t.visibility === "hidden") throw Error("thread_not_available");
     if ((await sharedGroupThreads(this.s,this.d.sdk.threads,[id],this.d.signal)).has(id) ||
         this.s.get("group:thread:"+id)) throw Error("thread_not_available");
@@ -2882,7 +2882,9 @@ export class ChatBridge {
       }
       this.s.del(downloadProgressKey);
       try {
-        const t = await this.validThread(b, b.threadId);
+        const bound = this.binding(b.topicId)?.threadId === b.threadId;
+        // A watch of an archived thread is read once more so an undelivered result or question still goes out.
+        const t = await this.validThread(b, b.threadId, !bound);
         bindingChecked = true;
         if (this.lastError?.code === "bound_thread_unavailable" && this.lastError.threadId === b.threadId) this.lastError = null;
         if (!await this.observeChildRoutes(b)) continue;
@@ -3143,6 +3145,11 @@ export class ChatBridge {
         // Delivery cursors outlive navigation without overwriting the current menu.
         if (this.s.get("reply:watch:" + b.revision))
           this.s.put("reply:watch:" + b.revision, {...b, owner: this.d.owner()});
+        // An archived thread delivers nothing after this pass: its watch is finished once it is no longer running.
+        // Its queued messages go out first: the watch is what routes them to this conversation.
+        if (!bound && t.archivedAt && events.length < 100 && !["active", "starting", "pending", "stopping"].includes(t.status) &&
+            !this.s.list<Outbox>("chat:out:").some(({value: o}) => !o.sentId && o.revision === b.revision))
+          this.s.del("reply:watch:" + b.revision);
         // Binding writes may never overwrite a user's concurrent menu action.
         if (
           !this.lanes.has(b.topicId) &&
@@ -3151,7 +3158,7 @@ export class ChatBridge {
           this.save(b);
       } catch (e) {
         const bound = this.binding(b.topicId)?.threadId === b.threadId;
-        // A delivery watch of an archived thread can never deliver again: it is finished, not an error.
+        // A deleted thread's watch can never deliver again: it is finished, not an error.
         if (!bound && e instanceof Error && e.message === "thread_archived" && this.s.get("reply:watch:" + b.revision)) {
           this.s.del("reply:watch:" + b.revision);
         } else if (bound || this.s.get("reply:watch:" + b.revision)) {
