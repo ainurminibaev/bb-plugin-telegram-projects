@@ -106,9 +106,11 @@ export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversat
     return "person_has_not_started_the_bot: mention them in a group instead and tell who asked why";
   if (caller.kind==="owner") return;
   // From a group a person's private chat is written only on the owner's own request (С44): the author decides, not the place.
+  // From a group: on the owner's request («спишись с X») any approved person, even one who has not written there yet;
+  // a person may ask to be written to privately themselves. Anyone else is answered in the group with a mention.
+  if (caller.kind==="group" && (author===owner || author===target.chat)) return;
   if (caller.kind==="group" && groupsOf(target.chat).includes(caller.chat))
-    // The owner may ask; a person may ask to be written to privately themselves.
-    return author===owner || author===target.chat ? undefined : "person_only_on_the_owners_request_from_a_group: answer in this group and mention them";
+    return "person_only_on_the_owners_request_from_a_group: answer in this group and mention them";
   if (caller.kind==="person" && caller.subject===target.chat) return;
   return "person_not_allowed_from_this_conversation";
 }

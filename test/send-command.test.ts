@@ -34,6 +34,9 @@ test("who may send where follows the calling conversation",()=>{
   assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,999)!,/person_only_on_the_owners_request/);
   assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,OWNER),undefined,"group: the owner's own request");
   assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,ALICE),undefined,"group: a person asks to be written to privately");
+  // «Спишись с X» from the owner reaches an approved person who has not written in this group yet.
+  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:OTHER},{chat:ALICE,topic:0},groupsOf,undefined,OWNER),undefined,"group: the owner's request, person not seen in this group");
+  assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:OTHER},{chat:ALICE,topic:0},groupsOf,undefined,999)!,/person_not_allowed/);
   assert.match(no({kind:"group",chat:OTHER},{chat:ALICE,topic:0})!,/person_not_allowed/);
   assert.match(no({kind:"person",subject:ALICE},{chat:TEAM,topic:0})!,/group_not_allowed/);
   // С43: any conversation asks the owner only with a question whose answer comes back.

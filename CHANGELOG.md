@@ -9,7 +9,7 @@
 - Groups keep the formatting of the private chat: bold, italic, lists, code and links in answers, `send`, scheduled messages and reminders; plain words if Telegram rejects the formatting.
 - Anyone who may call the bot in a group may ask it for a later check there, not only the owner.
 - Any conversation may ask the owner a question with `send --person owner --ask`; the answer returns to the asking conversation.
-- In a group the agent tells apart the owner, an approved person (private access given by the owner) and a group member, who may ask within the group's work. A person may ask the agent in a group to write to them privately.
+- In a group the agent tells apart the owner, an approved person (private access given by the owner) and a group member, who may ask within the group's work. From a group the agent writes privately to an approved person on the owner's request («спишись с X»), even before that person wrote in the group, or to a person who asks it themselves.
 - A group message the thread never took up is given once more and then closed with an honest line; "typing" stops after 10 minutes without a turn (it could last for hours).
 - The one-time pass over people approved before 0.9.56 sends nothing to whoever already talks to the agent, and no apology.
 
