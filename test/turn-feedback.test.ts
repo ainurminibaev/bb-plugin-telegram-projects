@@ -14,23 +14,33 @@ test("the default reaction set uses only reactions Telegram allows bots, funny o
   assert.equal(parseReactionOptions("мусор"), DEFAULT_REACTION_OPTIONS);
 });
 
-test("step labels name the work in plain words, never the command", () => {
+test("step labels: only plain actions a person understands; service mechanics give no label", () => {
   assert.equal(stepLabel({ type: "commandExecution", command: "bb telegram-projects search-history поставки" }), "Ищу в переписке…");
-  assert.equal(stepLabel({ type: "commandExecution", command: "bb telegram-projects rights show" }), "Смотрю настройки доступа…");
   assert.equal(stepLabel({ type: "commandExecution", command: "python3 read.py tasks.xlsx" }), "Читаю таблицу…");
+  assert.equal(stepLabel({ type: "commandExecution", command: "pdftotext договор.pdf -" }), "Читаю файл…");
   assert.equal(stepLabel({ type: "webSearch", queries: ["x"] }), "Ищу в интернете…");
-  assert.equal(stepLabel({ type: "fileChange", changes: [{ path: "a.ts" }] }), "Правлю файлы…");
-  assert.equal(stepLabel({ type: "commandExecution", command: "make build" }), "Выполняю шаг задачи…");
+  // Owner's case 23.11: «может быстрее можно?» → the assistant asked another conversation; no «Смотрю рабочие разговоры».
+  for (const command of ["bb thread tell thr_x 'можно раньше?'", "bb thread list --json", "bb automation list",
+    "bb telegram-projects rights show", "bb plugin config telegram-projects", "make build", "git log -3"])
+    assert.equal(stepLabel({ type: "commandExecution", command }), undefined, command);
+  assert.equal(stepLabel({ type: "fileChange", changes: [{ path: "a.ts" }] }), undefined);
+  assert.equal(stepLabel({ type: "mcpToolCall", server: "bb", tool: "thread_watch_set" }), undefined);
 });
 
-test("the live status shows the agent's first line and the step; a guest sees the step only; the template waits", () => {
+test("the live status: the agent's own words first, a plain step second; silence → «Думаю над ответом…», never a tool", () => {
   const now = 100_000;
-  assert.equal(progressText({ agentLine: "Сейчас гляну, кому открыта личка", step: "Смотрю настройки доступа…", startedAt: now, now }),
-    "⏳ Сейчас гляну, кому открыта личка\\nСмотрю настройки доступа…".replace("\\n", "\n"));
-  assert.equal(progressText({ agentLine: "секрет из лички", step: "Ищу в переписке…", guest: true, startedAt: now, now }),
-    "⏳ Ищу в переписке…");
-  assert.equal(progressText({ startedAt: now, now: now + 2000 }), undefined);
-  assert.equal(progressText({ startedAt: now, now: now + 9000 }), "⏳ Работаю над задачей…");
+  assert.equal(progressText({ agentLine: "Спрошу Валлиса, можно ли выпустить раньше", step: "Ищу в переписке…", startedAt: now, now }),
+    "⏳ Спрошу Валлиса, можно ли выпустить раньше\nИщу в переписке…");
+  assert.equal(progressText({ agentLine: "Спрошу Валлиса, можно ли выпустить раньше", startedAt: now, now }),
+    "⏳ Спрошу Валлиса, можно ли выпустить раньше");
+  // No own line yet: nothing for the first seconds, then the neutral line; a service step adds nothing.
+  assert.equal(progressText({ step: stepLabel({ type: "commandExecution", command: "bb thread tell thr_x hi" }), startedAt: now, now: now + 2000 }), undefined);
+  assert.equal(progressText({ step: stepLabel({ type: "commandExecution", command: "bb thread tell thr_x hi" }), startedAt: now, now: now + 5000 }),
+    "⏳ Думаю над ответом…");
+  assert.equal(progressText({ step: "Читаю файл…", startedAt: now, now: now + 5000 }), "⏳ Думаю над ответом…\nЧитаю файл…");
+  // A guest sees no text of the agent.
+  assert.equal(progressText({ agentLine: "секрет из лички", step: "Ищу в переписке…", guest: true, startedAt: now, now: now + 5000 }),
+    "⏳ Думаю над ответом…\nИщу в переписке…");
 });
 
 test("the quick decision chooses through vallis-decide; no service or an off-list answer keeps 👀", async () => {

@@ -127,29 +127,25 @@ export async function acknowledge(tg: Tg, chatId: number, messageId: number, tex
 type Item = { type?: string; command?: string; tool?: string; server?: string; queries?: string[];
   changes?: { path?: string }[] };
 
-/** Шаг хода понятными словами, без названий команд; не выводится из события — общий ярлык. */
-export function stepLabel(item: Item): string {
+/**
+ * Второстепенная строка хода — только понятное человеку действие из короткого списка. Служебная механика (разговоры
+ * BB, очереди, расписания, настройки, доступы, команды, код) в строку не попадает: undefined.
+ */
+export function stepLabel(item: Item): string | undefined {
   const cmd = String(item.command ?? "").toLowerCase();
   const tool = `${item.server ?? ""} ${item.tool ?? ""}`.toLowerCase();
   const paths = (item.changes ?? []).map(c => String(c.path ?? "").toLowerCase()).join(" ");
   const any = `${cmd} ${tool} ${paths}`;
   if (item.type === "webSearch") return "Ищу в интернете…";
   if (/search-history|telegram.*(history|archive)|переписк/.test(any)) return "Ищу в переписке…";
-  if (/rights|access|consent|permission|plugin config|settings|доступ/.test(any)) return "Смотрю настройки доступа…";
-  if (/\.(xlsx|xls|csv|tsv)\b|sheets?|spreadsheet|таблиц/.test(any)) return "Читаю таблицу…";
+  if (/\bbb (thread|automation|schedule|plugin|settings|agents?)\b|rights|access|consent|permission|queue|cron/.test(any))
+    return undefined;
+  if (/voice-to-text|transcri/.test(any)) return "Расшифровываю запись…";
   if (/gmail|mail|почт/.test(any)) return "Смотрю почту…";
   if (/calendar|календар/.test(any)) return "Смотрю календарь…";
-  if (/yougile|tasks?\b|задач/.test(any)) return "Смотрю задачи…";
-  if (/\bgit (log|diff|show|blame)|github|\bgh /.test(any)) return "Смотрю историю изменений…";
-  if (/\bbb thread|threads?\b/.test(cmd)) return "Смотрю рабочие разговоры…";
-  if (/voice-to-text|transcri/.test(any)) return "Расшифровываю запись…";
-  if (/\.(pdf|docx?|md|txt)\b/.test(any) && item.type !== "fileChange") return "Читаю документ…";
-  if (/\b(rg|grep|find|fd)\b/.test(cmd)) return "Ищу в файлах…";
-  if (/\b(curl|wget|http)/.test(cmd)) return "Обращаюсь к сервису…";
-  if (item.type === "fileChange") return "Правлю файлы…";
-  if (item.type === "mcpToolCall" || item.type === "toolCall") return "Получаю данные…";
-  if (item.type === "commandExecution") return "Выполняю шаг задачи…";
-  return "Работаю над задачей…";
+  if (/\.(xlsx|xls|csv|tsv)\b|spreadsheet|sheets?\b|таблиц/.test(any)) return "Читаю таблицу…";
+  if (/\.(pdf|docx?|txt)\b/.test(any) && item.type !== "fileChange") return "Читаю файл…";
+  return undefined;
 }
 
 /** Первая строка реплики агента — его живое начало по сути задачи. */
@@ -157,17 +153,20 @@ export function firstLine(text: string): string {
   return text.split("\n").map(l => l.trim()).find(Boolean)?.slice(0, 200) ?? "";
 }
 
+/** Главная строка, если агент сам за несколько секунд не написал, что делает по сути: нейтрально, без инструментов. */
+export const THINKING = "Думаю над ответом…";
+
 /**
- * Текст живого сообщения: первая строка агента и текущий шаг. Гостевой тред — только ярлык (без текста агента,
- * чтобы в группу не ушло содержимое из других мест). Запасной шаблон — только если агент молчит дольше `quietMs`.
+ * Текст живого сообщения (С46). Главная строка — слова самого агента о сути просьбы; молчит дольше `quietMs` —
+ * нейтральное «Думаю над ответом…». Понятное человеку действие — второй строкой. Гостевой тред — без текста агента,
+ * чтобы в группу не ушло содержимое из других мест.
  */
 export function progressText(o: { agentLine?: string; step?: string; guest?: boolean; startedAt: number; now?: number;
   quietMs?: number }): string | undefined {
-  const line = o.guest ? "" : (o.agentLine ?? "");
-  if (line && o.step) return `⏳ ${line}\n${o.step}`;
-  if (line) return `⏳ ${line}`;
-  if (o.step) return `⏳ ${o.step}`;
-  return (o.now ?? Date.now()) - o.startedAt >= (o.quietMs ?? 8000) ? "⏳ Работаю над задачей…" : undefined;
+  const line = (o.guest ? "" : (o.agentLine ?? "")) ||
+    ((o.now ?? Date.now()) - o.startedAt >= (o.quietMs ?? 4000) ? THINKING : "");
+  if (!line) return undefined;
+  return o.step ? `⏳ ${line}\n${o.step}` : `⏳ ${line}`;
 }
 
 /** С56: «Голосовое (3 мин 12 с): » — the length goes with the transcript, so a long one is handled as such. */

@@ -9,7 +9,7 @@ import {maxOutboundDocumentBytes,outboundMessagePayload} from "./outbound-messag
 import {routedCaption} from "./routed-message";
 import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interactionOpen } from "./codex-async-question";
 import { splitChildResultClaims, stripTelegramMarkers, ReplyRoutes, type ReplyRoute } from "./reply-routing";
-import { voiceHeader, acknowledge, react, SERVICE_REACTIONS, stepLabel, firstLine, progressText, DEFAULT_REACTION_OPTIONS, type ReactionChooser, type ReactionOption, type Stage } from "./turn-feedback";
+import { voiceHeader, acknowledge, react, SERVICE_REACTIONS, THINKING, stepLabel, firstLine, progressText, DEFAULT_REACTION_OPTIONS, type ReactionChooser, type ReactionOption, type Stage } from "./turn-feedback";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
 import { TelegramHandoff, type HandoffJob } from "./handoff";
 import { ChatPairs, OWNER_MESSAGE } from "./chat-pair";
@@ -3007,7 +3007,7 @@ export class ChatBridge {
             ) {
               const presentation =
                 "presentation" in item ? item.presentation : undefined;
-              b.toolActivity = stepLabel(item as never);
+              b.toolActivity = stepLabel(item as never) ?? ""; // "" — work without a plain-words label
             }
           }
           if (event.type === "turn/completed") {
@@ -3101,18 +3101,19 @@ export class ChatBridge {
         const activeTurn = this.s.get<string>("reply:active-turn:" + b.threadId);
         const deliverActive = this.canDeliver(b, activeTurn);
         try { if (deliverActive) delegated = await this.delegatedProgress(b); } catch { /* parent remains observable */ }
-        // С46: the agent's own first line and the current step in plain words; the template only after a quiet pause.
+        // С46: the agent's own words about the request; a plain-words step second; «Думаю над ответом…» after a quiet pause.
         const live = progressText({agentLine: b.activity ? firstLine(b.activity) : undefined, step: b.toolActivity,
           startedAt: b.turnStartedAt ?? 0})?.replace(/^⏳ /, "");
         const progress = delegated.length
           ? delegated.join("\n\n")
-          : live && live !== "Работаю над задачей…" ? live : this.tr("Работаю над задачей…");
+          : live && live !== THINKING ? live : this.tr(THINKING);
         const isWorking = deliverActive && (["active", "starting", "pending"].includes(t.status) || delegated.length > 0);
         // A late child notice may start an empty acknowledgement turn after
         // the result was already delivered. Show progress only if that turn
         // actually produces public activity or starts more work.
         const hasProgress = (!this.s.get("reply:notification-turn:" + b.threadId + ":" + activeTurn) ||
-          Boolean(b.activity || b.toolActivity || delegated.length)) && Boolean(live || delegated.length);
+          Boolean(b.activity || b.toolActivity !== undefined || delegated.length)) &&
+          Boolean(live || delegated.length || b.toolActivity !== undefined);
         const status = pending.some((i) => i.status === "pending")
           ? this.tr("нужен ответ")
           : (this.tr(states[t.status] ?? t.status) ?? t.status) +

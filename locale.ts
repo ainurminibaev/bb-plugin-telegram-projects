@@ -19,6 +19,7 @@ export const english: Record<string, string> = {
   "Рабочий тред завершился. Подтверждение передачи результата помощнику пока не пришло. История задачи сохранена в BB.": "The worker thread finished. Delivery to the assistant has not been confirmed. The task history is available in BB.",
   "Рабочий тред завершился. BB исчерпал попытки передать его результат помощнику. Результат сохранён в истории рабочего треда.": "The worker thread finished. BB exhausted its attempts to deliver the result to the assistant. The result is in the worker thread history.",
   "Работаю над задачей…": "Working on the task…",
+  "Думаю над ответом…": "Thinking about the answer…",
   "Не удалось подтвердить ответ по журналу. Состояние исходной операции неизвестно.":
     "I couldn't verify a reply in the journal. The state of the original operation is unknown.",
   "❓ Агентство: нужен ответ": "❓ Agency: answer needed",
