@@ -1,3 +1,10 @@
+# 0.9.56
+
+- Employee private chats: when the owner approves a person, the bridge opens the conversation at once and the agent writes first — a short greeting, what it can do, and what the person needs. Nobody has to send another message after "Start".
+- People approved before this version get one message once (an apology that they had no answer, then the same); a restart does not repeat it.
+- `send --person` reaches an approved person before they write again; a person without access is still refused.
+- Before approval the person reads "Запрос отправлен владельцу. Отвечу, как только он подтвердит." instead of "contact the administrator".
+
 # 0.9.55
 
 - Received files can go to a project's own inbox (`projectInboxRoots`: `proj_id=/path`): the file lands in the inbox of the project whose thread gets the message, and the turn names that path. An agent under its own Linux account reads it through the inbox group: folders 0750 (2750 when the inbox has the group bit), files 0640, set explicitly whatever the service umask. Projects without their own inbox keep the shared one.
