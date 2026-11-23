@@ -30,7 +30,7 @@ test("persisted group return goes only to the original message and replays its r
   await tick();
   assert.deepEqual(queue(),{state:"sent",messageId:90});
   await tick();
-  assert.deepEqual(sent,[{chat_id:-1001,message_thread_id:7,reply_parameters:{message_id:42,allow_sending_without_reply:false},text:"Approved"}]);
+  assert.deepEqual(sent,[{chat_id:-1001,message_thread_id:7,reply_parameters:{message_id:42,allow_sending_without_reply:false},text:"Approved",parse_mode:"HTML"}]);
   assert.throws(()=>queueGroupResult(store,2,1,"0","Changed"),/conflict/);
 });
 test("revocation after queuing suppresses delivery",async()=>{

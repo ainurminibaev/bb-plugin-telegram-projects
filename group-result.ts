@@ -1,3 +1,5 @@
+import {plainFromHtml} from "./outbound-message";
+import {cleanAssistantText,renderTelegramParts} from "./telegram-ux";
 import {assertTopicQueueWritable,isTopicPaused} from "./topic-lifecycle";
 import {groupThreadMatches} from "./group-binding";
 import {stripTelegramMarkers} from "./reply-routing";
@@ -232,8 +234,17 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     }
     finish("unknown");
     try {
-      const sent=await transport(chatId)("sendMessage",{chat_id:chatId,message_thread_id:topicId||undefined,
-        reply_parameters:{message_id:origin.messageId,allow_sending_without_reply:false},text});
+      // The same formatting as the private chat; plain words if Telegram rejects it.
+      let sent:any;
+      for (const part of renderTelegramParts(cleanAssistantText(text))) {
+        const body={chat_id:chatId,message_thread_id:topicId||undefined,
+          reply_parameters:{message_id:origin.messageId,allow_sending_without_reply:false}};
+        sent=await transport(chatId)("sendMessage",{...body,text:part,parse_mode:"HTML"}).catch(error=>{
+          if (error instanceof TelegramFailure && error.code==="telegram_400")
+            return transport(chatId)("sendMessage",{...body,text:plainFromHtml(part)});
+          throw error;
+        });
+      }
       if (Number.isSafeInteger(sent?.message_id) && sent.message_id>0) finish("sent",sent.message_id);
     } catch (error) {
       if (error instanceof TelegramFailure && !error.ambiguous) finish("rejected");
