@@ -22,6 +22,7 @@ import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
 import {DISCLOSURE,accessModeKey,activeGroupSettings,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
+import {acknowledge,react,SERVICE_REACTIONS,stepLabel,firstLine,progressText,DEFAULT_REACTION_OPTIONS,type ReactionChooser,type ReactionOption,type Stage} from "./turn-feedback";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
 type Job = {
@@ -36,7 +37,11 @@ type Job = {
   cursor?:number; turnId?:string; answer?:string; part?:number;
   /** Sent into a running turn: the selector of its separate answer; busyOnce — the plain retry is under way. */
   busyLabel?:string; busyOnce?:true;
+  /** С45/С46: the visible sign and the live status of this message. */
+  acked?:true; stage?:Stage; stageShown?:true; guest?:boolean;
+  agentLine?:string; step?:string; startedAt?:number; progressAt?:number; progressText?:string;
 };
+const GROUP_TOOL_ITEMS=new Set(["commandExecution","mcpToolCall","toolCall","fileChange","webSearch"]);
 
 // Keep thread ownership after disconnect: history may already contain group messages.
 export const groupTaskNote = (taskId:string) =>
@@ -157,7 +162,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   owner:number, botId:number, transport:(chatId:number)=>Telegram, signal:AbortSignal,
   transcribe?:(voice:NonNullable<GroupInput["voice"]>)=>Promise<string>, fileHostId?:string,
   receiveExample?:(example:GroupExample,route:GroupInput)=>Promise<SavedTelegramFile|ImageAttachment>, visibleProgress=false,
-  verifyOwnerForum?:(policy:GroupTopicPolicy)=>Promise<boolean>) {
+  verifyOwnerForum?:(policy:GroupTopicPolicy)=>Promise<boolean>,
+  reactions?:()=>{chooser?:ReactionChooser;options:ReactionOption[]}) {
   const routes=new ReplyRoutes(store);
   type Cleanup={chatId:number;messageId:number;retryAt?:number};
   for (const {key,value} of store.list<Cleanup>(`group:cleanup:${botId}:`)) {
@@ -228,6 +234,34 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         groupThreadMatches(store,binding,thread.projectId);
     };
     const dest={kind:"telegram" as const,chatId:r.chatId,topicId:r.topicId,updateId:r.updateId,messageId:r.messageId};
+    const reactionKey=`group:reaction:${botId}:${r.updateId}`;
+    // Lazy: a transport that cannot be built must not break the job (the reaction is best effort).
+    const reactTg:Telegram=(method,body)=>transport(r.chatId)(method,body);
+    // С45: every message that reached this agent gets a visible sign at once: 👀, then the chosen reaction.
+    if (r.updateId>0 && !job.acked) {
+      job.acked=true; job.startedAt??=Date.now(); store.put(key,job);
+      const set=reactions?.();
+      void acknowledge(reactTg,r.chatId,r.messageId,r.text,set?.chooser,set?.options ?? DEFAULT_REACTION_OPTIONS,
+        ()=>!!store.get(reactionKey),[],signal).catch(()=>{});
+    }
+    // С46: one live status message: the agent's first line and the current step; guests see the step only.
+    const updateProgress=async()=>{
+      if (!visibleProgress || policy.ownerSharedProject || r.updateId<=0 || job.progressId===null) return;
+      const text=progressText({agentLine:job.agentLine,step:job.step,guest:job.guest,startedAt:job.startedAt ?? Date.now()});
+      if (!text || text===job.progressText || Date.now()-(job.progressAt ?? 0)<5000) return;
+      try {
+        const tg=transport(r.chatId);
+        if (job.progressId) await tg("editMessageText",{chat_id:r.chatId,message_id:job.progressId,text});
+        else {
+          // A lost Telegram acknowledgement must not create a second status on restart.
+          job.progressId=null; store.put(key,job);
+          const sent=await tg("sendMessage",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
+            reply_parameters:{message_id:r.messageId},text,disable_notification:true});
+          if (Number.isSafeInteger(sent?.message_id)) job.progressId=sent.message_id;
+        }
+        job.progressText=text; job.progressAt=Date.now(); store.put(key,job);
+      } catch { /* A status failure must not stop the actual reply. */ }
+    };
     if (job.state==="pending" && r.voice) {
       try {
         const transcript = (await transcribe?.(r.voice))?.trim();
@@ -243,30 +277,18 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       } catch {
         if (signal.aborted) return;
         job.answer = "Голосовое не удалось распознать. Пришлите правки текстом в ответ на исходное сообщение.";
-        job.state = "ready";
+        job.state = "ready"; job.stage = "failed";
       }
       store.put(key,job);
       if (!allowed()) {finish("revoked");continue;}
     }
     if (job.state==="pending" && r.ambiguousMedia) {
       job.answer="В этой теме несколько подходящих сообщений с вложениями. Ответьте на нужное фото или файл и отметьте бота.";
-      job.state="ready";
+      job.state="ready"; job.stage="question";
     }
     if (job.state==="pending") {
       delete r.precedingExamples;
       if (r.waitUntil!==undefined) {delete r.waitUntil;store.put(key,job);}
-    }
-    if (visibleProgress && !policy.ownerSharedProject && r.updateId>0 && job.state==="pending" && job.progressId===undefined) {
-      // A lost Telegram acknowledgement must not create a second status on restart.
-      job.progressId=null;
-      store.put(key,job);
-      try {
-        const sent=await transport(r.chatId)("sendMessage",{chat_id:r.chatId,message_thread_id:r.topicId||undefined,
-          reply_parameters:{message_id:r.messageId},text:"⏳ Готовлю ответ…",disable_notification:true});
-        if (Number.isSafeInteger(sent?.message_id)) job.progressId=sent.message_id;
-        store.put(key,job);
-      } catch { /* A status failure must not stop the actual reply. */ }
-      if (!allowed()) {finish("revoked");continue;}
     }
     let isolatedResult:Awaited<ReturnType<NonNullable<typeof executor>["read"]>>|undefined;
     if (executor && (job.state==="pending" || job.state==="submitted") && job.executorRetryAt!==undefined) {
@@ -320,7 +342,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (!allowed()) {finish("revoked");continue;}
         delete job.opaqueFiles;
         job.answer="Не удалось получить все файлы. Ответьте на исходное сообщение и приложите материалы ещё раз.";
-        job.state="ready";
+        job.state="ready"; job.stage="failed";
         store.put(key,job);
       }
     }
@@ -351,6 +373,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         const result=isolatedResult ?? await executor.read(job.executionToken,signal);
         if (result.state==="waiting") continue;
         job.answer=result.state==="finished" ? result.text : "Исполнитель потерял квитанцию. Проверьте задачу перед повтором.";
+        if (result.state!=="finished") job.stage="failed";
         job.state="ready";
         store.put(key,job);
       } catch {
@@ -366,6 +389,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const provider=(thread as {providerId?:string}).providerId;
       const role=senderRole(store,botId,owner,r.chatId,r.senderId,provider);
       if (role==="none") {finish("revoked");continue;}
+      job.guest=role==="member" || !!policy.isolated;
       const settings=activeGroupSettings(store,botId,r.chatId);
       const title=store.get<{title?:string}>(`visibility:${botId}:group:${r.chatId}`)?.title ?? "эта группа";
       const senderName=r.senderName ?? "участник";
@@ -394,7 +418,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     }
     if (job.state==="submitted") {
       const events=await sdk.threads.events.list({threadId:r.threadId,afterSeq:String(job.cursor??0),limit:"100",signal,
-        types:["client/turn/requested","turn/input/accepted","item/completed","turn/completed"]});
+        types:["client/turn/requested","turn/input/accepted","item/started","item/completed","turn/completed"]});
       for (const e of events) {
         if (e.type==="client/turn/requested") routes.requested(r.threadId,e.data);
         if (e.scope.kind==="turn") {
@@ -412,14 +436,16 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
             }
           }
           if (job.state==="submitted" && routes.sameTask(routes.destination(r.threadId,turn),dest)) {
+            if (e.type==="item/started" && GROUP_TOOL_ITEMS.has(e.data.item.type)) job.step=stepLabel(e.data.item as never);
             if (e.type==="item/completed" && e.data.item.type==="agentMessage" && !e.data.item.parentToolCallId) {
               const text=e.data.item.text;
+              job.agentLine??=firstLine(stripTelegramMarkers(text)) || undefined;
               // Answers to other messages that joined this turn are not this message's answer.
               const own=label ? busyAnswerText(text,label) : undefined;
               if (own || !isBusyAnswer(text)) {job.turnId=turn; job.answer=own ?? text;}
             }
             if (e.type==="turn/completed") {
-              if (e.data.status!=="completed") job.answer="Помощнику не удалось завершить это поручение.";
+              if (e.data.status!=="completed") {job.answer="Помощнику не удалось завершить это поручение."; job.stage="failed";}
               else if (job.turnId!==turn || !job.answer?.trim()) job.answer="Помощник завершил ход без текстового ответа.";
               job.state="ready";
             }
@@ -429,8 +455,14 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (job.state!=="submitted") break;
       }
       store.put(key,job);
+      if (job.state==="submitted") await updateProgress();
     }
-    // NO_REPLY means "say nothing" in any group turn, not only in a scheduled check.
+    // С45: the bridge's service reaction over the chosen one: a question, a refusal or a failure.
+    if (job.state==="ready" && job.stage && !job.stageShown && r.updateId>0) {
+      store.put(reactionKey,job.stage); job.stageShown=true; store.put(key,job);
+      await react(reactTg,r.chatId,r.messageId,SERVICE_REACTIONS[job.stage]);
+    }
+    // NO_REPLY means "say nothing" in any group turn, not only in a scheduled check: the reaction stays as the sign.
     if (job.state==="ready" && stripTelegramMarkers(job.answer ?? "").trim()===NO_REPLY) {finish("done");continue;}
     if (job.state==="ready") {
       // Ready jobs may be resumed long after submission, including between reply parts.

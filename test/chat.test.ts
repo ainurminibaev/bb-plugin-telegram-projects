@@ -1307,7 +1307,7 @@ test("a Telegram child question resolves in that worker after navigation without
   } finally {f.cleanup();}
 });
 
-test("public parent commentary survives subsequent generic tool start", async () => {
+test("public parent commentary survives a tool start: the agent's line and the step, never the command", async () => {
   const f=fixture();
   try {
     f.thread.status="active";
@@ -1321,7 +1321,8 @@ test("public parent commentary survives subsequent generic tool start", async ()
     await f.bridge.observe(); await f.bridge.flush();
     const progress=f.sent.find(x=>x.text?.startsWith("⏳"));
     assert.ok(progress?.text.includes("Проверяю адреса"));
-    assert.equal(progress.text.includes("Выполняю шаг"),false);
+    assert.ok(progress.text.includes("Выполняю шаг"));            // С46: the current step in plain words
+    assert.equal(progress.text.includes("SECRET"),false);
   } finally {f.cleanup();}
 });
 

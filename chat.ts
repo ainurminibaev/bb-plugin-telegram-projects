@@ -9,6 +9,7 @@ import {maxOutboundDocumentBytes,outboundMessagePayload} from "./outbound-messag
 import {routedCaption} from "./routed-message";
 import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interactionOpen } from "./codex-async-question";
 import { splitChildResultClaims, stripTelegramMarkers, ReplyRoutes, type ReplyRoute } from "./reply-routing";
+import { acknowledge, react, SERVICE_REACTIONS, stepLabel, firstLine, progressText, DEFAULT_REACTION_OPTIONS, type ReactionChooser, type ReactionOption, type Stage } from "./turn-feedback";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
 import { TelegramHandoff, type HandoffJob } from "./handoff";
 import { ChatPairs, OWNER_MESSAGE } from "./chat-pair";
@@ -113,6 +114,8 @@ type Binding = {
   profileTarget?: { hostId: string; environmentId: string | null; cwd: string };
   activity?: string;
   toolActivity?: string;
+  /** When the current turn started: the fallback status waits a few seconds for the agent's own line (С46). */
+  turnStartedAt?: number;
   status?: string;
   progressId?: number;
   progressText?: string;
@@ -235,6 +238,8 @@ export class ChatBridge {
       tg: Telegram;
       /** The paired Telegram user; input from anyone else is refused. */
       owner: () => number | undefined;
+      /** С45: reaction chooser (the quick decision service) and the reaction set; absent — 👀 stays. */
+      reactions?: () => {chooser?: ReactionChooser; options: ReactionOption[]};
       captureOwnerGroupPost?: (threadId:string, owner:number)=>boolean;
       /** Optional companion spool; the plugin's own receiver writes to storage directly. */
       spool?: string;
@@ -1667,9 +1672,7 @@ export class ChatBridge {
           throw Error("attachment_binding_changed");
         if (inbox && !batched) this.s.put(inboxKey, { ...inbox,
           phase: "attachment-download", attachmentThreadId: b.threadId });
-        await this.d.tg("setMessageReaction", {chat_id: input.chatId,
-          message_id: input.messageId, reaction: [{type: "emoji", emoji: "👀"}],
-          is_big: false}).catch(() => {});
+        this.acknowledgeInput(input, b.threadId, text);
         const saved = await this.d.receiveAttachment(input, b.threadId);
         if (this.d.signal.aborted) return;
         // From here onward the outcome may include agent dispatch; never replay it.
@@ -2109,14 +2112,26 @@ export class ChatBridge {
       this.save(b);
       this.watchInput(b);
     }
-    // The reaction acknowledges input without adding a service receipt to the chat.
-    for (const part of parts ?? [input]) await this.d.tg("setMessageReaction", {
-      chat_id: part.chatId,
-      message_id: part.messageId,
-      reaction: [{ type: "emoji", emoji: "👀" }],
-      is_big: false,
-    }).catch(() => { /* reaction support must not block an accepted task */ });
+    // The reaction acknowledges input without adding a service receipt to the chat (С45: 👀, then the chosen one).
+    for (const part of parts ?? [input]) this.acknowledgeInput(part, b.threadId ?? "", part.text || "");
 
+  }
+  /** С45: 👀 at once, then the quick decision's reaction unless a service reaction came first. */
+  private acknowledgeInput(input: {chatId: number; messageId: number; topicId: number}, threadId: string, text: string) {
+    const key = "chat:reaction:" + input.chatId + ":" + input.messageId;
+    this.s.put("chat:last-ack:" + input.topicId, {chatId: input.chatId, messageId: input.messageId, threadId, key});
+    const set = this.d.reactions?.();
+    const job = acknowledge(this.d.tg, input.chatId, input.messageId, text, set?.chooser,
+      set?.options ?? DEFAULT_REACTION_OPTIONS, () => !!this.s.get(key), [], this.d.signal).catch(() => {});
+    this.work.add(job);
+    void job.finally(() => this.work.delete(job));
+  }
+  /** С45: a service reaction (question, refusal, failure) on the last accepted message of this conversation. */
+  private async serviceReaction(topicId: number, threadId: string, stage: Stage) {
+    const last = this.s.get<{chatId: number; messageId: number; threadId: string; key: string}>("chat:last-ack:" + topicId);
+    if (!last || last.threadId !== threadId) return;
+    this.s.put(last.key, stage);
+    await react(this.d.tg, last.chatId, last.messageId, SERVICE_REACTIONS[stage]);
   }
   private async action(b: Binding, a: Action) {
     switch (a.kind) {
@@ -2562,6 +2577,7 @@ export class ChatBridge {
   private question(b: Binding, i: PendingInteraction, asyncDelivery?: {turnId: string; route?: ReplyRoute}) {
     const id = "question:" + b.revision + ":" + i.id;
     if (this.s.get("chat:out:" + id)) return;
+    if (b.threadId) void this.serviceReaction(b.topicId, b.threadId, "question").catch(() => {});
     let text = this.tr("❓ Вопрос\n");
     const keys: Key[][] = [];
     const asyncQuestions = asyncDelivery && codexAsyncQuestions(i);
@@ -2903,7 +2919,7 @@ export class ChatBridge {
           }
           if (event.type === "turn/started" && event.scope.kind === "turn") {
             this.s.put("reply:active-turn:" + b.threadId, event.scope.turnId);
-            b.activity = undefined; b.toolActivity = undefined;
+            b.activity = undefined; b.toolActivity = undefined; b.turnStartedAt = Date.now();
           }
           if (event.type === "turn/completed" && event.scope.kind === "turn" &&
               this.s.get(observingKey) === event.scope.turnId) this.s.del(observingKey);
@@ -2969,12 +2985,14 @@ export class ChatBridge {
             ) {
               const presentation =
                 "presentation" in item ? item.presentation : undefined;
-              b.toolActivity = publicActivity(item.type);
+              b.toolActivity = stepLabel(item as never);
             }
           }
           if (event.type === "turn/completed") {
             b.activity = undefined;
             b.toolActivity = undefined;
+            if (event.data.status === "failed" && b.threadId)
+              void this.serviceReaction(b.topicId, b.threadId, "failed").catch(() => {});
             if (event.data.status !== "completed") {
               const candidate = b.revision + ":" + event.scope.turnId;
               this.s.del("chat:candidate:" + candidate);
@@ -3061,15 +3079,18 @@ export class ChatBridge {
         const activeTurn = this.s.get<string>("reply:active-turn:" + b.threadId);
         const deliverActive = this.canDeliver(b, activeTurn);
         try { if (deliverActive) delegated = await this.delegatedProgress(b); } catch { /* parent remains observable */ }
+        // С46: the agent's own first line and the current step in plain words; the template only after a quiet pause.
+        const live = progressText({agentLine: b.activity ? firstLine(b.activity) : undefined, step: b.toolActivity,
+          startedAt: b.turnStartedAt ?? 0})?.replace(/^⏳ /, "");
         const progress = delegated.length
           ? delegated.join("\n\n")
-          : b.activity || b.toolActivity || this.tr("Работаю над задачей…");
+          : live && live !== "Работаю над задачей…" ? live : this.tr("Работаю над задачей…");
         const isWorking = deliverActive && (["active", "starting", "pending"].includes(t.status) || delegated.length > 0);
         // A late child notice may start an empty acknowledgement turn after
         // the result was already delivered. Show progress only if that turn
         // actually produces public activity or starts more work.
-        const hasProgress = !this.s.get("reply:notification-turn:" + b.threadId + ":" + activeTurn) ||
-          Boolean(b.activity || b.toolActivity || delegated.length);
+        const hasProgress = (!this.s.get("reply:notification-turn:" + b.threadId + ":" + activeTurn) ||
+          Boolean(b.activity || b.toolActivity || delegated.length)) && Boolean(live || delegated.length);
         const status = pending.some((i) => i.status === "pending")
           ? this.tr("нужен ответ")
           : (this.tr(states[t.status] ?? t.status) ?? t.status) +

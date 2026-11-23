@@ -30,7 +30,7 @@ test("worker delivers only its completed turn into the bound forum topic",async(
    }
  }}};
  const sent:any[]=[];
- const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{sent.push([id,p]);return {} as T},new AbortController().signal);
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{if(_m==="setMessageReaction")return {} as T;sent.push([id,p]);return {} as T},new AbortController().signal);
  await tick();
  assert.equal(rows.has("group:in:5:8"),false);
  assert.equal(rows.get("group:receipt:5:8").state,"done");
@@ -212,7 +212,7 @@ test("work queued by a participant under an old local policy is revoked before a
   }
 });
 
-test("an ordinary group turn that answers NO_REPLY stays silent",async()=>{
+test("an ordinary group turn that answers NO_REPLY stays silent in text, but the message keeps a visible reaction (С45)",async()=>{
  const rows=new Map<string,any>();
  const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
    list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
@@ -230,10 +230,12 @@ test("an ordinary group turn that answers NO_REPLY stays silent",async()=>{
    event("turn/completed",{status:"completed"});
  }}};
  const sent:any[]=[];
- const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{sent.push([id,p]);return {} as T},new AbortController().signal);
+ const reactions:any[]=[];
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{if(_m==="setMessageReaction"){reactions.push(p);return {} as T;}sent.push([id,p]);return {} as T},new AbortController().signal);
  await tick(); await tick();
  assert.equal(rows.get("group:receipt:5:8").state,"done");
  assert.equal(sent.filter(([,p])=>typeof p.text==="string").length,0);
+ assert.deepEqual(reactions.map(r=>[r.message_id,r.reaction[0]?.emoji]),[[10,"👀"]]);   // not a silence without a sign
 });
 
 test("group delivery replies with verified PDF and image bytes plus clean text exactly once", async () => {
@@ -260,7 +262,7 @@ test("group delivery replies with verified PDF and image bytes plus clean text e
     const sdk={threads:{get:async()=>({id:"t",projectId:"group-project",visibility:"visible",environmentId:"env"})},
       environments:{get:async()=>({hostId:"host",path:directory})}};
     const sent: {method:string;payload:Record<string,unknown>}[]=[];
-    const tick=()=>processGroupInputs(store,sdk as never,7,5,()=>async <T>(method:string,payload:Record<string,unknown>)=>{
+    const tick=()=>processGroupInputs(store,sdk as never,7,5,()=>async <T>(method:string,payload:Record<string,unknown>)=>{if(method==="setMessageReaction")return {} as T;
       sent.push({method,payload});
       return {message_id:sent.length,document:{file_id:"fixture"},photo:[{file_id:"image"}]} as T;
     },new AbortController().signal,undefined,"host");
@@ -315,7 +317,7 @@ test("addressed group messages preserve text, photo and opaque HTML with optiona
       }},
       environments:{get:async()=>({hostId:"host",path:workspace})}};
     const sent:{method:string;payload:any}[]=[];
-    const tick=()=>processGroupInputs(store,sdk as never,7,5,id=>async <T>(method:string,payload:Record<string,unknown>)=>{
+    const tick=()=>processGroupInputs(store,sdk as never,7,5,id=>async <T>(method:string,payload:Record<string,unknown>)=>{if(method==="setMessageReaction")return {} as T;
       assert.equal(id,chat.id);
       sent.push({method,payload});
       return {message_id:200+sent.length,document:{file_id:"document"},photo:[{file_id:"photo"}]} as T;
@@ -395,7 +397,7 @@ for (const kind of ["photo","document"] as const) test(`forum ${kind} album subm
         append("item/completed",{item:{type:"agentMessage",text:response}});
         append("turn/completed",{status:"completed"});
       }},environments:{get:async()=>({hostId:"test-host",path:root})}};
-    const tick=()=>processGroupInputs(store,sdk as never,owner,bot,id=>async <T>(method:string,body:Record<string,unknown>)=>{
+    const tick=()=>processGroupInputs(store,sdk as never,owner,bot,id=>async <T>(method:string,body:Record<string,unknown>)=>{if(method==="setMessageReaction")return {} as T;
       assert.equal(id,chat.id);
       sends.push({method,body});
       if (method==="sendMediaGroup") return (body.media as any[]).map((item,index)=>({
@@ -475,7 +477,7 @@ test("a group message that arrives while the thread works joins the running turn
      }
    }}};
  const sent:any[]=[];
- const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{sent.push(p.text);return {} as T},new AbortController().signal);
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{if(_m==="setMessageReaction")return {} as T;sent.push(p.text);return {} as T},new AbortController().signal);
  assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"долгая задача"}},7,5));
  await tick();
  status="active";

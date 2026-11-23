@@ -34,6 +34,12 @@ import {
 } from "./settings";
 import {channelPost,channelPostSchema,inspectChannelRights} from "./channel-post";
 import { bindGroupTopic, groupCliRestricted, groupTyping, processGroupInputs } from "./group-worker";
+import {decideChooser,parseReactionOptions,type ReactionChooser,type ReactionOption} from "./turn-feedback";
+/** С45: reaction choice from the settings, refreshed with them; the chat bridge and the group worker read it. */
+let currentReactions:{chooser?:ReactionChooser;options:ReactionOption[]}={options:parseReactionOptions(),chooser:decideChooser()};
+const reactionsFrom=(c:{reactionChoice?:boolean;reactionSet?:string;decideCommand?:string})=>
+  (currentReactions={options:parseReactionOptions(c.reactionSet),
+    ...(c.reactionChoice!==false ? {chooser:decideChooser(c.decideCommand || "vallis-decide")} : {})});
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
@@ -424,6 +430,15 @@ export default async function plugin(bb: BbPluginApi) {
     },
     voiceRouterPath: {
       type: "string", label: "Local voice router executable (empty: BB transcription)", default: "",
+    },
+    reactionChoice: {
+      type: "boolean", label: "Reactions: a quick model picks the reaction (vallis-decide); off — 👀 only", default: true,
+    },
+    reactionSet: {
+      type: "string", label: "Reactions to choose from: «👍=agreed; 😁=funny; …» (empty: the default set)", default: "",
+    },
+    decideCommand: {
+      type: "string", label: "Quick decision command", default: "vallis-decide",
     },
     telegramFileHostId: {
       type: "string", label: "BB machine holding received files", default: "",
@@ -2454,6 +2469,7 @@ export default async function plugin(bb: BbPluginApi) {
                 language: () => language,
                 bbMentions: () => bbMentionsOn(store, bbMentions),
                 wake: wakeChat,
+                reactions: () => currentReactions,
                 transcribe: async (v) => {
                   const {voiceRouterPath} = await settings.get();
                   return transcribeTelegramVoice(botToken, bb.sdk, v, bridgeSignal, apiRoot, localFiles,
@@ -2482,11 +2498,12 @@ export default async function plugin(bb: BbPluginApi) {
                 };
                 await deliverGroupResults(store,bb.sdk,o=>o.owner===ownerId() && o.bot===botId() && !stateTransferBusy,
                   groupTransport,signal,verifyOwnerForum);
+                reactionsFrom(cfg);
                 await processGroupInputs(store,bb.sdk,owner,bot,
                   groupTransport,signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined,cfg.language as "ru"|"en"),cfg.telegramFileHostId,
-                  (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum);
+                  (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum,()=>currentReactions);
                 await deliverScheduledResults(store,bb.sdk,groupTransport,signal,
                   ()=>ownerId()===owner && botId()===bot && !stateTransferBusy);
               } catch (error) { ingressError = safeError(error); }

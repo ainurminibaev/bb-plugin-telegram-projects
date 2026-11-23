@@ -44,6 +44,7 @@ function fixture(isolated=false, includeTopicContext=true) {
   return {store,post,policy,policyKey,sdk,turns,messages,botReply,
     tick:async(receive?:Parameters<typeof processGroupInputs>[8])=>processGroupInputs(store,sdk as any,owner,bot,
       ()=>async <T>(_method:string,body:Record<string,unknown>)=>{
+        if(_method==="setMessageReaction")return {} as T;
         messages.push(String(body.text));return {message_id:999} as T;
       },new AbortController().signal,undefined,undefined,receive)};
 }
