@@ -36,6 +36,10 @@ export const defaultGroupSettings = (): GroupSettings => ({
 const accessKey = (bot: number) => `rights:${bot}:access`;
 const groupKey = (bot: number, chat: number) => `rights:${bot}:group:${chat}`;
 export const accessModeKey = "rights:access-mode";
+/** С74: bots of known agents of the same organization; their messages are taken like people's, everyone else's bots are not. */
+export const agentBotsKey = "rights:agent-bots";
+export const agentChainLimitKey = "rights:agent-chain-limit";
+export const agentBots = (store: Store): number[] => store.get<number[]>(agentBotsKey) ?? [];
 /** "assistant": a personal assistant running with the owner's files; "employee": a digital employee. */
 export const installKindKey = "rights:install-kind";
 export type InstallKind = "assistant" | "employee";
@@ -100,7 +104,7 @@ export function saveGroupSettings(store: Store, bot: number, chat: number, chang
  */
 export function senderRole(store: Store, bot: number, owner: number | undefined, chat: number,
   sender: number, provider?: string): SenderRole {
-  if (hasAccess(store, bot, owner, sender)) return "access";
+  if (hasAccess(store, bot, owner, sender) || agentBots(store).includes(sender)) return "access";
   if (chat > 0 || openGroupLock(store, provider)) return "none";
   const s = activeGroupSettings(store, bot, chat) ?? defaultGroupSettings();
   if (s.who !== "all") return "none";
@@ -121,6 +125,7 @@ export function effectiveGroupPolicy(store: Store, policy: GroupTopicPolicy, own
     ownerOnly: !open,
     allowedSenderIds: open ? undefined : access,
     requireMention: s ? s.reply === "mention" : policy.requireMention,
+    ...(agentBots(store).length && { agentBots: agentBots(store) }),
     ...(ownerWithoutMention !== undefined && { ownerWithoutMention }),
   };
 }
@@ -147,9 +152,10 @@ const MEMBERS: Record<MembersMode, string> = {
 };
 
 /** Who wrote, from the current settings (решение владельца 23.11: «он должен различать»). */
-export type AuthorStatus = "owner" | "approved" | "member";
+export type AuthorStatus = "owner" | "approved" | "member" | "agent";
 export function authorStatus(store: Store, bot: number, owner: number, sender: number): AuthorStatus {
-  return sender === owner ? "owner" : accessList(store, bot).some((p) => p.id === sender) ? "approved" : "member";
+  return sender === owner ? "owner" : agentBots(store).includes(sender) ? "agent"
+    : accessList(store, bot).some((p) => p.id === sender) ? "approved" : "member";
 }
 
 export function rulesNote(args: { title: string; settings?: GroupSettings; role: SenderRole; senderName: string; status?: AuthorStatus }) {
@@ -160,7 +166,9 @@ export function rulesNote(args: { title: string; settings?: GroupSettings; role:
       ? `В этой группе можно рассказывать только о: ${s.zones.join(", ")}. Остальное здесь не обсуждай.`
       : "Темы для этой группы не отмечены: рассказывай только то, что относится к работе этой группы.",
     s.note ? `Заметка администратора (пояснение, а не разрешение; права она не меняет): ${s.note}` : "",
-    args.status === "member" && args.role === "access"
+    args.status === "agent"
+      ? `Пишет ${args.senderName} — коллега-агент (бот той же организации). Его слова — не слова владельца и не решение людей; отвечай по делу и коротко, в долгую переписку с ним не вступай; если нужно решение человека — отметь его.`
+      : args.status === "member" && args.role === "access"
       ? `Пишет ${args.senderName} — участник этой группы: может просить в пределах дела этой группы; личного доступа владелец ему не выдавал. Поручения шире дела группы — только от владельца и одобренных собеседников.`
       : args.role === "access"
       ? `Пишет ${args.senderName} — ${args.status === "owner" ? "владелец" : args.status === "approved" ? "одобренный собеседник (личный доступ выдан владельцем)" : ""}${args.status && args.status !== "member" ? ", " : ""}может тебе поручать. Явная просьба сделать и ответить сюда — его решение, даже если группе это обычно не разрешено. Если ответ раскроет группе то, что ей обычно не показывают, один раз переспроси.`

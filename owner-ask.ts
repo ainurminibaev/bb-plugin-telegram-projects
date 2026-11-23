@@ -29,7 +29,7 @@ export function messageLink(chat: number, topic: number, message: number) {
   return `https://t.me/c/${id.slice(4)}/${topic > 0 ? topic + "/" : ""}${message}`;
 }
 
-const STATUS = {owner: "владелец", approved: "одобренный собеседник", member: "участник группы"} as const;
+const STATUS = {owner: "владелец", approved: "одобренный собеседник", member: "участник группы", agent: "коллега-агент"} as const;
 
 /** The question text the owner gets: place, who and their status, the original request, then the question. */
 export function ownerQuestion(args: {store: Store; bot: number; owner: number; place: string; turn?: TurnMessage; body: string}) {

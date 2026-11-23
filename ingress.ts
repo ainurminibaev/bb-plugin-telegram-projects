@@ -25,6 +25,8 @@ export type GroupTopicPolicy = {
   ownerSharedProject?: true;
   ownerTopicManagerProjectId?: string;
   requireMention: boolean;
+  /** С74: bots of known agents of the organization, taken like people. */
+  agentBots?: number[];
   /** С55: the owner's message reaches the agent without a mention (default on); the agent decides whether it is meant for it. */
   ownerWithoutMention?: boolean;
   addressName?: string;
@@ -57,7 +59,8 @@ export function forwardOriginOf(o:any) {
 
 export function canInvokeGroup(policy: GroupTopicPolicy, owner: number, sender: number) {
   if (policy.ownerSharedProject) return policy.ownerId===owner && sender===owner && isSharedOwnerPolicy(policy);
-  return sender === owner || !policy.ownerOnly || policy.allowedSenderIds?.includes(sender) === true;
+  return sender === owner || !policy.ownerOnly || policy.allowedSenderIds?.includes(sender) === true ||
+    policy.agentBots?.includes(sender) === true;
 }
 
 type TopicLine = {id:number; sender:number; name:string; date:number; replyTo?:number; text:string};
@@ -184,7 +187,7 @@ export function routeUpdate(
     const topicId = messageTopic(m);
     if (!owner || m.chat.id !== group.chatId || topicId !== group.topicId ||
         !group.threadId || !Number.isSafeInteger(from?.id) || from.id <= 0 ||
-        from.is_bot || m.sender_chat || !canInvokeGroup(group, owner, from.id))
+        (from.is_bot && !group.agentBots?.includes(from.id)) || m.sender_chat || !canInvokeGroup(group, owner, from.id))
       return {kind: "ignore"};
     if (group.ownerSharedProject && ((m.is_topic_message===true)!==(topicId>0) || !originalPerson(m))) return {kind:"ignore"};
     const text = m.text ?? m.caption ?? "";
@@ -417,6 +420,9 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       return;
     }
     const route = routeUpdate(update, owner, undefined, policy);
+    // С74: a chain of agent bots' messages without a person in between is limited; any person's message resets it.
+    const chainKey=`group:agent-chain:${chatId}:${topicId}`;
+    if (!edit && message.from && !message.from.is_bot && !message.sender_chat) store.del(chainKey);
     if (guest && (!policy.requireMention || route.kind!=="group" ||
         !message.entities?.some((e:any)=>e.type==="mention" &&
           message.text.slice(e.offset,e.offset+e.length).toLowerCase()==="@"+policy.botUsername.toLowerCase()))) return;
@@ -520,7 +526,7 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
         message.reply_to_message.from?.id===botId ? file : undefined;
       const body = message.text ?? message.caption ?? (contextFile ? "[Вложение]" : undefined) ??
         (route.kind === "group" ? (route.voice ? "[Голосовое обращение]" : route.examples?.[0]?.name) : undefined);
-      if (!sender || sender.is_bot || message.sender_chat || !Number.isSafeInteger(sender.id) ||
+      if (!sender || (sender.is_bot && !policy.agentBots?.includes(sender.id)) || message.sender_chat || !Number.isSafeInteger(sender.id) ||
           sender.id <= 0 || typeof body !== "string" || !Number.isSafeInteger(message.date)) return;
       const key = `group:context:${chatId}:${topicId}`;
       const lines = store.get<TopicLine[]>(key) ?? [];
@@ -585,6 +591,17 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
           ". Сверь SHA-256 исходника перед правками и сохрани новую версию отдельным файлом.";
     }
     store.del(senderFiles);
+    if (route.kind==="group" && message.from?.is_bot && policy.agentBots?.includes(message.from.id)) {
+      const limit=store.get<number>("rights:agent-chain-limit") ?? 3;
+      const n=(store.get<number>(chainKey) ?? 0)+1;
+      store.put(chainKey,n);
+      if (n>limit) {
+        store.put("ingress:offset",Math.max(store.get<number>("ingress:offset")??0,update.update_id+1));
+        accepted=true;
+        return;
+      }
+      if (n===limit) route.text=`[Мост Telegram] Это ${n}-я реплика агентов подряд без человека. Ответь одной строкой, отметь человека, которому нужно решить, и дальше с ботом не переписывайся.\n`+route.text;
+    }
     const key = `group:in:${botId}:${route.updateId}`;
     // Telegram can publish the same source through ordinary and guest updates.
     if (!edit && (process.env.BB_TELEGRAM_GUEST_TOPICS??"").split(",").includes(chatId+":"+topicId)) {

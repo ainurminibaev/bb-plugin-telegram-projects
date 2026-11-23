@@ -21,7 +21,7 @@ import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumS
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
-import {DISCLOSURE,accessModeKey,authorStatus,activeGroupSettings,peopleNote,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
+import {DISCLOSURE,accessModeKey,agentBots,authorStatus,activeGroupSettings,peopleNote,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
 import {voiceHeader,acknowledge,react,SERVICE_REACTIONS,stepLabel,firstLine,progressText,DEFAULT_REACTION_OPTIONS,type ReactionChooser,type ReactionOption,type Stage} from "./turn-feedback";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
@@ -271,7 +271,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     const reactTg:Telegram=(method,body)=>transport(r.chatId)(method,body);
     // С45: every message that reached this agent gets a visible sign at once: 👀, then the chosen reaction.
     // A message of the owner without a mention may not be for the agent (С55): no sign until it answers.
-    if (r.updateId>0 && !job.acked && !r.ownerUnaddressed) {
+    // С74: no reaction is chosen for an agent bot's message.
+    if (r.updateId>0 && !job.acked && !r.ownerUnaddressed && !agentBots(store).includes(r.senderId)) {
       job.acked=true; job.startedAt??=Date.now(); store.put(key,job);
       const set=reactions?.();
       void acknowledge(reactTg,r.chatId,r.messageId,r.ownText ?? r.text,set?.chooser,set?.options ?? DEFAULT_REACTION_OPTIONS,

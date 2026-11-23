@@ -50,7 +50,7 @@ import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
 import { acceptGroupUpdate, contextMediaPrefix, offsetForServer, routeUpdate, skipExcludedForumUpdate, unboundAddressedGroupMessage, type GroupTopicPolicy } from "./ingress";
-import { accessList, accessModeKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, senderRole, setAccess } from "./rights";
+import { accessList, accessModeKey, agentBotsKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, senderRole, setAccess } from "./rights";
 import { handleConsentCallback, watchConsents } from "./consent";
 import { handleSetupUpdate, notifyGroupsAdded, welcomeScreen } from "./setup-screens";
 import { menuCommands } from "./commands";
@@ -344,6 +344,8 @@ export default async function plugin(bb: BbPluginApi) {
     isolatedPrivateProject:{type:"string",label:"Проект изолированного личного исполнителя",default:""},
     isolatedPrivateThread:{type:"string",label:"Тред изолированного личного исполнителя",default:""},
     employeePrivateRequests:{type:"boolean",label:"Запросы доступа в личке сотрудника",default:false},
+    agentBots:{type:"string",label:"Боты агентов организации (Telegram ID через запятую): их сообщения в группах принимаются",default:""},
+    agentChainLimit:{type:"number",label:"Сколько реплик агентов подряд без человека допустимо",default:3},
     isolatedFileHost:{type:"string",label:"Машина с рабочими файлами группового исполнителя",default:""},
     agencyEnabled: {type:"boolean",label:"Уведомления из Агентства",default:false},
     employeeRole: {
@@ -2801,6 +2803,8 @@ export default async function plugin(bb: BbPluginApi) {
         const cfg = await settings.get();
         store.put(accessModeKey, cfg.accessPermissionMode);
         store.put(installKindKey, cfg.installKind);
+        store.put(agentBotsKey, String(cfg.agentBots ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
+        store.put("rights:agent-chain-limit", Math.max(1, Math.min(20, Number(cfg.agentChainLimit) || 3)));
         consentTtlMs = Math.max(1, Number(cfg.consentMinutes) || 30) * 60_000;
         if (botId() && ownerId()) migrateLegacyRights(store, botId()!, profilePeople());
         // С62: people approved earlier (or whose conversation could not be made then) get their greeting, once.
