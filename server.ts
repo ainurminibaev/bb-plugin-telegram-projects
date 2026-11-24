@@ -1,6 +1,6 @@
 import {homedir} from "node:os";
 import {ensureConversationProject,moveConversation,ownFolderProject,restoreConversation} from "./conversation-folder";
-import {addressedToAgent,leadRefusal,leadsByDefaultKey,leadsChat,setChatMode,canAssignLead,chatAgentsCheckedKey,curatorsKey,noteAgentsLeaving,refreshChatAgents,modeLine,otherAgentsInChat,setTopicMode,topicMode,type TopicMode} from "./topic-mode";
+import {addressedToAgent,leadRefusal,leadsByDefault,leadsByDefaultKey,LEAD_NOTE,leadsChat,NO_LEADER_LINE,noLeaderToldKey,setChatMode,canAssignLead,chatAgentsCheckedKey,curatorsKey,noteAgentsLeaving,refreshChatAgents,modeLine,otherAgentsInChat,setTopicMode,topicMode,type TopicMode} from "./topic-mode";
 import {TOPIC_ACTIONS,topicRefusal,type TopicAction} from "./topic-command";
 import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
@@ -2546,8 +2546,7 @@ export default async function plugin(bb: BbPluginApi) {
           return {exitCode:0,stdout:JSON.stringify({mode:action,changed:true,announced:false,reason:String((error as Error).message)})};
         }
         return {exitCode:0,stdout:JSON.stringify({mode:action,changed:true,announced:true,
-          ...(action==="lead" && otherAgentsInChat(store,bot,place.chat,organization).length && {note:
-            "Прежний ведущий уступит, когда его мост увидит эту строку. Проверь: попроси владельца отметить прежнего ведущего с вопросом «кто ведёт эту тему?» — он должен ответить «не я»."})})};
+          ...(action==="lead" && {note:LEAD_NOTE})})};
       }
       if(argv[0]==="delete"){
         // С80: bb telegram-projects delete --message N — a message of this conversation's own chat.
@@ -3158,6 +3157,17 @@ export default async function plugin(bb: BbPluginApi) {
         store.put(agentBotsKey, String(cfg.agentBots ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
         store.put("rights:agent-chain-limit", Math.max(1, Math.min(50, Number(cfg.agentChainLimit) || 12)));
         store.put(leadsByDefaultKey, ["yes","no"].includes(String(cfg.leadsChatsByDefault)) ? String(cfg.leadsChatsByDefault) : "auto");
+        // Two agents without the passport's word: nobody answers the owner without a mention — told once in his chat.
+        {
+          const me=botId(), owner=ownerId();
+          if (me && owner && bridge && store.get(leadsByDefaultKey)==="auto" && !leadsByDefault(store,me) && !store.get(noLeaderToldKey)) {
+            try {
+              await sendFormattedText(telegram(botToken,lifetime.signal,15_000,()=>owner,apiRoot),{chatId:owner,topicId:0,markdown:NO_LEADER_LINE});
+              store.put(noLeaderToldKey,Date.now());
+            } catch { /* the next pass tries again */ }
+          }
+          if (store.get(leadsByDefaultKey)!=="auto" && store.get(noLeaderToldKey)) store.del(noLeaderToldKey);
+        }
         store.put(curatorsKey, String(cfg.curators ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
         consentTtlMs = Math.max(1, Number(cfg.consentMinutes) || 30) * 60_000;
         if (botId() && ownerId()) migrateLegacyRights(store, botId()!, profilePeople());
