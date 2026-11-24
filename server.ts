@@ -76,7 +76,7 @@ import {
   type Events,
 } from "./events";
 import { makeChatControlPublisher, writeJsonAtomic } from "./json-file";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomInt } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -1085,6 +1085,19 @@ export default async function plugin(bb: BbPluginApi) {
   async function pausedOf() {
     return (await bb.sdk.plugins.callRpc({pluginId:"personal-assistant",method:"pauseStatus",input:{},
       outputSchema:z.object({paused:z.boolean(),since:z.number().nullable()})}).catch(()=>null))?.paused===true;
+  }
+  /** Whether a file lies in the folder of the thread's environment or among files received from Telegram. */
+  async function insideConversationFolder(threadId:string,path:string) {
+    try {
+      const real=await realpath(path);
+      const roots:string[]=[];
+      const thread=await bb.sdk.threads.get({threadId}) as {environmentId?:string|null};
+      if (thread?.environmentId) { const env=await bb.sdk.environments.get({environmentId:thread.environmentId}) as {path?:string}; if (env?.path) roots.push(env.path); }
+      const cfg=await settings.get();
+      roots.push(...allInboxes(cfg.projectInboxRoots,cfg.telegramInboxRoot));
+      for (const root of roots) { const r=await realpath(root).catch(()=>""); if (r && (real===r || real.startsWith(r+"/"))) return true; }
+      return false;
+    } catch { return false; }
   }
   async function turnRulesOf(projectId:string) {
     return bb.sdk.plugins.callRpc({pluginId:"personal-assistant",method:"turnRules",input:{projectId},
@@ -2667,6 +2680,13 @@ export default async function plugin(bb: BbPluginApi) {
           }
           // The bridge's command gets no standard input: "-" cannot be read here.
           if (opt["text-file"]==="-") return {exitCode:2,stderr:"text_file_stdin_unsupported: pass the text with --text '…' (several lines are fine) or write it to a file and pass its path"};
+          // A group's or a person's conversation sends only files of its own folder (or received from Telegram):
+          // never the owner's or another conversation's files.
+          if (caller && caller.kind!=="owner") {
+            const outside=[opt["text-file"],...files,opt.file].filter((p):p is string=>!!p);
+            for (const path of outside) if (!await insideConversationFolder(ctx.threadId,path))
+              return {exitCode:1,stderr:"file_outside_this_conversation: отправлять можно только файлы из папки этого разговора — "+path};
+          }
           const text=opt["text-file"] ? await readFile(opt["text-file"],"utf8") : opt.text;
           let file:import("./outbound-message").OutboundFile|undefined;
           if (opt.file) {
