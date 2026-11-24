@@ -681,7 +681,8 @@ export default async function plugin(bb: BbPluginApi) {
         // The message is not in the conversation's memory (older than it, another bot's, archive off): say so plainly,
         // so the agent asks the person instead of guessing.
         if (!found) {
-          const quote=store.get<string>(`reply:quote:${chat}:${args.message.message}`);
+          const saved=store.get<string|{t:string}>(`reply:quote:${chat}:${args.message.message}`);
+          const quote=typeof saved==="string" ? saved : saved?.t;
           return JSON.stringify(quote ? {message:args.message.message,quote,
             note:"Текста в памяти переписки нет, цитата из Telegram (до 200 знаков)."} :
             {message:args.message.message,unavailable:true,
@@ -1171,6 +1172,9 @@ export default async function plugin(bb: BbPluginApi) {
         return true;
       });
       }
+      // Telegram's spare quotes (С81 fallback) are kept 30 days.
+      for (const {key,value} of store.list<{at?:number}|string>("reply:quote:"))
+        if (typeof value==="string" || (value.at ?? 0)<Date.now()-30*86400_000) store.del(key);
     } catch { console.warn("Telegram inbox maintenance deferred"); }
     finally {cleaning=false;}
   },3600_000);

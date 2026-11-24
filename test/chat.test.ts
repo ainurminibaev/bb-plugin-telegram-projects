@@ -3396,7 +3396,7 @@ test("#5: a free answer to a form question reaches the agent; an option named in
     const q = {
       id: "q", turnId: "question-turn", status: "pending",
       payload: {kind: "user_question", questions: [
-        {id: "q1", prompt: "Когда созвон?", allowFreeText: false, multiSelect: false, options: [{label: "До обеда", value: "am"}, {label: "После обеда", value: "pm"}]},
+        {id: "q1", prompt: "Когда созвон?", allowFreeText: true, multiSelect: false, options: [{label: "До обеда", value: "am"}, {label: "После обеда", value: "pm"}]},
         {id: "q2", prompt: "Кого позвать?", allowFreeText: false, multiSelect: false, options: [{label: "Анну", value: "anna"}]},
       ]},
     };
@@ -3410,6 +3410,7 @@ test("#5: a free answer to a form question reaches the agent; an option named in
     const resolved = f.calls.filter((x) => x[0] === "resolve");
     assert.equal(resolved.length, 1);
     assert.equal(resolved[0][1].resolution.answers.q1.freeText, "Давай завтра в три, Анну не зовём");
+    assert.deepEqual(resolved[0][1].resolution.answers.q2, {selected: []}, "a choice-only question does not get the words");
     assert.ok(!f.sent.some((m: any) => /выбери кнопку/.test(m.text ?? "")));
   } finally {
     f.cleanup();

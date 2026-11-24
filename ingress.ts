@@ -437,7 +437,7 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     // message is missing from the conversation's memory (search-history --message).
     if (Number.isSafeInteger(replyId)) {
       const quoted=String(message.reply_to_message?.text ?? message.reply_to_message?.caption ?? "").trim().slice(0,200);
-      if (quoted) store.put(`reply:quote:${chatId}:${replyId}`,quoted);
+      if (quoted) store.put(`reply:quote:${chatId}:${replyId}`,{t:quoted,at:Date.now()});
     }
     if (file && message.document?.mime_type==="application/pdf" && Number.isSafeInteger(replyId) &&
         replyId!==topicId && Number.isSafeInteger(message.from?.id) && !message.from.is_bot &&

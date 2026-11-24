@@ -133,6 +133,7 @@ export const english: Record<string, string> = {
   "⚠️ Запуск завершился ошибкой. Подробности в BB.":
     "⚠️ The run failed. See details in BB.",
   "⏹ Запуск остановлен.": "⏹ Run stopped.",
+  "Остановлено.": "Stopped.",
   "нужен ответ": "answer needed",
   "Чат BB": "BB chat",
   Управление: "Controls",

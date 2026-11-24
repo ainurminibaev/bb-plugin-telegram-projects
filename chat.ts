@@ -1739,7 +1739,7 @@ export class ChatBridge {
   private withReplyContext(input: ChatInput, text: string) {
     // С81: the owner's answer names the message it answers; the agent reads its text by number when needed.
     if (!input.replyTo || !input.replyExcerpt) return text;
-    this.s.put(`reply:quote:${input.chatId}:${input.replyTo}`, input.replyExcerpt.trim().slice(0, 200));
+    this.s.put(`reply:quote:${input.chatId}:${input.replyTo}`, {t: input.replyExcerpt.trim().slice(0, 200), at: Date.now()});
     return text + "\n\n[Ответ на сообщение Telegram № " + input.replyTo + "; текст: bb telegram-projects search-history --message " + input.replyTo + "]";
   }
   private async preparePart(input: ChatInput, b: Binding, text: string, batched: boolean, albumImages?:ImageAttachment[]): Promise<string | undefined> {
@@ -2679,7 +2679,9 @@ export class ChatBridge {
       const said = text.trim().toLowerCase();
       const answers = Object.fromEntries(i.payload.questions.map((qq: any) => {
         const option = (qq.options ?? []).find((o: any) => [o.label, o.value].some(v => String(v ?? "").trim().toLowerCase() === said));
-        return [qq.id, option ? {selected: [option.value]} : {selected: [], freeText: text}];
+        // Words go only to a question that takes free text; a choice-only question gets an option named in words or
+        // nothing (then the form refuses and the person is asked for a button).
+        return [qq.id, option ? {selected: [option.value]} : qq.allowFreeText ? {selected: [], freeText: text} : {selected: []}];
       }));
       try {
         await this.d.sdk.threads.interactions.resolve({threadId: q.threadId, interactionId: q.interactionId,
@@ -3228,13 +3230,13 @@ export class ChatBridge {
             this.s.del(timeKey);
             this.recoverNativeBusy(b,event.scope.turnId,event.seq);
           }
-          // A stopped run: a reaction on the request instead of a service line (С79); without the request, a short line.
+          // A stopped run: a short line in a person's words (С79), under the request when it is known.
           if (event.type === "turn/completed" && event.data.status === "interrupted" && event.scope.kind === "turn") {
             const asked = this.routes.destination(b.threadId, event.scope.turnId);
             const messageId = asked?.kind === "telegram" ? (asked as {messageId?: number}).messageId : undefined;
-            if (messageId) await this.d.tg("setMessageReaction", {chat_id: this.d.owner(), message_id: messageId,
-              reaction: [{type: "emoji", emoji: "👌"}]}).catch(() => undefined);
-            else this.enqueue(b.topicId, this.tr("⏹ Запуск остановлен."), undefined, "end:" + b.revision + ":" + event.seq);
+            // 👌 means «agreed» here; a stop is said in two plain words under the request instead.
+            this.enqueue(b.topicId, this.tr("Остановлено."), undefined, "end:" + b.revision + ":" + event.seq,
+              false, undefined, messageId ? asked : undefined);
           }
           b.cursor = event.seq;
         }
