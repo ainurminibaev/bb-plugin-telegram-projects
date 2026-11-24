@@ -413,7 +413,8 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       if (who?.is_bot) noteAgentInChat(store, botId, chatId, who.id, agentBots(store),
         who.username ? "@"+who.username : who.first_name);
     // One leader per topic and chat: a colleague announcing it leads here makes this agent step back.
-    if (message.from?.is_bot) noteColleagueLead(store, botId, chatId, topicId, message.from.id, String(message.text ?? ""), agentBots(store));
+    if (message.from?.is_bot) noteColleagueLead(store, botId, chatId, topicId, message.from.id, String(message.text ?? ""), agentBots(store),
+      Number.isSafeInteger(message.date) ? message.date : undefined);
   }
   store.atomic(() => {
     if (isTopicPaused(store,botId,chatId,topicId)) return;

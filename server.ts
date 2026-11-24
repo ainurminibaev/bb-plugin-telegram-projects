@@ -1,6 +1,6 @@
 import {homedir} from "node:os";
 import {ensureConversationProject,moveConversation,ownFolderProject,restoreConversation} from "./conversation-folder";
-import {addressedToAgent,leadsChat,setChatMode,canAssignLead,chatAgentsCheckedKey,curatorsKey,noteAgentsLeaving,refreshChatAgents,modeLine,otherAgentsInChat,setTopicMode,topicMode,type TopicMode} from "./topic-mode";
+import {addressedToAgent,announceKey,migrateTopicModes,DEFAULT_LEAD_LINE,leadsChat,setChatMode,canAssignLead,chatAgentsCheckedKey,curatorsKey,noteAgentsLeaving,refreshChatAgents,modeLine,otherAgentsInChat,setTopicMode,topicMode,type TopicMode} from "./topic-mode";
 import {TOPIC_ACTIONS,topicRefusal,type TopicAction} from "./topic-command";
 import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
@@ -858,6 +858,13 @@ export default async function plugin(bb: BbPluginApi) {
     if (m.new_chat_members || m.left_chat_member) store.del(chatAgentsCheckedKey(me,chat));
     await refreshChatAgents(store,me,chat,agentBots(store),
       user=>telegram(botToken,signal,5_000,()=>chat,apiRoot)("getChatMember",{chat_id:chat,user_id:user}) as never).catch(()=>false);
+    // A default claim of the chat is announced once (people see who leads; a colleague that also claimed steps back).
+    if (store.get(announceKey(me,chat))!==undefined && leadsChat(store,me,chat)) {
+      try {
+        await sendFormattedText(telegram(botToken,signal,15_000,()=>chat,apiRoot),{chatId:chat,topicId:0,markdown:DEFAULT_LEAD_LINE});
+        store.del(announceKey(me,chat));
+      } catch { /* the next pass tries again */ }
+    }
   }
   async function inheritForumTopic(owner:number,bot:number,signal:AbortSignal,update:unknown) {
     const topic=describeForumTopic(store,bot,owner,update);
@@ -3155,6 +3162,7 @@ export default async function plugin(bb: BbPluginApi) {
         store.put(agentBotsKey, String(cfg.agentBots ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
         store.put("rights:agent-chain-limit", Math.max(1, Math.min(50, Number(cfg.agentChainLimit) || 12)));
         store.put(curatorsKey, String(cfg.curators ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
+        if (botId()) migrateTopicModes(store, botId()!);   // once: chats this agent talked in before this version
         consentTtlMs = Math.max(1, Number(cfg.consentMinutes) || 30) * 60_000;
         if (botId() && ownerId()) migrateLegacyRights(store, botId()!, profilePeople());
         // С62: people approved earlier (or whose conversation could not be made then) get their greeting, once.

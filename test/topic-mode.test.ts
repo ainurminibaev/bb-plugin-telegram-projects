@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { routeUpdate, acceptGroupUpdate } from "../ingress";
 import { bindGroupTopic } from "../group-worker";
 import { agentBotsKey } from "../rights";
-import { addressedToAgent, leadsChat, setChatMode, noteColleagueLead, noteOwnActivity, canAssignLead, chatAgentsCheckedKey, chatAgentsKey, noteAgentsLeaving, refreshChatAgents, curatorsKey, modeLine, noteAgentInChat, otherAgentsInChat,
+import { addressedToAgent, leadsChat, setChatMode, noteColleagueLead, noteOwnActivity, migrateTopicModes, DEFAULT_LEAD_LINE, announceKey, canAssignLead, chatAgentsCheckedKey, chatAgentsKey, noteAgentsLeaving, refreshChatAgents, curatorsKey, modeLine, noteAgentInChat, otherAgentsInChat,
   setTopicMode, topicMode, topicNote, withTopicMode } from "../topic-mode";
 
 // Agents in shared chats (agents-in-chats.md, «Проверка»): three agents of one organization in a forum.
@@ -153,7 +153,9 @@ test("a colleague that never wrote counts: Telegram is asked once a day per chat
 test("one agent, then a second: the first leads the chat — old and new topics; the second gets no turn", async () => {
   const first = memoryStore();
   for (const topic of [0, TOPIC]) bindGroupTopic(first as any, { ...base(A), topicId: topic, threadId: "thr_" + topic, revision: "r" } as any, "proj");
+  migrateTopicModes(first as any, A);   // the update starts: the first agent already talked here
   const second = memoryStore();
+  migrateTopicModes(second as any, B);  // a fresh installation: nothing yet
   bindGroupTopic(second as any, { ...base(B), revision: "r" } as any, "proj_b");   // the newcomer's first mention made it
   noteOwnActivity(second as any, B, CHAT, [A, B]);   // …a moment before it learned about the colleague
   noteAgentInChat(first as any, A, CHAT, B, [A, B], "@beta_bot");
@@ -176,6 +178,7 @@ test("one agent, then a second: the first leads the chat — old and new topics;
 test("the owner names another leader: the colleague announces it and the former one steps back", () => {
   const a = memoryStore(), b = memoryStore();
   bindGroupTopic(a as any, { ...base(A), revision: "r" } as any, "proj");
+  migrateTopicModes(a as any, A);
   noteAgentInChat(a as any, A, CHAT, B, [A, B]);
   assert.equal(leadsChat(a as any, A, CHAT), true);
   assert.equal(setChatMode(b as any, B, CHAT, "lead", OWNER), true);
@@ -212,4 +215,42 @@ test("a newcomer that learned about the colleague first is late and never claims
   noteOwnActivity(a as any, A, CHAT, [A, B], Date.now() - 2 * 3600_000);
   noteAgentInChat(a as any, A, CHAT, B, [A, B]);
   assert.equal(leadsChat(a as any, A, CHAT), true);
+});
+
+test("an update with the colleague already known: the agent that talked here leads; the claim is announced once", () => {
+  const a = memoryStore();
+  bindGroupTopic(a as any, { ...base(A), revision: "r" } as any, "proj");
+  a.put(chatAgentsKey(A, CHAT), [B]);           // the previous version already knew the colleague
+  migrateTopicModes(a as any, A);
+  assert.equal(leadsChat(a as any, A, CHAT), false, "nothing yet: the next message decides");
+  noteOwnActivity(a as any, A, CHAT, [A, B]);
+  assert.equal(leadsChat(a as any, A, CHAT), true);
+  assert.notEqual(a.get(announceKey(A, CHAT)), undefined, "people are told once who leads");
+  // a colleague that comes in the first hour after the update does not take it away either
+  const c = memoryStore();
+  bindGroupTopic(c as any, { ...base(A), revision: "r" } as any, "proj");
+  migrateTopicModes(c as any, A);
+  noteAgentInChat(c as any, A, CHAT, B, [A, B]);
+  assert.equal(leadsChat(c as any, A, CHAT), true);
+});
+
+test("both claimed by default (both were here before the update): the earlier claim leads, a tie — the smaller id", () => {
+  const a = memoryStore(), b = memoryStore();
+  for (const [st, bot] of [[a, A], [b, B]] as const) {
+    bindGroupTopic(st as any, { ...base(bot), revision: "r" } as any, "proj" + bot);
+    st.put(chatAgentsKey(bot, CHAT), [A, B]);
+    migrateTopicModes(st as any, bot);
+  }
+  noteOwnActivity(a as any, A, CHAT, [A, B], 1_800_000_000_000);
+  noteOwnActivity(b as any, B, CHAT, [A, B], 1_800_000_005_000);
+  assert.equal(leadsChat(a as any, A, CHAT) && leadsChat(b as any, B, CHAT), true, "both claimed");
+  // each reads the other's announcement
+  noteColleagueLead(a as any, A, CHAT, 0, B, DEFAULT_LEAD_LINE, [A, B], 1_800_000_005);
+  noteColleagueLead(b as any, B, CHAT, 0, A, DEFAULT_LEAD_LINE, [A, B], 1_800_000_000);
+  assert.equal(leadsChat(a as any, A, CHAT), true, "the earlier claim keeps the chat");
+  assert.equal(leadsChat(b as any, B, CHAT), false, "the later one steps back");
+  // a chat named by the owner is not given away by a default claim
+  setChatMode(b as any, B, CHAT, "lead", OWNER);
+  noteColleagueLead(b as any, B, CHAT, 0, A, DEFAULT_LEAD_LINE, [A, B], 1_700_000_000);
+  assert.equal(leadsChat(b as any, B, CHAT), true);
 });

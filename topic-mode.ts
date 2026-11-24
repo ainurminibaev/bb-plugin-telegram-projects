@@ -17,30 +17,55 @@ export const chatModeKey=(bot:number,chat:number)=>`chat:mode:${bot}:${chat}`;
  * first colleague shows up, an agent that already talks in this chat (has a bound topic) records itself as its leader.
  * For people nothing changes; the newcomer waits for mentions. The owner may name another leader (topic-mode --chat).
  */
-export const soloSinceKey=(bot:number,chat:number)=>`chat:solo-since:${bot}:${chat}`;
-export const lateKey=(bot:number,chat:number)=>`chat:late:${bot}:${chat}`;
+export const agentsSinceKey=(bot:number,chat:number)=>`chat:agents-since:${bot}:${chat}`;
+export const boundSinceKey=(bot:number,chat:number)=>`chat:bound-since:${bot}:${chat}`;
+export const announceKey=(bot:number,chat:number)=>`chat:announce:${bot}:${chat}`;
 const SETTLED=3600_000;
+const MIGRATED="topic-mode:migrated";
+
+const talksHere=(store:Store,bot:number,chat:number)=>store.list<GroupTopicPolicy>(`group:policy:${chat}:`)
+  .some(({value:p})=>p?.botId===bot && !p.privateChat && !p.ownerSharedProject && !p.isolated);
 
 /**
- * Who was in the chat first: every accepted message remembers whether this agent worked here alone (and since when)
- * or came when a colleague was already known. A newcomer never claims the chat, even if Telegram's answer about
- * members comes a little after its first message.
+ * Once, when this version first starts (server start, before any message — a fresh installation has no bindings yet): a chat this agent already talks in counts as bound "before" (0), and a colleague
+ * the previous version already knew counts as known "before" (0). Without it an update would make every agent a
+ * newcomer in its own chats.
  */
-export function noteOwnActivity(store:Store,bot:number,chat:number,organization:number[],now=Date.now()) {
-  if (chat>=0) return;
-  if (otherAgentsInChat(store,bot,chat,organization).length) {
-    if (!store.get(soloSinceKey(bot,chat)) && !store.get(lateKey(bot,chat))) store.put(lateKey(bot,chat),true);
-  } else if (!store.get(soloSinceKey(bot,chat))) store.put(soloSinceKey(bot,chat),now);
+export function migrateTopicModes(store:Store,bot:number) {
+  if (store.get(MIGRATED)) return;
+  for (const {value:p} of store.list<GroupTopicPolicy>("group:policy:"))
+    if (p?.botId===bot && p.chatId<0 && !p.privateChat && store.get(boundSinceKey(bot,p.chatId))===undefined)
+      store.put(boundSinceKey(bot,p.chatId),0);
+  for (const {key} of store.list<number[]>(`chat:agents:${bot}:`)) {
+    const chat=Number(key.split(":").at(-1));
+    if (Number.isSafeInteger(chat) && store.get(agentsSinceKey(bot,chat))===undefined) store.put(agentsSinceKey(bot,chat),0);
+  }
+  store.put(MIGRATED,Date.now());
 }
 
-export function claimChatLead(store:Store,bot:number,chat:number,now=Date.now()) {
-  if (store.get(chatModeKey(bot,chat)) || store.get(lateKey(bot,chat))) return false;
-  const since=store.get<number>(soloSinceKey(bot,chat));
-  if (since!==undefined && now-since<SETTLED) return false;   // it came minutes ago: not the chat's first agent
-  const talks=store.list<GroupTopicPolicy>(`group:policy:${chat}:`).some(({value:p})=>p?.botId===bot && !p.privateChat &&
-    !p.ownerSharedProject && !p.isolated);
-  if (!talks) return false;
-  store.put(chatModeKey(bot,chat),{mode:"lead",by:0,at:Date.now()} satisfies TopicModeRecord);
+/** Every accepted message: since when this agent talks in the chat, and — while no one leads it — a new try to lead it. */
+export function noteOwnActivity(store:Store,bot:number,chat:number,organization:number[],now=Date.now()) {
+  if (chat>=0) return;
+  if (store.get(boundSinceKey(bot,chat))===undefined && talksHere(store,bot,chat)) store.put(boundSinceKey(bot,chat),now);
+  claimChatLead(store,bot,chat,organization,now);
+}
+
+/**
+ * The chat's default leader is the agent that talked here before the colleague came: its binding (0 — before this
+ * version) is older than the colleague's arrival by a settled margin. A newcomer, even one bound a moment before it
+ * learned about the colleague, never claims. A claim is announced in the chat, so a colleague that also claimed it
+ * (both were here before this version) can step back by the earlier claim.
+ */
+export function claimChatLead(store:Store,bot:number,chat:number,organization:number[]=[],now=Date.now()) {
+  if (store.get(chatModeKey(bot,chat))) return false;
+  const known=store.get<number[]>(chatAgentsKey(bot,chat)) ?? [];
+  if (!known.some(id=>id!==bot && (!organization.length || organization.includes(id)))) return false;
+  const since=store.get<number>(agentsSinceKey(bot,chat));
+  const bound=store.get<number>(boundSinceKey(bot,chat));
+  if (since===undefined || bound===undefined || !talksHere(store,bot,chat)) return false;
+  if (bound!==0 && !(since>0 && bound+SETTLED<=since)) return false;
+  store.put(chatModeKey(bot,chat),{mode:"lead",by:0,at:now} satisfies TopicModeRecord);
+  store.put(announceKey(bot,chat),now);
   return true;
 }
 
@@ -58,8 +83,9 @@ export function noteAgentInChat(store:Store,bot:number,chat:number,sender:number
   if (clean && store.get<string>(agentNameKey(sender))!==clean) store.put(agentNameKey(sender),clean);
   const known=store.get<number[]>(chatAgentsKey(bot,chat)) ?? [];
   if (known.includes(sender)) return false;
-  if (!known.some(id=>id!==bot && organization.includes(id))) claimChatLead(store,bot,chat);
+  if (store.get(agentsSinceKey(bot,chat))===undefined) store.put(agentsSinceKey(bot,chat),Date.now());
   store.put(chatAgentsKey(bot,chat),[...known,sender].sort((a,b)=>a-b));
+  claimChatLead(store,bot,chat,organization);
   return true;
 }
 
@@ -85,6 +111,7 @@ export function canAssignLead(store:Store,owner:number,sender:number) {
 }
 
 /** The line people see when the mode changes; colleagues' bridges read it too (noteColleagueLead). */
+export const DEFAULT_LEAD_LINE="Веду этот чат как агент, который был здесь первым: владельцу отвечаю без отметки. Позвать коллегу — отметьте его.";
 export function modeLine(mode:TopicMode,chat=false) {
   if (chat) return mode==="lead" ? "Веду этот чат: отвечаю здесь без отметки. Позвать коллегу — отметьте его."
     : "Больше не веду этот чат, зовите отметкой.";
@@ -96,9 +123,20 @@ export function modeLine(mode:TopicMode,chat=false) {
  * One leader per topic and per chat: when a colleague of the organization announces that it now leads this topic
  * or chat (its bridge posts modeLine), this agent steps back to mentions there.
  */
-export function noteColleagueLead(store:Store,bot:number,chat:number,topic:number,sender:number,text:string,organization:number[]) {
+export function noteColleagueLead(store:Store,bot:number,chat:number,topic:number,sender:number,text:string,organization:number[],
+  sentAt?:number) {
   if (sender===bot || !organization.includes(sender) || typeof text!=="string") return false;
   const body=text.trim();
+  if (body.startsWith(DEFAULT_LEAD_LINE.slice(0,40))) {
+    // Both claimed by default (both were here before this version): the earlier claim leads; a tie — the smaller id.
+    const mine=store.get<TopicModeRecord>(chatModeKey(bot,chat));
+    if (mine?.mode!=="lead") return true;
+    if (mine.by!==0) return true;   // named by the owner or a curator: it stays
+    const theirs=(sentAt ?? Date.now()/1000)*1000;
+    if (theirs<mine.at-1000 || (Math.abs(theirs-mine.at)<=1000 && sender<bot))
+      store.put(chatModeKey(bot,chat),{mode:"mention",by:sender,at:Date.now()} satisfies TopicModeRecord);
+    return true;
+  }
   if (body.startsWith(modeLine("lead",true))) {
     if (store.get<TopicModeRecord>(chatModeKey(bot,chat))?.mode!=="mention")
       store.put(chatModeKey(bot,chat),{mode:"mention",by:sender,at:Date.now()} satisfies TopicModeRecord);
@@ -194,14 +232,16 @@ export async function refreshChatAgents(store:Store,bot:number,chat:number,organ
   if (checked!==undefined && now-checked<DAY) return false;
   store.put(chatAgentsCheckedKey(bot,chat),now);
   const known=new Set(store.get<number[]>(chatAgentsKey(bot,chat)) ?? []);
-  const alone=![...known].some(id=>id!==bot && organization.includes(id));
   for (const id of others) {
     const member=await ask(id).catch(()=>undefined);
     if (!member?.status) continue;
     if (PRESENT.has(member.status) || (member.status==="restricted" && member.is_member===true)) known.add(id);
     else known.delete(id);
   }
-  if (alone && [...known].some(id=>id!==bot && organization.includes(id))) claimChatLead(store,bot,chat);
   store.put(chatAgentsKey(bot,chat),[...known].sort((a,b)=>a-b));
+  if ([...known].some(id=>id!==bot && organization.includes(id))) {
+    if (store.get(agentsSinceKey(bot,chat))===undefined) store.put(agentsSinceKey(bot,chat),now);
+    claimChatLead(store,bot,chat,organization,now);
+  }
   return true;
 }
