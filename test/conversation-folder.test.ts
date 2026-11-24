@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {mkdtemp, readFile, stat, writeFile, realpath} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {conversationFolderName,ensureConversationFolder,ensureConversationProject,conversationProjectKey,moveConversation,restoreConversation,movedKey} from "../conversation-folder";
+import {guardReachesFolders,conversationFolderName,ensureConversationFolder,ensureConversationProject,conversationProjectKey,moveConversation,restoreConversation,movedKey} from "../conversation-folder";
 import {bindGroupTopic} from "../group-worker";
 import {groupThreadMatches} from "../group-binding";
 
@@ -127,10 +127,32 @@ test("С76: an existing group moves to its own folder with every topic, and can 
   assert.deepEqual(notices,["thr_general>thr_new1 s:auto_1","thr_topic5>thr_new2"],"the previous threads are told whom to hand work to");
   assert.equal(store.get<any>("group:policy:-100:7").threadId,"thr_busy","a running topic stays for later");
   assert.match((await moveConversation(d,-100)).skipped.join(),/already in its own folder/);
+  // a schedule that cannot follow keeps the topic where it is
+  bindGroupTopic(store as any,{...base,chatId:-100,topicId:9,threadId:"thr_sched",inOwnerProject:true,revision:"r"},"proj_owner");
+  const returned:string[]=[];
+  const strict={...d,moveSchedules:async(from:string,to:string)=>{ if (from==="thr_sched") return {moved:["auto_a"],left:["auto_b"]}; returned.push(from+">"+to); return {moved:[],left:[]}; }};
+  const res=await moveConversation(strict,-100);
+  assert.match(res.skipped.join(),/topic 9: schedules auto_b could not be moved — the topic stays/);
+  assert.equal(store.get<any>("group:policy:-100:9").threadId,"thr_sched");
+  assert.equal(returned.length,1,"the schedule that moved goes back");
   const back=restoreConversation({store:store as any,bind:d.bind,notice:d.notice},-100);
   assert.deepEqual(back.restored.map(r=>r.threadId).sort(),["thr_general","thr_topic5"]);
   const p0=store.get<any>("group:policy:-100:0");
   assert.equal(p0.threadId,"thr_general"); assert.equal(p0.projectId,"proj_owner"); assert.equal(p0.ownFolder,undefined);
   assert.equal(store.get(movedKey(-100,0)),undefined);
   assert.ok(notices.includes("thr_new1>thr_general"));
+});
+
+test("С76: own folders only where the guest guard reaches them for the account", async()=>{
+  const home=await mkdtemp(join(tmpdir(),"c76-home-"));
+  assert.equal(await guardReachesFolders(home),false);
+  const {mkdir}=await import("node:fs/promises");
+  await mkdir(join(home,".codex"),{recursive:true}); await mkdir(join(home,".claude"),{recursive:true});
+  const hook=JSON.stringify({hooks:{PreToolUse:[{matcher:"*",hooks:[{type:"command",command:"python3 /w/.bb/hooks/guest-thread-guard.py"}]}]}});
+  await writeFile(join(home,".codex","hooks.json"),hook);
+  assert.equal(await guardReachesFolders(home),false,"Claude too");
+  await writeFile(join(home,".claude","settings.json"),hook);
+  assert.equal(await guardReachesFolders(home),true);
+  const codex=await mkdtemp(join(tmpdir(),"c76-codex-"));
+  assert.equal(await guardReachesFolders(home,codex),false,"CODEX_HOME is where Codex reads hooks");
 });

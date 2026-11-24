@@ -1,4 +1,5 @@
-import {ensureConversationFolder,ensureConversationProject,moveConversation,restoreConversation} from "./conversation-folder";
+import {homedir} from "node:os";
+import {ensureConversationFolder,ensureConversationProject,guardReachesFolders,moveConversation,restoreConversation} from "./conversation-folder";
 import {TOPIC_ACTIONS,topicRefusal,type TopicAction} from "./topic-command";
 import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
@@ -217,8 +218,7 @@ export const rpcContract = defineRpcContract({
     output:z.object({kind:z.enum(["owner","group","person"]),chatId:z.number(),topicId:z.number()}).nullable(),
   },
   moveConversationToFolder:{
-    input:z.object({confirm:z.literal(true),chatId:z.number().int().safe(),dryRun:z.boolean().default(false),
-      force:z.boolean().default(false)}).strict(),
+    input:z.object({confirm:z.literal(true),chatId:z.number().int().safe(),dryRun:z.boolean().default(false)}).strict(),
     output:z.object({path:z.string().optional(),projectId:z.string().optional(),
       moved:z.array(z.object({topicId:z.number(),from:z.string(),to:z.string().optional(),
         schedules:z.object({moved:z.array(z.string()),left:z.array(z.string())}).optional()})),skipped:z.array(z.string())}),
@@ -468,6 +468,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     conversationFoldersRoot: {
       type: "string", label: "Own folder for each group and person's chat (С76; empty: they share the owner's folder)", default: "",
+    },
+    conversationMoveEnabled: {
+      type: "boolean", label: "Move existing groups into their own folders on command (С76; off on working installations until the owner's word)", default: false,
     },
     conversationRulesFile: {
       type: "string", label: "Rules of the agent's role for conversation folders (an absolute path)", default: "",
@@ -1117,10 +1120,16 @@ export default async function plugin(bb: BbPluginApi) {
       `Этот тред теперь ведёт разговор ${place}. Прежний тред — ${from}: в нём история и, возможно, незаконченные дела и результаты этого чата; при необходимости сверься с ним (bb thread show ${from}).`)}).catch(()=>undefined);
   }
   const movedTitle=(chat:number)=>store.get<{title?:string}>(`visibility:${botId()}:group:${chat}`)?.title;
+  /** The owner's private chat binding (topic 0): its project is the owner's folder; another binding only as a fallback. */
+  const ownerBinding=()=>{
+    const own=store.get<{projectId?:string;threadId?:string}>("chat:binding:0");
+    if (own?.threadId && own.projectId) return own as {projectId:string;threadId:string};
+    return store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId);
+  };
   async function bindConversation(owner:number,bot:number,c:{chatId:number;topicId:number;title:string;
     privateChat?:boolean;allowedSenderIds?:number[];acceptAfterSecond?:number},signal:AbortSignal) {
     if (store.get(`group:policy:${c.chatId}:${c.topicId}`)) return true;
-    const dm=store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId);
+    const dm=ownerBinding();
     const botUsername=store.get<string>("bot:username");
     if (!dm?.threadId || !botUsername) return false;
     const reserve="employee:conversation:thread:"+bot+":"+c.chatId+":"+c.topicId;
@@ -1165,6 +1174,8 @@ export default async function plugin(bb: BbPluginApi) {
     const cfg=await settings.get();
     const root=String(cfg.conversationFoldersRoot ?? "").trim();
     if (!root) return undefined;
+    // No conversation works in its own folder before the guest guard reaches it (setup.py puts it for the account).
+    if (!await guardReachesFolders(homedir(),process.env.CODEX_HOME)) throw Error("conversation_guard_missing: run setup.py of the platform");
     const owner=await bb.sdk.projects.get({projectId:ownerProjectId});
     const hostId=owner?.sources?.[0]?.hostId;
     if (!hostId) throw Error("conversation_host_unknown");
@@ -2060,10 +2071,12 @@ export default async function plugin(bb: BbPluginApi) {
       if (found.kind==="person") return {kind:"person" as const,chatId:found.subject as number,topicId:0};
       return owner ? {kind:"owner" as const,chatId:owner,topicId:0} : null;
     },
-    moveConversationToFolder: async ({chatId,dryRun,force})=>{
+    moveConversationToFolder: async ({chatId,dryRun})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
+      if (!dryRun && (await settings.get()).conversationMoveEnabled!==true)
+        throw Error("conversation_move_off: moving existing groups is switched off on this installation (conversationMoveEnabled)");
       const owner=ownerId(), bot=botId();
-      const dm=store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId);
+      const dm=ownerBinding();
       if (!owner || !bot || !dm) throw Error("bridge_not_ready");
       return moveConversation({store,owner,bot,ownerProjectId:dm.projectId,
         busy:(topic)=>["working","uncertain"].includes(String(store.get(topicStateKey(bot,chatId,topic)))),
@@ -2090,7 +2103,7 @@ export default async function plugin(bb: BbPluginApi) {
           }
           return out;
         },
-      },chatId,dryRun,force);
+      },chatId,dryRun);
     },
     restoreConversationFolder: async ({chatId})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");

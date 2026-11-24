@@ -31,6 +31,17 @@ export function conversationRules(kind:ConversationKind,title:string,rulesFile:s
 const exists=(path:string)=>access(path).then(()=>true,()=>false);
 
 /**
+ * С76: a conversation folder is used only when the guest thread guard reaches it — registered for the account
+ * (Codex $CODEX_HOME/hooks.json and Claude ~/.claude/settings.json), as setup.py does for own folders. A hook of a new
+ * folder would wait for Codex's approval, so the account-level one is required instead.
+ */
+export async function guardReachesFolders(home:string,codexHome?:string) {
+  const {readFile}=await import("node:fs/promises");
+  const has=async(path:string)=>(await readFile(path,"utf8").catch(()=>"")).includes("guest-thread-guard.py");
+  return await has(join(codexHome || join(home,".codex"),"hooks.json")) && await has(join(home,".claude","settings.json"));
+}
+
+/**
  * What a conversation folder takes from the owner's folder by a link, so the agent there keeps the organization's
  * connections and skills (MCP settings hold no values; skills are the organization's): never local/, outputs/ or notes.
  */
@@ -103,7 +114,7 @@ type MoveDeps={
 export const movedKey=(chat:number,topic:number)=>`c76:moved:${chat}:${topic}`;
 
 /** С76: every binding of one chat that still lives in the owner's folder moves to the chat's own folder. */
-export async function moveConversation(d:MoveDeps,chatId:number,dryRun=false,force=false) {
+export async function moveConversation(d:MoveDeps,chatId:number,dryRun=false) {
   const skipped:string[]=[];
   const candidates=d.store.list<Policy>(`group:policy:${chatId}:`).map(row=>row.value)
     .filter(p=>p.botId===d.bot && p.ownerId===d.owner).filter(p=>{
@@ -116,7 +127,7 @@ export async function moveConversation(d:MoveDeps,chatId:number,dryRun=false,for
   const todo:Policy[]=[];
   for (const p of candidates) {
     const open=await d.openChildren(p.threadId).catch(()=>0);
-    if (open && !force) skipped.push(`topic ${p.topicId}: ${open} subthread(s) still open — finish them first or move with force`);
+    if (open) skipped.push(`topic ${p.topicId}: ${open} subthread(s) still open — the move waits until they are done`);
     else todo.push(p);
   }
   if (!todo.length || dryRun) return {moved:todo.map(p=>({topicId:p.topicId,from:p.threadId})),skipped};
@@ -130,9 +141,15 @@ export async function moveConversation(d:MoveDeps,chatId:number,dryRun=false,for
         text:"This thread now leads the Telegram conversation «"+d.title+"» in its own folder. Wait for a request. Reply with NO_REPLY, without using tools."}],
       environment:{type:"project-default"},...(prior?.providerId && {providerId:prior.providerId})});
     if (!thread.id || thread.projectId!==projectId) throw Error("conversation_thread_unconfirmed");
+    // Every enabled schedule of the previous thread moves first; if one cannot, the topic is not moved at all.
+    const schedules=await d.moveSchedules(p.threadId,thread.id).catch(()=>({moved:[] as string[],left:["?"]}));
+    if (schedules.left.length) {
+      if (schedules.moved.length) await d.moveSchedules(thread.id,p.threadId).catch(()=>undefined);
+      skipped.push(`topic ${p.topicId}: schedules ${schedules.left.join(", ")} could not be moved — the topic stays`);
+      continue;
+    }
     d.store.put(movedKey(chatId,p.topicId),{policy:p,at:Date.now()});
     d.bind({...p,threadId:thread.id,ownFolder:true,revision:crypto.randomUUID()},projectId);
-    const schedules=await d.moveSchedules(p.threadId,thread.id).catch(()=>({moved:[],left:[]}));
     d.notice(p.threadId,thread.id,p.topicId,schedules);
     moved.push({topicId:p.topicId,from:p.threadId,to:thread.id,schedules});
   }
