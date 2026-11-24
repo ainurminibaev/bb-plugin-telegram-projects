@@ -627,7 +627,7 @@ test("0.9.70: the final answer is hidden only by an exact repeat sent in this ve
    event("client/turn/requested",{requestId:"g",originPluginId:"telegram-projects",input:q.input});
    event("turn/input/accepted",{clientRequestId:"g"});
    store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),sent:[{t:sameWords(sent),at:Date.now()+at}]});
-   event("item/completed",{item:{type:"agentMessage",text:sent.startsWith("Готово,") ? "Готово." : "Отчёт готов, файл выше."}});
+   event("item/completed",{item:{type:"agentMessage",text:sent.startsWith("Готово,") ? "Готово." : "[telegram-answer:47c106ec]\nОтчёт готов, файл выше.\n[/telegram-answer]"}});
    event("turn/completed",{status:"completed"});
  }}};
  const out:any[]=[];

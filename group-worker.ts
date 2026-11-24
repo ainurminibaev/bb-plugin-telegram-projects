@@ -519,7 +519,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
             if (e.type==="turn/completed") {
               const wrote=store.get<{chat:number;topic:number;at:number;sent?:{t:string;at:number}[]}>(sentInTurnKey(r.threadId));
               const here=!!wrote && wrote.chat===r.chatId && wrote.topic===(r.topicId ?? 0);
-              const final=job.turnId===turn ? sameWords(stripTelegramMarkers(job.answer ?? "")) : "";
+              const final=job.turnId===turn ? sameWords(stripTelegramMarkers(job.answer ?? "").replace(/\[\/?telegram-answer(?::[a-f0-9-]+)?\]/g,"")) : "";
               // The final answer repeats what the agent already sent here in this turn: no second copy. An interim
               // message («взял, будет готово через 10 минут») never hides the real result («Готово.»): a part only
               // counts as a repeat for a long answer, and only texts sent during this task count.
