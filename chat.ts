@@ -3227,16 +3227,14 @@ export class ChatBridge {
             this.s.del(timeKey);
             this.recoverNativeBusy(b,event.scope.turnId,event.seq);
           }
-          if (
-            event.type === "turn/completed" &&
-            event.data.status === "interrupted"
-          )
-            this.enqueue(
-              b.topicId,
-              this.tr("⏹ Запуск остановлен."),
-              undefined,
-              "end:" + b.revision + ":" + event.seq,
-            );
+          // A stopped run: a reaction on the request instead of a service line (С79); without the request, a short line.
+          if (event.type === "turn/completed" && event.data.status === "interrupted" && event.scope.kind === "turn") {
+            const asked = this.routes.destination(b.threadId, event.scope.turnId);
+            const messageId = asked?.kind === "telegram" ? (asked as {messageId?: number}).messageId : undefined;
+            if (messageId) await this.d.tg("setMessageReaction", {chat_id: this.d.owner(), message_id: messageId,
+              reaction: [{type: "emoji", emoji: "👌"}]}).catch(() => undefined);
+            else this.enqueue(b.topicId, this.tr("⏹ Запуск остановлен."), undefined, "end:" + b.revision + ":" + event.seq);
+          }
           b.cursor = event.seq;
         }
         // Give already visible native notifications the first claim. On stock BB
