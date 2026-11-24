@@ -1,3 +1,11 @@
+# 0.9.65
+
+- A group's conversation can delete a message in its own chat (С80): `bb telegram-projects delete --message N` — the bot's own message always (within Telegram's term), anyone else's only on the owner's word; never in another conversation's chat. No right or past the term — the reason and how to ask the owner. Each deletion is logged.
+- When Telegram refuses a topic action for want of an admin right (С77), the agent is told which right, in which group, where to switch it on, and how to ask the owner with buttons.
+- No service lines about queues and hand-overs in a person's chat (С79): a queued message gets only the «seen» reaction; a subthread result BB gave up handing over is handed over again, and the person hears only when it surely will not come, in plain words.
+- A group's conversation may send the owner a short report without a question: text only, marked with the group and topic, at most once in three minutes.
+- A thread whose group conversation was moved to another thread is told so in words on send, `--targets` and `search-history`, with the thread to pass the work to; rebinding tells both threads about each other.
+
 # 0.9.64
 
 - A message the owner sends right after another, while the first one's turn is still starting, joins that task too instead of becoming a second request with its own answer (П5). Tests; not yet checked live.
