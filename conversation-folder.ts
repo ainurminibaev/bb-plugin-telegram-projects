@@ -111,7 +111,7 @@ type MoveDeps={
   spawn:(a:{projectId:string;title:string;visibility:"visible";permissionMode:"accept-edits";input:any[];
     environment:{type:"project-default"};providerId?:string})=>Promise<{id?:string;projectId?:string|null}>;
   bind:(policy:Policy,projectId:string)=>void;
-  notice:(from:string,to:string,topicId:number,schedules:{moved:string[];left:string[]})=>void;
+  notice:(from:string,to:string,topicId:number,schedules:{moved:string[];left:string[]},label?:string)=>void;
   /** Subthreads of a thread that are not archived yet: open work that still reports to the previous thread. */
   openChildren:(threadId:string)=>Promise<number>;
   /** The schedules aimed at a thread, moved to another one; ids that could not be moved stay in left. */
@@ -156,7 +156,7 @@ export async function moveConversation(d:MoveDeps,chatId:number,dryRun=false) {
     }
     d.store.put(movedKey(chatId,p.topicId),{policy:p,at:Date.now()});
     d.bind({...p,threadId:thread.id,ownFolder:true,revision:crypto.randomUUID()},projectId);
-    d.notice(p.threadId,thread.id,p.topicId,schedules);
+    d.notice(p.threadId,thread.id,p.topicId,schedules,prior?.title || d.title);
     moved.push({topicId:p.topicId,from:p.threadId,to:thread.id,schedules});
   }
   return {path:await d.projectPath(projectId),projectId,moved,skipped};

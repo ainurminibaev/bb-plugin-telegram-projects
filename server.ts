@@ -1108,8 +1108,9 @@ export default async function plugin(bb: BbPluginApi) {
     return true;
   }
   async function handOverNotices(from:string,to:string,chatId:number,topicId:number,
-    schedules?:{moved:string[];left:string[]}) {
-    const place="«"+(movedTitle(chatId) ?? "группа")+"»"+(topicId ? ", тема "+topicId : "");
+    schedules?:{moved:string[];left:string[]},label?:string) {
+    // The thread's own title already names the place («<тема> — группа «…»»); otherwise the group's remembered title.
+    const place=label ? "«"+label+"»" : "«"+(movedTitle(chatId) ?? "группа")+"»"+(topicId ? ", тема "+topicId : "");
     const service=(text:string)=>[{type:"text" as const,mentions:[],text:"[Мост Telegram] "+text+" Отвечать на это не нужно."}];
     await bb.sdk.threads.send({threadId:from,mode:"queue-if-active",input:service(
       `Разговор ${place} теперь ведёт тред ${to}. Отсюда отправка в этот чат и список адресатов недоступны. `+
@@ -2077,7 +2078,7 @@ export default async function plugin(bb: BbPluginApi) {
         thread:(threadId)=>bb.sdk.threads.get({threadId}).catch(()=>undefined),
         spawn:(a)=>bb.sdk.threads.spawn(a as any),
         bind:(policy,projectId)=>bindGroupTopic(store,policy,projectId),
-        notice:(from,to,topic,schedules)=>void handOverNotices(from,to,chatId,topic,schedules).catch(()=>{}),
+        notice:(from,to,topic,schedules,label)=>void handOverNotices(from,to,chatId,topic,schedules,label).catch(()=>{}),
         openChildren:async(threadId)=>{
           const rows=await (bb.sdk.threads as any).list({parentThreadId:threadId}) as {archivedAt?:unknown;deletedAt?:unknown}[];
           return (Array.isArray(rows) ? rows : []).filter(t=>!t.archivedAt && !t.deletedAt).length;

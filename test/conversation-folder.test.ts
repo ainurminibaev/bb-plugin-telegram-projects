@@ -102,10 +102,11 @@ test("С76: an existing group moves to its own folder with every topic, and can 
     thread:async(id:string)=>({title:"Тема "+id,providerId:"codex"}),
     spawn:async(a:any)=>{spawned.push(a);return {id:"thr_new"+spawned.length,projectId:a.projectId};},
     bind:(policy:any,projectId:string)=>bindGroupTopic(store as any,policy,projectId),
-    notice:(from:string,to:string,_t:number,sch:any)=>{notices.push(from+">"+to+(sch?.moved?.length ? " s:"+sch.moved.join(",") : ""));},
+    notice:(from:string,to:string,_t:number,sch:any,label?:string)=>{notices.push(from+">"+to+(sch?.moved?.length ? " s:"+sch.moved.join(",") : ""));labels.push(label);},
     openChildren:async(id:string)=>id==="thr_topic5" ? openKids : 0,
     moveSchedules:async(from:string)=>from==="thr_general" ? {moved:["auto_1"],left:[]} : {moved:[],left:[]}};
   let openKids=1;
+  const labels:(string|undefined)[]=[];
   const dry=await moveConversation(d,-100,true);
   assert.deepEqual(dry.moved.map(m=>m.topicId),[0],"a topic with open subthreads waits");
   assert.match(dry.skipped.join(),/topic 5: 1 subthread\(s\) still open/);
@@ -126,6 +127,7 @@ test("С76: an existing group moves to its own folder with every topic, and can 
   }
   assert.deepEqual(notices,["thr_general>thr_new1 s:auto_1","thr_topic5>thr_new2"],"the previous threads are told whom to hand work to");
   assert.equal(store.get<any>("group:policy:-100:7").threadId,"thr_busy","a running topic stays for later");
+  assert.equal(labels[0],"Тема thr_general","the notice names the place by the thread's own title");
   assert.match((await moveConversation(d,-100)).skipped.join(),/already in its own folder/);
   // a schedule that cannot follow keeps the topic where it is
   bindGroupTopic(store as any,{...base,chatId:-100,topicId:9,threadId:"thr_sched",inOwnerProject:true,revision:"r"},"proj_owner");
