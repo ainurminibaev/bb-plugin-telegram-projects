@@ -1,8 +1,8 @@
 // С76: every group and every person's private chat of an agent lives in its own folder and BB project, apart from
 // the owner's chat. The owner's folder (its local/, outputs/, notes) is then outside the conversation's working
 // directory: the agent of a group works and sends files only from its own folder, and gets its own rules.
-import {mkdir, writeFile, access, chmod, realpath} from "node:fs/promises";
-import {join, isAbsolute, resolve} from "node:path";
+import {mkdir, writeFile, access, chmod, realpath, symlink, lstat} from "node:fs/promises";
+import {join, isAbsolute, resolve, dirname} from "node:path";
 import type {Store} from "./model";
 
 export type ConversationKind="group"|"person";
@@ -30,8 +30,15 @@ export function conversationRules(kind:ConversationKind,title:string,rulesFile:s
 
 const exists=(path:string)=>access(path).then(()=>true,()=>false);
 
+/**
+ * What a conversation folder takes from the owner's folder by a link, so the agent there keeps the organization's
+ * connections and skills (MCP settings hold no values; skills are the organization's): never local/, outputs/ or notes.
+ */
+export const SHARED_LINKS=[".mcp.json",".codex/config.toml",".claude/skills",".agents/skills"];
+
 /** Creates (or keeps) the folder with outputs/ and local/, and writes its rules once; returns its real path. */
-export async function ensureConversationFolder(root:string,kind:ConversationKind,chatId:number,title:string,rulesFile="") {
+export async function ensureConversationFolder(root:string,kind:ConversationKind,chatId:number,title:string,rulesFile="",
+  linkFrom="") {
   if (!root || !isAbsolute(root)) throw Error("conversation_root_invalid");
   const path=join(resolve(root),conversationFolderName(kind,chatId));
   for (const dir of [root,path,join(path,"outputs"),join(path,"local")]) {
@@ -43,9 +50,16 @@ export async function ensureConversationFolder(root:string,kind:ConversationKind
     if (error?.code!=="EEXIST") throw error;
   });
   const claude=join(path,"CLAUDE.md");
-  if (!await exists(claude)) await writeFile(claude,"@AGENTS.md\n",{mode:0o600,flag:"wx"}).catch(error=>{
+  // Claude Code reads the role itself through an import; Codex is told to read it in AGENTS.md.
+  if (!await exists(claude)) await writeFile(claude,"@AGENTS.md\n"+(rulesFile ? "@"+rulesFile+"\n" : ""),{mode:0o600,flag:"wx"}).catch(error=>{
     if (error?.code!=="EEXIST") throw error;
   });
+  if (linkFrom && isAbsolute(linkFrom)) for (const rel of SHARED_LINKS) {
+    const source=join(linkFrom,rel), target=join(path,rel);
+    if (!await exists(source) || await lstat(target).then(()=>true,()=>false)) continue;
+    await mkdir(dirname(target),{recursive:true,mode:0o700});
+    await symlink(source,target).catch(error=>{ if (error?.code!=="EEXIST") throw error; });
+  }
   return realpath(path);
 }
 
@@ -80,24 +94,35 @@ type MoveDeps={
   spawn:(a:{projectId:string;title:string;visibility:"visible";permissionMode:"accept-edits";input:any[];
     environment:{type:"project-default"};providerId?:string})=>Promise<{id?:string;projectId?:string|null}>;
   bind:(policy:Policy,projectId:string)=>void;
-  notice:(from:string,to:string,topicId:number)=>void;
+  notice:(from:string,to:string,topicId:number,schedules:{moved:string[];left:string[]})=>void;
+  /** Subthreads of a thread that are not archived yet: open work that still reports to the previous thread. */
+  openChildren:(threadId:string)=>Promise<number>;
+  /** The schedules aimed at a thread, moved to another one; ids that could not be moved stay in left. */
+  moveSchedules:(from:string,to:string)=>Promise<{moved:string[];left:string[]}>;
 };
 export const movedKey=(chat:number,topic:number)=>`c76:moved:${chat}:${topic}`;
 
 /** С76: every binding of one chat that still lives in the owner's folder moves to the chat's own folder. */
-export async function moveConversation(d:MoveDeps,chatId:number,dryRun=false) {
+export async function moveConversation(d:MoveDeps,chatId:number,dryRun=false,force=false) {
   const skipped:string[]=[];
-  const todo=d.store.list<Policy>(`group:policy:${chatId}:`).map(row=>row.value)
+  const candidates=d.store.list<Policy>(`group:policy:${chatId}:`).map(row=>row.value)
     .filter(p=>p.botId===d.bot && p.ownerId===d.owner).filter(p=>{
       if (p.ownFolder) { skipped.push(`topic ${p.topicId}: already in its own folder`); return false; }
       if (p.projectId!==d.ownerProjectId) { skipped.push(`topic ${p.topicId}: not in the owner's folder`); return false; }
       if (d.busy(p.topicId)) { skipped.push(`topic ${p.topicId}: a turn is running, try later`); return false; }
       return true;
     });
+  // Open work in subthreads reports to the previous thread: such a topic waits until it is done (or force).
+  const todo:Policy[]=[];
+  for (const p of candidates) {
+    const open=await d.openChildren(p.threadId).catch(()=>0);
+    if (open && !force) skipped.push(`topic ${p.topicId}: ${open} subthread(s) still open — finish them first or move with force`);
+    else todo.push(p);
+  }
   if (!todo.length || dryRun) return {moved:todo.map(p=>({topicId:p.topicId,from:p.threadId})),skipped};
   const projectId=await d.ensureProject(d.title);
   if (!projectId) throw Error("conversation_folders_root_not_set");
-  const moved:{topicId:number;from:string;to:string}[]=[];
+  const moved:{topicId:number;from:string;to:string;schedules:{moved:string[];left:string[]}}[]=[];
   for (const p of todo) {
     const prior=await d.thread(p.threadId);
     const thread=await d.spawn({projectId,title:prior?.title || d.title,visibility:"visible",permissionMode:"accept-edits",
@@ -107,22 +132,23 @@ export async function moveConversation(d:MoveDeps,chatId:number,dryRun=false) {
     if (!thread.id || thread.projectId!==projectId) throw Error("conversation_thread_unconfirmed");
     d.store.put(movedKey(chatId,p.topicId),{policy:p,at:Date.now()});
     d.bind({...p,threadId:thread.id,ownFolder:true,revision:crypto.randomUUID()},projectId);
-    d.notice(p.threadId,thread.id,p.topicId);
-    moved.push({topicId:p.topicId,from:p.threadId,to:thread.id});
+    const schedules=await d.moveSchedules(p.threadId,thread.id).catch(()=>({moved:[],left:[]}));
+    d.notice(p.threadId,thread.id,p.topicId,schedules);
+    moved.push({topicId:p.topicId,from:p.threadId,to:thread.id,schedules});
   }
   return {path:await d.projectPath(projectId),projectId,moved,skipped};
 }
 
 /** The way back: the saved bindings return to their previous threads in the owner's folder. */
 export function restoreConversation(d:{store:Store;bind:(policy:Policy,projectId:string)=>void;
-  notice:(from:string,to:string,topicId:number)=>void},chatId:number) {
+  notice:(from:string,to:string,topicId:number,schedules:{moved:string[];left:string[]})=>void},chatId:number) {
   const restored:{topicId:number;threadId:string}[]=[];
   for (const {key,value} of d.store.list<{policy:Policy}>(`c76:moved:${chatId}:`)) {
     const old=value?.policy;
     if (!old?.threadId || !old.projectId) continue;
     const current=d.store.get<Policy>(`group:policy:${chatId}:${old.topicId}`);
     d.bind({...old,revision:crypto.randomUUID()},old.projectId);
-    if (current?.threadId && current.threadId!==old.threadId) d.notice(current.threadId,old.threadId,old.topicId);
+    if (current?.threadId && current.threadId!==old.threadId) d.notice(current.threadId,old.threadId,old.topicId,{moved:[],left:[]});
     d.store.del(key);
     restored.push({topicId:old.topicId,threadId:old.threadId});
   }

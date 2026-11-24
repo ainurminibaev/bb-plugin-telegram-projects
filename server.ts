@@ -217,9 +217,11 @@ export const rpcContract = defineRpcContract({
     output:z.object({kind:z.enum(["owner","group","person"]),chatId:z.number(),topicId:z.number()}).nullable(),
   },
   moveConversationToFolder:{
-    input:z.object({confirm:z.literal(true),chatId:z.number().int().safe(),dryRun:z.boolean().default(false)}).strict(),
+    input:z.object({confirm:z.literal(true),chatId:z.number().int().safe(),dryRun:z.boolean().default(false),
+      force:z.boolean().default(false)}).strict(),
     output:z.object({path:z.string().optional(),projectId:z.string().optional(),
-      moved:z.array(z.object({topicId:z.number(),from:z.string(),to:z.string().optional()})),skipped:z.array(z.string())}),
+      moved:z.array(z.object({topicId:z.number(),from:z.string(),to:z.string().optional(),
+        schedules:z.object({moved:z.array(z.string()),left:z.array(z.string())}).optional()})),skipped:z.array(z.string())}),
   },
   restoreConversationFolder:{
     input:z.object({confirm:z.literal(true),chatId:z.number().int().safe()}).strict(),
@@ -1102,12 +1104,15 @@ export default async function plugin(bb: BbPluginApi) {
     ].join("\n")}]});
     return true;
   }
-  async function handOverNotices(from:string,to:string,chatId:number,topicId:number) {
+  async function handOverNotices(from:string,to:string,chatId:number,topicId:number,
+    schedules?:{moved:string[];left:string[]}) {
     const place="«"+(movedTitle(chatId) ?? "группа")+"»"+(topicId ? ", тема "+topicId : "");
     const service=(text:string)=>[{type:"text" as const,mentions:[],text:"[Мост Telegram] "+text+" Отвечать на это не нужно."}];
     await bb.sdk.threads.send({threadId:from,mode:"queue-if-active",input:service(
       `Разговор ${place} теперь ведёт тред ${to}. Отсюда отправка в этот чат и список адресатов недоступны. `+
-      `Незаконченное по этому чату передай туда: bb thread tell ${to} '…' (что сделать и где лежит результат).`)}).catch(()=>undefined);
+      `Незаконченное по этому чату передай туда: bb thread tell ${to} '…' (что сделать и где лежит результат).`+
+      (schedules?.moved.length ? ` Расписания этого треда перенесены туда: ${schedules.moved.join(", ")}.` : "")+
+      (schedules?.left.length ? ` Расписания ${schedules.left.join(", ")} перенести не удалось — перенеси сам: bb automation update <id> --target-thread ${to}.` : ""))}).catch(()=>undefined);
     await bb.sdk.threads.send({threadId:to,mode:"queue-if-active",input:service(
       `Этот тред теперь ведёт разговор ${place}. Прежний тред — ${from}: в нём история и, возможно, незаконченные дела и результаты этого чата; при необходимости сверься с ним (bb thread show ${from}).`)}).catch(()=>undefined);
   }
@@ -1164,7 +1169,8 @@ export default async function plugin(bb: BbPluginApi) {
     const hostId=owner?.sources?.[0]?.hostId;
     if (!hostId) throw Error("conversation_host_unknown");
     const kind=c.privateChat ? "person" as const : "group" as const;
-    const path=await ensureConversationFolder(root,kind,c.chatId,c.title,String(cfg.conversationRulesFile ?? "").trim());
+    const path=await ensureConversationFolder(root,kind,c.chatId,c.title,String(cfg.conversationRulesFile ?? "").trim(),
+      owner?.sources?.[0]?.path ?? "");
     return ensureConversationProject(store,bb.sdk.projects as any,hostId,path,(kind==="group" ? "Группа: " : "Личка: ")+c.title);
   }
   // Retention of the conversation archive (В2): texts forever, files for archiveFileDays (0 — forever).
@@ -2054,7 +2060,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (found.kind==="person") return {kind:"person" as const,chatId:found.subject as number,topicId:0};
       return owner ? {kind:"owner" as const,chatId:owner,topicId:0} : null;
     },
-    moveConversationToFolder: async ({chatId,dryRun})=>{
+    moveConversationToFolder: async ({chatId,dryRun,force})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
       const owner=ownerId(), bot=botId();
       const dm=store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId);
@@ -2067,8 +2073,24 @@ export default async function plugin(bb: BbPluginApi) {
         thread:(threadId)=>bb.sdk.threads.get({threadId}).catch(()=>undefined),
         spawn:(a)=>bb.sdk.threads.spawn(a as any),
         bind:(policy,projectId)=>bindGroupTopic(store,policy,projectId),
-        notice:(from,to,topic)=>void handOverNotices(from,to,chatId,topic).catch(()=>{}),
-      },chatId,dryRun);
+        notice:(from,to,topic,schedules)=>void handOverNotices(from,to,chatId,topic,schedules).catch(()=>{}),
+        openChildren:async(threadId)=>{
+          const rows=await (bb.sdk.threads as any).list({parentThreadId:threadId}) as {archivedAt?:unknown;deletedAt?:unknown}[];
+          return (Array.isArray(rows) ? rows : []).filter(t=>!t.archivedAt && !t.deletedAt).length;
+        },
+        moveSchedules:async(from,to)=>{
+          const list=await bb.sdk.plugins.callRpc({pluginId:"automations",method:"automations_list",input:{targetThreadId:from},
+            outputSchema:z.array(z.object({id:z.string(),projectId:z.string().optional(),enabled:z.boolean().optional()}).passthrough())});
+          const out={moved:[] as string[],left:[] as string[]};
+          for (const a of list) {
+            const ok=await bb.sdk.plugins.callRpc({pluginId:"automations",method:"automations_update",
+              input:{projectId:a.projectId ?? dm.projectId,automationId:a.id,agent:{target:{type:"target-thread",threadId:to}}},
+              outputSchema:z.unknown()}).then(()=>true,()=>false);
+            (ok ? out.moved : out.left).push(a.id);
+          }
+          return out;
+        },
+      },chatId,dryRun,force);
     },
     restoreConversationFolder: async ({chatId})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");

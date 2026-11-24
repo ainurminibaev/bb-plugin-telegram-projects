@@ -27,11 +27,25 @@ test("С76: one folder per group (its topics share it) and one per person, close
   assert.match(rules,/Разговор группы «Команда продаж»/);
   assert.match(rules,/Правила роли — \/srv\/org\/employees\/alpha\/AGENTS\.md/);
   assert.match(rules,/личк. владельца .*недоступны/);
-  assert.equal(await readFile(join(path,"CLAUDE.md"),"utf8"),"@AGENTS.md\n");
+  assert.equal(await readFile(join(path,"CLAUDE.md"),"utf8"),"@AGENTS.md\n@/srv/org/employees/alpha/AGENTS.md\n");
   // the folder's own rules, once written, are kept: the agent and the owner may change them
   await writeFile(join(path,"AGENTS.md"),"свои правила\n");
   assert.equal(await ensureConversationFolder(root,"group",-1001234,"Другое имя"),path);
   assert.equal(await readFile(join(path,"AGENTS.md"),"utf8"),"свои правила\n");
+  // the organization's connections and skills come by links from the owner's folder; its notes and results do not
+  const owner=await mkdtemp(join(tmpdir(),"c76-owner-"));
+  for (const d of [".claude/skills/report",".agents/skills/report",".codex","local","outputs"]) await (await import("node:fs/promises")).mkdir(join(owner,d),{recursive:true});
+  await writeFile(join(owner,".mcp.json"),"{}");
+  await writeFile(join(owner,".codex","config.toml"),"");
+  const linked=await ensureConversationFolder(root,"group",-555,"Связи","/r/AGENTS.md",owner);
+  const {lstat,readlink}=await import("node:fs/promises");
+  for (const rel of [".mcp.json",".codex/config.toml",".claude/skills",".agents/skills"]) {
+    assert.ok((await lstat(join(linked,rel))).isSymbolicLink(),rel);
+    assert.equal(await readlink(join(linked,rel)),join(owner,rel));
+  }
+  await assert.rejects(stat(join(linked,"local","notes-of-owner")),"local/ is the folder's own");
+  assert.equal((await lstat(join(linked,"local"))).isSymbolicLink(),false);
+  assert.equal(await readFile(join(linked,"CLAUDE.md"),"utf8"),"@AGENTS.md\n@/r/AGENTS.md\n");
   const person=await ensureConversationFolder(root,"person",42,"Алиса");
   assert.notEqual(person,path);
   assert.match(await readFile(join(person,"AGENTS.md"),"utf8"),/лички человека/);
@@ -88,14 +102,21 @@ test("С76: an existing group moves to its own folder with every topic, and can 
     thread:async(id:string)=>({title:"Тема "+id,providerId:"codex"}),
     spawn:async(a:any)=>{spawned.push(a);return {id:"thr_new"+spawned.length,projectId:a.projectId};},
     bind:(policy:any,projectId:string)=>bindGroupTopic(store as any,policy,projectId),
-    notice:(from:string,to:string)=>{notices.push(from+">"+to);}};
+    notice:(from:string,to:string,_t:number,sch:any)=>{notices.push(from+">"+to+(sch?.moved?.length ? " s:"+sch.moved.join(",") : ""));},
+    openChildren:async(id:string)=>id==="thr_topic5" ? openKids : 0,
+    moveSchedules:async(from:string)=>from==="thr_general" ? {moved:["auto_1"],left:[]} : {moved:[],left:[]}};
+  let openKids=1;
   const dry=await moveConversation(d,-100,true);
-  assert.deepEqual(dry.moved.map(m=>m.topicId),[0,5]);
+  assert.deepEqual(dry.moved.map(m=>m.topicId),[0],"a topic with open subthreads waits");
+  assert.match(dry.skipped.join(),/topic 5: 1 subthread\(s\) still open/);
+  openKids=0;
+  assert.deepEqual((await moveConversation(d,-100,true)).moved.map(m=>m.topicId),[0,5]);
   assert.equal(spawned.length,0,"a dry run changes nothing");
   assert.match(dry.skipped.join(),/topic 7: a turn is running/);
   const done=await moveConversation(d,-100);
   assert.equal(done.projectId,"proj_group");
-  assert.deepEqual(done.moved,[{topicId:0,from:"thr_general",to:"thr_new1"},{topicId:5,from:"thr_topic5",to:"thr_new2"}]);
+  assert.deepEqual(done.moved.map(m=>[m.topicId,m.from,m.to]),[[0,"thr_general","thr_new1"],[5,"thr_topic5","thr_new2"]]);
+  assert.deepEqual(done.moved[0].schedules,{moved:["auto_1"],left:[]},"the schedules follow the conversation");
   assert.equal(spawned[0].environment.type,"project-default");
   assert.equal(spawned[0].providerId,"codex");
   for (const topic of [0,5]) {
@@ -103,7 +124,7 @@ test("С76: an existing group moves to its own folder with every topic, and can 
     assert.equal(p.projectId,"proj_group"); assert.equal(p.ownFolder,true);
     assert.equal(groupThreadMatches(store as any,p,"proj_group"),true);
   }
-  assert.deepEqual(notices,["thr_general>thr_new1","thr_topic5>thr_new2"],"the previous threads are told whom to hand work to");
+  assert.deepEqual(notices,["thr_general>thr_new1 s:auto_1","thr_topic5>thr_new2"],"the previous threads are told whom to hand work to");
   assert.equal(store.get<any>("group:policy:-100:7").threadId,"thr_busy","a running topic stays for later");
   assert.match((await moveConversation(d,-100)).skipped.join(),/already in its own folder/);
   const back=restoreConversation({store:store as any,bind:d.bind,notice:d.notice},-100);
