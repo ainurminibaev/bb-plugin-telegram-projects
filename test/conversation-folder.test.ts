@@ -137,12 +137,16 @@ test("С76: an existing group moves to its own folder with every topic, and can 
   assert.match(res.skipped.join(),/topic 9: schedules auto_b could not be moved — the topic stays/);
   assert.equal(store.get<any>("group:policy:-100:9").threadId,"thr_sched");
   assert.equal(returned.length,1,"the schedule that moved goes back");
-  const back=restoreConversation({store:store as any,bind:d.bind,notice:d.notice},-100);
+  const returnedSchedules:string[]=[];
+  const back=await restoreConversation({store:store as any,bind:d.bind,notice:d.notice,
+    moveSchedules:async(from:string,to:string)=>{returnedSchedules.push(from+">"+to);return {moved:from==="thr_new1" ? ["auto_1"] : [],left:[]};}},-100);
+  assert.ok(returnedSchedules.includes("thr_new1>thr_general"),"the schedules go back with the conversation");
+  assert.deepEqual(back.restored.find(r=>r.threadId==="thr_general")?.schedules,{moved:["auto_1"],left:[]});
   assert.deepEqual(back.restored.map(r=>r.threadId).sort(),["thr_general","thr_topic5"]);
   const p0=store.get<any>("group:policy:-100:0");
   assert.equal(p0.threadId,"thr_general"); assert.equal(p0.projectId,"proj_owner"); assert.equal(p0.ownFolder,undefined);
   assert.equal(store.get(movedKey(-100,0)),undefined);
-  assert.ok(notices.includes("thr_new1>thr_general"));
+  assert.ok(notices.includes("thr_new1>thr_general s:auto_1"),"the notice names the schedules that came back");
 });
 
 test("С76: own folders only where the guest guard reaches them for the account", async()=>{

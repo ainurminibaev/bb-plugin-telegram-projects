@@ -225,7 +225,8 @@ export const rpcContract = defineRpcContract({
   },
   restoreConversationFolder:{
     input:z.object({confirm:z.literal(true),chatId:z.number().int().safe()}).strict(),
-    output:z.object({restored:z.array(z.object({topicId:z.number(),threadId:z.string()}))}),
+    output:z.object({restored:z.array(z.object({topicId:z.number(),threadId:z.string(),
+      schedules:z.object({moved:z.array(z.string()),left:z.array(z.string())}).optional()}))}),
   },
   providerHandoffStatus: {
     input: z.object({topicId: z.number().int().nonnegative()}).strict(), output: handoffStatusSchema.nullable(),
@@ -1121,6 +1122,19 @@ export default async function plugin(bb: BbPluginApi) {
       `Этот тред теперь ведёт разговор ${place}. Прежний тред — ${from}: в нём история и, возможно, незаконченные дела и результаты этого чата; при необходимости сверься с ним (bb thread show ${from}).`)}).catch(()=>undefined);
   }
   const movedTitle=(chat:number)=>store.get<{title?:string}>(`visibility:${botId()}:group:${chat}`)?.title;
+  // С76: the enabled schedules aimed at one thread are aimed at another (a move into a folder and its way back).
+  async function moveThreadSchedules(from:string,to:string,fallbackProject:string) {
+          const list=await bb.sdk.plugins.callRpc({pluginId:"automations",method:"automations_list",input:{targetThreadId:from},
+            outputSchema:z.array(z.object({id:z.string(),projectId:z.string().optional(),enabled:z.boolean().optional()}).passthrough())});
+          const out={moved:[] as string[],left:[] as string[]};
+          for (const a of list) {
+            const ok=await bb.sdk.plugins.callRpc({pluginId:"automations",method:"automations_update",
+              input:{projectId:a.projectId ?? fallbackProject,automationId:a.id,agent:{target:{type:"target-thread",threadId:to}}},
+              outputSchema:z.unknown()}).then(()=>true,()=>false);
+            (ok ? out.moved : out.left).push(a.id);
+          }
+          return out;
+        }
   /** The owner's private chat binding (topic 0): its project is the owner's folder; another binding only as a fallback. */
   const ownerBinding=()=>{
     const own=store.get<{projectId?:string;threadId?:string}>("chat:binding:0");
@@ -2083,24 +2097,15 @@ export default async function plugin(bb: BbPluginApi) {
           const rows=await (bb.sdk.threads as any).list({parentThreadId:threadId}) as {archivedAt?:unknown;deletedAt?:unknown}[];
           return (Array.isArray(rows) ? rows : []).filter(t=>!t.archivedAt && !t.deletedAt).length;
         },
-        moveSchedules:async(from,to)=>{
-          const list=await bb.sdk.plugins.callRpc({pluginId:"automations",method:"automations_list",input:{targetThreadId:from},
-            outputSchema:z.array(z.object({id:z.string(),projectId:z.string().optional(),enabled:z.boolean().optional()}).passthrough())});
-          const out={moved:[] as string[],left:[] as string[]};
-          for (const a of list) {
-            const ok=await bb.sdk.plugins.callRpc({pluginId:"automations",method:"automations_update",
-              input:{projectId:a.projectId ?? dm.projectId,automationId:a.id,agent:{target:{type:"target-thread",threadId:to}}},
-              outputSchema:z.unknown()}).then(()=>true,()=>false);
-            (ok ? out.moved : out.left).push(a.id);
-          }
-          return out;
-        },
+        moveSchedules:(from,to)=>moveThreadSchedules(from,to,dm.projectId),
       },chatId,dryRun);
     },
     restoreConversationFolder: async ({chatId})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
+      const dm=ownerBinding();
       return restoreConversation({store,bind:(policy,projectId)=>bindGroupTopic(store,policy,projectId),
-        notice:(from,to,topic)=>void handOverNotices(from,to,chatId,topic).catch(()=>{})},chatId);
+        notice:(from,to,topic,schedules)=>void handOverNotices(from,to,chatId,topic,schedules).catch(()=>{}),
+        ...(dm && {moveSchedules:(from:string,to:string)=>moveThreadSchedules(from,to,dm.projectId)})},chatId);
     },
     unbindGroupTopic: ({chatId,topicId})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");

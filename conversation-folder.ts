@@ -163,17 +163,21 @@ export async function moveConversation(d:MoveDeps,chatId:number,dryRun=false) {
 }
 
 /** The way back: the saved bindings return to their previous threads in the owner's folder. */
-export function restoreConversation(d:{store:Store;bind:(policy:Policy,projectId:string)=>void;
-  notice:(from:string,to:string,topicId:number,schedules:{moved:string[];left:string[]})=>void},chatId:number) {
-  const restored:{topicId:number;threadId:string}[]=[];
+export async function restoreConversation(d:{store:Store;bind:(policy:Policy,projectId:string)=>void;
+  notice:(from:string,to:string,topicId:number,schedules:{moved:string[];left:string[]})=>void;
+  moveSchedules?:(from:string,to:string)=>Promise<{moved:string[];left:string[]}>},chatId:number) {
+  const restored:{topicId:number;threadId:string;schedules?:{moved:string[];left:string[]}}[]=[];
   for (const {key,value} of d.store.list<{policy:Policy}>(`c76:moved:${chatId}:`)) {
     const old=value?.policy;
     if (!old?.threadId || !old.projectId) continue;
     const current=d.store.get<Policy>(`group:policy:${chatId}:${old.topicId}`);
     d.bind({...old,revision:crypto.randomUUID()},old.projectId);
-    if (current?.threadId && current.threadId!==old.threadId) d.notice(current.threadId,old.threadId,old.topicId,{moved:[],left:[]});
+    // The schedules go back with the conversation (they were moved to the folder's thread on the way there).
+    const schedules=current?.threadId && current.threadId!==old.threadId && d.moveSchedules
+      ? await d.moveSchedules(current.threadId,old.threadId).catch(()=>({moved:[] as string[],left:["?"]})) : {moved:[],left:[]};
+    if (current?.threadId && current.threadId!==old.threadId) d.notice(current.threadId,old.threadId,old.topicId,schedules);
     d.store.del(key);
-    restored.push({topicId:old.topicId,threadId:old.threadId});
+    restored.push({topicId:old.topicId,threadId:old.threadId,schedules});
   }
   return {restored};
 }
