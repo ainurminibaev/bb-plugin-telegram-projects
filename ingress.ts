@@ -1,4 +1,4 @@
-import {noteAgentInChat,noteColleagueLead,noteOwnActivity,withTopicMode} from "./topic-mode";
+import {noteAgentInChat,noteColleagueLead,withTopicMode} from "./topic-mode";
 import {albumHasPosition,albumKey,albumKnown,collectAlbum,mediaGroupId,queueAlbumWarning,releaseAlbums} from "./media-album";
 import {forumName} from "./forum-defaults";
 import {isTopicPaused} from "./topic-lifecycle";
@@ -441,7 +441,6 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       return;
     }
     const route = routeUpdate(update, owner, undefined, policy);
-    if (route.kind === "group" && !message.from?.is_bot) noteOwnActivity(store, botId, chatId, agentBots(store));
     // С74: a chain of agent bots' messages without a person in between is limited; any person's message resets it.
     const chainKey=`group:agent-chain:${chatId}:${topicId}`;
     if (!edit && message.from && !message.from.is_bot && !message.sender_chat) {

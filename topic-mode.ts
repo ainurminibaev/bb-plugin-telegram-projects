@@ -1,6 +1,7 @@
-// Agents in shared chats (agents-in-chats.md): in a topic an agent either leads it (hears what people write there
-// without a mention) or is called by a mention. One agent in a chat leads every topic, as before; once another agent
-// of the organization shows up in the chat, the owner's message without a mention goes only to the topic's leader.
+// Agents in shared chats (agents-in-chats.md): the chat's default leader is set, not guessed. An employee whose
+// passport says «leads shared chats by default» (setting leadsChatsByDefault; absent — yes, as before) leads every
+// topic that has no leader of its own; one that does not answers by a mention. A topic's own leader, or another chat
+// leader, is named only by the owner or a curator (topic-mode), with a line in the chat the colleagues' bridges read.
 import type {Store} from "./model";
 import {directNameAddress,type GroupTopicPolicy} from "./ingress";
 
@@ -17,58 +18,14 @@ export const chatModeKey=(bot:number,chat:number)=>`chat:mode:${bot}:${chat}`;
  * first colleague shows up, an agent that already talks in this chat (has a bound topic) records itself as its leader.
  * For people nothing changes; the newcomer waits for mentions. The owner may name another leader (topic-mode --chat).
  */
-export const agentsSinceKey=(bot:number,chat:number)=>`chat:agents-since:${bot}:${chat}`;
-export const boundSinceKey=(bot:number,chat:number)=>`chat:bound-since:${bot}:${chat}`;
-export const announceKey=(bot:number,chat:number)=>`chat:announce:${bot}:${chat}`;
-const SETTLED=3600_000;
-const MIGRATED="topic-mode:migrated";
+/** The installer's word from the passport: this agent leads shared chats by default (absent — yes, as before). */
+export const leadsByDefaultKey="rights:leads-chats-default";
+export const leadsByDefault=(store:Store)=>store.get<boolean>(leadsByDefaultKey)!==false;
 
-/**
- * Once, when this version first starts (server start, before any message — a fresh installation has no bindings yet): a chat this agent already talks in counts as bound "before" (0), and a colleague
- * the previous version already knew counts as known "before" (0). Without it an update would make every agent a
- * newcomer in its own chats.
- */
-export function migrateTopicModes(store:Store,bot:number) {
-  if (store.get(MIGRATED)) return;
-  for (const {value:p} of store.list<GroupTopicPolicy>("group:policy:"))
-    if (p?.botId===bot && p.chatId<0 && !p.privateChat && store.get(boundSinceKey(bot,p.chatId))===undefined)
-      store.put(boundSinceKey(bot,p.chatId),0);
-  for (const {key} of store.list<number[]>(`chat:agents:${bot}:`)) {
-    const chat=Number(key.split(":").at(-1));
-    if (Number.isSafeInteger(chat) && store.get(agentsSinceKey(bot,chat))===undefined) store.put(agentsSinceKey(bot,chat),0);
-  }
-  store.put(MIGRATED,Date.now());
-}
-
-/** Every accepted message: since when this agent talks in the chat, and — while no one leads it — a new try to lead it. */
-export function noteOwnActivity(store:Store,bot:number,chat:number,organization:number[],now=Date.now()) {
-  if (chat>=0) return;
-  // Called for a message accepted by this agent's binding here: it talks in this chat (no scan on the message path).
-  if (store.get(boundSinceKey(bot,chat))===undefined) store.put(boundSinceKey(bot,chat),now);
-  claimChatLead(store,bot,chat,organization,now);
-}
-
-/**
- * The chat's default leader is the agent that talked here before the colleague came: its binding (0 — before this
- * version) is older than the colleague's arrival by a settled margin. A newcomer, even one bound a moment before it
- * learned about the colleague, never claims. A claim is announced in the chat, so a colleague that also claimed it
- * (both were here before this version) can step back by the earlier claim.
- */
-export function claimChatLead(store:Store,bot:number,chat:number,organization:number[]=[],now=Date.now()) {
-  if (store.get(chatModeKey(bot,chat))) return false;
-  const known=store.get<number[]>(chatAgentsKey(bot,chat)) ?? [];
-  if (!known.some(id=>id!==bot && (!organization.length || organization.includes(id)))) return false;
-  const since=store.get<number>(agentsSinceKey(bot,chat));
-  const bound=store.get<number>(boundSinceKey(bot,chat));
-  if (since===undefined || bound===undefined) return false;
-  if (bound!==0 && !(since>0 && bound+SETTLED<=since)) return false;
-  store.put(chatModeKey(bot,chat),{mode:"lead",by:0,at:now} satisfies TopicModeRecord);
-  store.put(announceKey(bot,chat),now);
-  return true;
-}
-
+/** Whether this agent leads the chat: a choice made for this chat, else the passport's default. */
 export function leadsChat(store:Store,bot:number,chat:number) {
-  return store.get<TopicModeRecord>(chatModeKey(bot,chat))?.mode==="lead";
+  const record=store.get<TopicModeRecord>(chatModeKey(bot,chat));
+  return record ? record.mode==="lead" : leadsByDefault(store);
 }
 /** Curators of this agent (people who may assign it to lead a topic): from the employee's passport, set by setup. */
 export const curatorsKey="rights:curators";
@@ -81,9 +38,7 @@ export function noteAgentInChat(store:Store,bot:number,chat:number,sender:number
   if (clean && store.get<string>(agentNameKey(sender))!==clean) store.put(agentNameKey(sender),clean);
   const known=store.get<number[]>(chatAgentsKey(bot,chat)) ?? [];
   if (known.includes(sender)) return false;
-  if (store.get(agentsSinceKey(bot,chat))===undefined) store.put(agentsSinceKey(bot,chat),Date.now());
   store.put(chatAgentsKey(bot,chat),[...known,sender].sort((a,b)=>a-b));
-  claimChatLead(store,bot,chat,organization);
   return true;
 }
 
@@ -92,14 +47,10 @@ export function otherAgentsInChat(store:Store,bot:number,chat:number,organizatio
 }
 
 /** The mode of this agent in a topic: an explicit choice, or by default — leads when it is the only agent here. */
-export function topicMode(store:Store,bot:number,chat:number,topic:number,organization:number[]) {
+export function topicMode(store:Store,bot:number,chat:number,topic:number,_organization:number[]=[]) {
   const record=store.get<TopicModeRecord>(topicModeKey(bot,chat,topic));
   if (record?.mode==="lead" || record?.mode==="mention") return {mode:record.mode,explicit:true,record};
-  // No leader of its own: the chat's leader leads the topic (owner without a mention, new topics), others by mention.
-  const chatRecord=store.get<TopicModeRecord>(chatModeKey(bot,chat));
-  if (chatRecord?.mode==="lead" || chatRecord?.mode==="mention") return {mode:chatRecord.mode,explicit:false,chat:true};
-  const alone=otherAgentsInChat(store,bot,chat,organization).length===0;
-  return {mode:(alone ? "lead" : "mention") as TopicMode,explicit:false};
+  return {mode:(leadsChat(store,bot,chat) ? "lead" : "mention") as TopicMode,explicit:false};
 }
 
 export const curators=(store:Store)=>store.get<number[]>(curatorsKey) ?? [];
@@ -109,7 +60,6 @@ export function canAssignLead(store:Store,owner:number,sender:number) {
 }
 
 /** The line people see when the mode changes; colleagues' bridges read it too (noteColleagueLead). */
-export const DEFAULT_LEAD_LINE="Веду этот чат как агент, который был здесь первым: владельцу отвечаю без отметки. Позвать коллегу — отметьте его.";
 export function modeLine(mode:TopicMode,chat=false) {
   if (chat) return mode==="lead" ? "Веду этот чат: отвечаю здесь без отметки. Позвать коллегу — отметьте его."
     : "Больше не веду этот чат, зовите отметкой.";
@@ -122,19 +72,9 @@ export function modeLine(mode:TopicMode,chat=false) {
  * or chat (its bridge posts modeLine), this agent steps back to mentions there.
  */
 export function noteColleagueLead(store:Store,bot:number,chat:number,topic:number,sender:number,text:string,organization:number[],
-  sentAt?:number) {
+  _sentAt?:number) {
   if (sender===bot || !organization.includes(sender) || typeof text!=="string") return false;
   const body=text.trim();
-  if (body.startsWith(DEFAULT_LEAD_LINE.slice(0,40))) {
-    // Both claimed by default (both were here before this version): the earlier claim leads; a tie — the smaller id.
-    const mine=store.get<TopicModeRecord>(chatModeKey(bot,chat));
-    if (mine?.mode!=="lead") return true;
-    if (mine.by!==0) return true;   // named by the owner or a curator: it stays
-    const theirs=(sentAt ?? Date.now()/1000)*1000;
-    if (theirs<mine.at-1000 || (Math.abs(theirs-mine.at)<=1000 && sender<bot))
-      store.put(chatModeKey(bot,chat),{mode:"mention",by:sender,at:Date.now()} satisfies TopicModeRecord);
-    return true;
-  }
   if (body.startsWith(modeLine("lead",true))) {
     if (store.get<TopicModeRecord>(chatModeKey(bot,chat))?.mode!=="mention")
       store.put(chatModeKey(bot,chat),{mode:"mention",by:sender,at:Date.now()} satisfies TopicModeRecord);
@@ -176,7 +116,7 @@ export function topicNote(store:Store,policy:GroupTopicPolicy,organization:numbe
   if (policy.privateChat) return "";
   const m=topicMode(store,policy.botId,policy.chatId,policy.topicId,organization);
   const others=otherAgentsInChat(store,policy.botId,policy.chatId,organization);
-  if (!others.length && !m.explicit) return "";
+  if (!others.length && !m.explicit && m.mode==="lead") return "";   // one agent leading as before: no new lines
   const who=others.map(id=>names(id) ?? "агент "+id).join(", ");
   const lines=[m.mode==="lead"
     ? (m.explicit
@@ -237,9 +177,14 @@ export async function refreshChatAgents(store:Store,bot:number,chat:number,organ
     else known.delete(id);
   }
   store.put(chatAgentsKey(bot,chat),[...known].sort((a,b)=>a-b));
-  if ([...known].some(id=>id!==bot && organization.includes(id))) {
-    if (store.get(agentsSinceKey(bot,chat))===undefined) store.put(agentsSinceKey(bot,chat),now);
-    claimChatLead(store,bot,chat,organization,now);
-  }
   return true;
+}
+
+/**
+ * Another leader takes over only where the former one sees the line: the organization's bots see each other (С74 — the
+ * list of the organization's bots in the bridge settings). Without it naming a leader is refused in words.
+ */
+export function leadRefusal(organization:number[]) {
+  return organization.length ? undefined
+    : "Сначала включите общение агентов в этом чате (С74: боты организации в настройке моста agentBots) — иначе прежний ведущий не узнает о смене. Скажи это человеку словами.";
 }

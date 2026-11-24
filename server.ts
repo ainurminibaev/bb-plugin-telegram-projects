@@ -1,6 +1,6 @@
 import {homedir} from "node:os";
 import {ensureConversationProject,moveConversation,ownFolderProject,restoreConversation} from "./conversation-folder";
-import {addressedToAgent,announceKey,migrateTopicModes,DEFAULT_LEAD_LINE,leadsChat,setChatMode,canAssignLead,chatAgentsCheckedKey,curatorsKey,noteAgentsLeaving,refreshChatAgents,modeLine,otherAgentsInChat,setTopicMode,topicMode,type TopicMode} from "./topic-mode";
+import {addressedToAgent,leadRefusal,leadsByDefaultKey,leadsChat,setChatMode,canAssignLead,chatAgentsCheckedKey,curatorsKey,noteAgentsLeaving,refreshChatAgents,modeLine,otherAgentsInChat,setTopicMode,topicMode,type TopicMode} from "./topic-mode";
 import {TOPIC_ACTIONS,topicRefusal,type TopicAction} from "./topic-command";
 import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
@@ -371,6 +371,7 @@ export default async function plugin(bb: BbPluginApi) {
     employeePrivateRequests:{type:"boolean",label:"Запросы доступа в личке сотрудника",default:false},
     agentBots:{type:"string",label:"Боты агентов организации (Telegram ID через запятую): их сообщения в группах принимаются",default:""},
     agentChainLimit:{type:"number",label:"Сколько реплик агентов подряд без человека допустимо",default:12},
+    leadsChatsByDefault:{type:"boolean",label:"Ведёт общие чаты по умолчанию (из паспорта сотрудника): отвечает владельцу без отметки во всех темах без своего ведущего",default:true},
     curators:{type:"string",label:"Кураторы этого агента (Telegram ID через запятую): вместе с владельцем назначают его ведущим темы",default:""},
     isolatedFileHost:{type:"string",label:"Машина с рабочими файлами группового исполнителя",default:""},
     agencyEnabled: {type:"boolean",label:"Уведомления из Агентства",default:false},
@@ -858,13 +859,6 @@ export default async function plugin(bb: BbPluginApi) {
     if (m.new_chat_members || m.left_chat_member) store.del(chatAgentsCheckedKey(me,chat));
     await refreshChatAgents(store,me,chat,agentBots(store),
       user=>telegram(botToken,signal,5_000,()=>chat,apiRoot)("getChatMember",{chat_id:chat,user_id:user}) as never).catch(()=>false);
-    // A default claim of the chat is announced once (people see who leads; a colleague that also claimed steps back).
-    if (store.get(announceKey(me,chat))!==undefined && leadsChat(store,me,chat)) {
-      try {
-        await sendFormattedText(telegram(botToken,signal,15_000,()=>chat,apiRoot),{chatId:chat,topicId:0,markdown:DEFAULT_LEAD_LINE});
-        store.del(announceKey(me,chat));
-      } catch { /* the next pass tries again */ }
-    }
   }
   async function inheritForumTopic(owner:number,bot:number,signal:AbortSignal,update:unknown) {
     const topic=describeForumTopic(store,bot,owner,update);
@@ -876,13 +870,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (!topic || !candidate) return topic?.service??false;
     const {chat,topic:topicId}=topic;
     const {source,metadata}=candidate;
-    // Agents in chats (item 3): with another agent of the organization here, a topic gets this agent's conversation at
-    // the first message addressed to it, not when the topic appears — an agent nobody called costs nothing.
+    // Agents in chats (item 3): an agent nobody called costs nothing.
     const firstMessage=(update as {message?:any})?.message;
-    // …except the agent that leads the chat (it led General when the colleague came): the owner's new topic is its.
-    const chatLead=leadsChat(store,bot,chat) && firstMessage?.from?.id===owner && !firstMessage?.forum_topic_created;
-    if (otherAgentsInChat(store,bot,chat,agentBots(store)).length && !chatLead &&
-        !addressedToAgent(firstMessage,bot,source.botUsername,source.addressName)) return topic.service;
+    // An agent that does not lead the chat (passport: not by default, or another leader named) gets a topic's
+    // conversation only at the first message addressed to it; the chat's leader picks topics up as before (С54).
+    if (!leadsChat(store,bot,chat) && !addressedToAgent(firstMessage,bot,source.botUsername,source.addressName)) return topic.service;
     const executor=source.isolated?groupExecutor(chat,topicId,true):undefined;
     if (source.isolated && (!executor || executor.threadId===source.threadId || executor.projectId===source.projectId)) return topic.service;
     const targetKey=`group:policy:${chat}:${topicId}`;
@@ -2542,6 +2534,8 @@ export default async function plugin(bb: BbPluginApi) {
         const author=store.get<number>("group:turn-author:"+ctx.threadId);
         if (author===undefined || !canAssignLead(store,owner,author))
           return {exitCode:1,stderr:"Назначать ведущего темы и отпускать его может только владелец или куратор этого агента. Скажи это человеку словами."};
+        const refusal=action==="lead" ? leadRefusal(organization) : undefined;
+        if (refusal) return {exitCode:1,stderr:refusal};
         const changed=wholeChat ? setChatMode(store,bot,place.chat,action as TopicMode,author)
           : setTopicMode(store,bot,place.chat,place.topic,action as TopicMode,author,organization);
         if (!changed) return {exitCode:0,stdout:JSON.stringify({mode:action,chat:wholeChat,changed:false})};
@@ -3161,8 +3155,8 @@ export default async function plugin(bb: BbPluginApi) {
         store.put(installKindKey, cfg.installKind);
         store.put(agentBotsKey, String(cfg.agentBots ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
         store.put("rights:agent-chain-limit", Math.max(1, Math.min(50, Number(cfg.agentChainLimit) || 12)));
+        store.put(leadsByDefaultKey, cfg.leadsChatsByDefault !== false);
         store.put(curatorsKey, String(cfg.curators ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
-        if (botId()) migrateTopicModes(store, botId()!);   // once: chats this agent talked in before this version
         consentTtlMs = Math.max(1, Number(cfg.consentMinutes) || 30) * 60_000;
         if (botId() && ownerId()) migrateLegacyRights(store, botId()!, profilePeople());
         // С62: people approved earlier (or whose conversation could not be made then) get their greeting, once.
