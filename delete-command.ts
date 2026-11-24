@@ -1,5 +1,6 @@
 import type {Store} from "./model";
 import type {Conversation} from "./archive-access";
+import {ReplyRoutes} from "./reply-routing";
 
 /**
  * С80: deleting a message in the conversation's own chat. The bot's own message — always (within Telegram's term);
@@ -21,4 +22,13 @@ export function deleteRefusal(args:{caller:Conversation|undefined;owner:number;b
 
 export function deleteLog(store:Store,bot:number,entry:{thread:string;chat:number;message:number;own:boolean;author?:number}) {
   store.put(`delete:log:${bot}:${Date.now()}:${entry.chat}:${entry.message}`,{...entry,at:Date.now()});
+}
+
+/**
+ * Whose word the current turn carries: only a turn a Telegram message started (the owner's message or his «да»
+ * answer) has an author; a turn begun from BB (a task, a schedule, another thread) has none.
+ */
+export function authorOfTurn(store:Store,threadId:string,turnId:string|undefined,ownerChatOwner?:number) {
+  if (!turnId || new ReplyRoutes(store).destination(threadId,turnId)?.kind!=="telegram") return undefined;
+  return store.get<number>("group:turn-author:"+threadId) ?? ownerChatOwner;
 }

@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { telegram } from "../adapters";
 import { TelegramFailure } from "../model";
-import { deleteRefusal } from "../delete-command";
+import { authorOfTurn, deleteRefusal } from "../delete-command";
+import { ReplyRoutes } from "../reply-routing";
 import { missingRightRefusal } from "../forum-commands";
 
 const OWNER = 1001, BOT = 2002, TEAM = -100700, OTHER = -100800, PERSON = 3003;
@@ -38,4 +39,19 @@ test("С80: no right or past the term — the reason and how to ask the owner", 
   const text = missingRightRefusal("deleteMessage", "Команда");
   assert.match(text, /«Удаление сообщений» в группе «Команда»/);
   assert.match(text, /--person owner --ask/);
+});
+
+test("С80: the owner's word lives only in a turn his Telegram message started", () => {
+  const data = new Map<string, unknown>();
+  const store: any = { get: (k: string) => data.get(k), put: (k: string, v: unknown) => { data.set(k, v); }, del: (k: string) => { data.delete(k); },
+    list: (p: string) => [...data].filter(([k]) => k.startsWith(p)).map(([key, value]) => ({ key, value })), atomic: (fn: () => void) => fn() };
+  const routes = new ReplyRoutes(store);
+  routes.record("t", "tg", { kind: "telegram", chatId: TEAM, topicId: 0, updateId: 1 });
+  routes.accept("t", "turn1", "tg");
+  routes.record("t", "task", { kind: "bb" });
+  routes.accept("t", "turn2", "task");
+  store.put("group:turn-author:t", OWNER);
+  assert.equal(authorOfTurn(store, "t", "turn1"), OWNER);
+  assert.equal(authorOfTurn(store, "t", "turn2"), undefined, "a task from BB after the owner's message does not inherit his word");
+  assert.equal(authorOfTurn(store, "t", undefined), undefined);
 });

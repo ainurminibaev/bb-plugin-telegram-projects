@@ -4,7 +4,7 @@ import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
 import {learnTopicName,rememberForumName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,forumAutoOffKey,forumAutoKey,reviveArchivedForumTopic,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
 import {applyForumTopicChange,handleOwnerForumCommand,missingRightRefusal} from "./forum-commands";
-import {deleteLog,deleteRefusal} from "./delete-command";
+import {authorOfTurn,deleteLog,deleteRefusal} from "./delete-command";
 import {topicStateKey,isTopicPaused} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
@@ -2337,7 +2337,10 @@ export default async function plugin(bb: BbPluginApi) {
         const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
         const chat=caller?.kind==="group" ? caller.chat : caller?.kind==="person" ? caller.subject : owner;
         const sender=archive?.sender(bot,chat,message);
-        const author=store.get<number>("group:turn-author:"+ctx.threadId) ?? (caller?.kind==="owner" ? owner : undefined);
+        // The owner's word lives only in a turn his Telegram message started (or his «да» answer): a later turn begun
+        // from BB (a task, a schedule, another thread) does not inherit it.
+        const started=(await bb.sdk.threads.events.list({threadId:ctx.threadId,order:"desc",limit:"1",types:["turn/started"],signal:lifetime.signal}))[0];
+        const author=authorOfTurn(store,ctx.threadId,started?.scope.kind==="turn" ? started.scope.turnId : undefined,caller?.kind==="owner" ? owner : undefined);
         const refusal=deleteRefusal({caller,owner,bot,chat,sender,author});
         if (refusal) return {exitCode:1,stderr:refusal};
         try {
