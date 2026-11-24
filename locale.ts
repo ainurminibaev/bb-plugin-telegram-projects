@@ -11,15 +11,15 @@ export const english: Record<string, string> = {
   "В очереди": "Queued",
   "Запускается": "Starting",
   "Останавливается": "Stopping",
-  "Активных рабочих тредов нет.": "No active child threads.",
+  "Сейчас ничего не выполняется.": "Nothing is running now.",
   "Этот проект используется в группе. Выбери другой проект.": "This project is used in a group. Choose another project.",
   "Можно сменить модель или продолжить эту переписку с другим агентом.": "Change the model or continue this conversation with another agent.",
   "Другой агент → сохранить историю": "Another agent → keep history",
   "Получаю файл из Telegram…": "Receiving the file from Telegram…",
   "Работаю над задачей…": "Working on the task…",
   "Думаю над ответом…": "Thinking about the answer…",
-  "Не удалось подтвердить ответ по журналу. Состояние исходной операции неизвестно.":
-    "I couldn't verify a reply in the journal. The state of the original operation is unknown.",
+  "Не уверен, что ответ дошёл, — проверьте, пожалуйста.":
+    "I am not sure the answer went through — please check.",
   "❓ Агентство: нужен ответ": "❓ Agency: answer needed",
   "Агентство · уведомление": "Agency · notice",
   "Уведомления Tasks будут приходить в тему своего проекта. Это проверка доставки, не настоящая задача.": "Tasks notifications will arrive in their project topic. This is a delivery check, not a real task.",
@@ -114,7 +114,7 @@ export const english: Record<string, string> = {
     "Stop the current run? The chat and history will remain.",
   "Да, остановить": "Yes, stop",
   Назад: "Back",
-  "Команда остановки отправлена BB.": "Stop request sent to BB.",
+  "Останавливаю.": "Stopping.",
   "Ответ принят.": "Answer received.",
   "Вопрос относится к прежнему подключению. Открой /menu.":
     "This question belongs to a previous connection. Open /menu.",

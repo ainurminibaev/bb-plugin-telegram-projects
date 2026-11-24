@@ -3057,7 +3057,7 @@ for (const outcome of ["saved", "wrong-selector", "conflicting", "unknown-receip
       assert.deepEqual(sends.map(m=>[m.reply_parameters?.message_id,m.text]),[
         [inputs[0].messageId,"Сборка готова."],
         ...(uncertain || rebound ? [] : [[inputs[1].messageId,status ?
-          "Не удалось подтвердить ответ по журналу. Состояние исходной операции неизвестно." : "Отчёт готов."]]),
+          "Не уверен, что ответ дошёл, — проверьте, пожалуйста." : "Отчёт готов."]]),
       ]);
       const rows=f.store.list<{taskRoute:{messageId:number};busyExact:string;evidence:{completedSeq?:number;itemSeq?:number}}>("chat:out:busy-exact:");
       assert.equal(rows.length,rebound?1:2);

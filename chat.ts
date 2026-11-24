@@ -2062,7 +2062,7 @@ export class ChatBridge {
         }
         if (children.length < pageSize) break;
       }
-      this.enqueue(b.topicId, [...lines.values()].join("\n") || this.tr("Активных рабочих тредов нет."));
+      this.enqueue(b.topicId, [...lines.values()].join("\n") || this.tr("Сейчас ничего не выполняется."));
       return;
     }
     const commands: Record<string, string> = {
@@ -2576,7 +2576,7 @@ export class ChatBridge {
         await this.d.sdk.threads.stop({ threadId: b.threadId! });
         this.enqueue(
           b.topicId,
-          this.tr("Команда остановки отправлена BB."),
+          this.tr("Останавливаю."),
           this.nav(b),
         );
         return;
@@ -2959,7 +2959,7 @@ export class ChatBridge {
       if (!source.legacy) {
         const saved = source.saved && source.saved.itemSeq < completedSeq ? source.saved : undefined;
         if (saved || !source.silent) {
-          const text = saved?.text ?? renderTelegramParts(this.tr("Не удалось подтвердить ответ по журналу. Состояние исходной операции неизвестно."))[0];
+          const text = saved?.text ?? renderTelegramParts(this.tr("Не уверен, что ответ дошёл, — проверьте, пожалуйста."))[0];
           this.queueNativeBusy(b,turnId,source,text,"recovery",{
             requestId:source.requestId,acceptedSeq:source.acceptedSeq,itemSeq:saved?.itemSeq,completedSeq,
             disposition:saved?"saved-result":"status-only",

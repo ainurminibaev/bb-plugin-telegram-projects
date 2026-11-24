@@ -27,6 +27,8 @@ import {voiceHeader,acknowledge,react,SERVICE_REACTIONS,stepLabel,firstLine,prog
 type GroupInput = Extract<Ingress,{kind:"group"}>;
 /** A submitted message without a turn for this long, while its thread is idle, is lost. */
 export const LOST_SUBMIT_MS=15*60_000;
+/** The agent's own message into its conversation's chat during a turn (send): the final answer is then not repeated. */
+export const sentInTurnKey=(threadId:string)=>"group:sent-in-turn:"+threadId;
 /**
  * С50: slow work (a voice transcription, a file download) started once per key and taken when ready. Returns
  * undefined while it still runs, so the worker goes on with the other chats instead of waiting.
@@ -419,7 +421,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (!job.executionToken) {finish("revoked");continue;}
         const result=isolatedResult ?? await executor.read(job.executionToken,signal);
         if (result.state==="waiting") continue;
-        job.answer=result.state==="finished" ? result.text : "Исполнитель потерял квитанцию. Проверьте задачу перед повтором.";
+        job.answer=result.state==="finished" ? result.text : "Не уверен, что это сделано, — проверьте, пожалуйста, или повторите просьбу.";
         if (result.state!=="finished") job.stage="failed";
         job.state="ready";
         store.put(key,job);
@@ -508,8 +510,11 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
               if (own || !isBusyAnswer(text)) {job.turnId=turn; job.answer=own ?? text;}
             }
             if (e.type==="turn/completed") {
-              if (e.data.status!=="completed") {job.answer="Помощнику не удалось завершить это поручение."; job.stage="failed";}
-              else if (job.turnId!==turn || !job.answer?.trim()) job.answer="Помощник завершил ход без текстового ответа.";
+              const wrote=store.get<{chat:number;topic:number;at:number}>(sentInTurnKey(r.threadId));
+              const alreadySaid=!!wrote && wrote.chat===r.chatId && wrote.topic===(r.topicId ?? 0) && wrote.at>=(job.submittedAt ?? 0);
+              if (alreadySaid) job.answer=NO_REPLY;   // the agent already wrote here in this turn: no second copy
+              else if (e.data.status!=="completed") {job.answer="Не получилось сделать — повторите или уточните, пожалуйста."; job.stage="failed";}
+              else if (job.turnId!==turn || !job.answer?.trim()) job.answer=NO_REPLY;   // С79: no service line; the reaction stays
               job.state="ready";
             }
           }
