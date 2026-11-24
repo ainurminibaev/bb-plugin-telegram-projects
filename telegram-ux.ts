@@ -34,6 +34,8 @@ export function localArtifacts(text: string, options: {relative?: boolean} = {})
     const titled = m[2].match(/^(.*?)\s+"telegram:document"$/);
     let path = (titled ? titled[1] : m[2]).replace(/^<|>$/g, "").replace(/^file:\/\//, "");
     try { path = decodeURIComponent(path); } catch { continue; }
+    // A link to a line of a file (path:44, path:44:3, path#L44) still sends the file itself.
+    path = path.replace(/(?::\d+){1,2}$|#L\d+(?:-L?\d+)?$/, "");
     const relative = !path.startsWith("/");
     if (relative && !(options.relative && !/^[a-z][a-z0-9+.-]*:/i.test(path) && !path.startsWith("#") &&
         !path.split("/").includes("..") && ARTIFACT_EXTENSIONS.test(path))) continue;
