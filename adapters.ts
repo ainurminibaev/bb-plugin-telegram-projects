@@ -137,7 +137,10 @@ export function telegram(
       const code =
         d.includes("TOPIC_ID_INVALID") || d.includes("message thread not found")
           ? "topic_missing"
-          : `telegram_${data.error_code ?? r.status}`;
+          // С77: the bot lacks an admin right — said apart, so the agent can ask the owner for that right.
+          : /not enough rights|CHAT_ADMIN_REQUIRED|have no rights|administrator rights|RIGHT_FORBIDDEN/i.test(d)
+            ? "telegram_rights"
+            : `telegram_${data.error_code ?? r.status}`;
       throw new TelegramFailure(
         code,
         Number(data.parameters?.retry_after) || 30,

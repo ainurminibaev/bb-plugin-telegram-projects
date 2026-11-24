@@ -3,7 +3,7 @@ import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
 import {learnTopicName,rememberForumName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,forumAutoOffKey,forumAutoKey,reviveArchivedForumTopic,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
-import {applyForumTopicChange,handleOwnerForumCommand} from "./forum-commands";
+import {applyForumTopicChange,handleOwnerForumCommand,missingRightRefusal} from "./forum-commands";
 import {topicStateKey,isTopicPaused} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
@@ -2278,12 +2278,14 @@ export default async function plugin(bb: BbPluginApi) {
           if (rest[i].startsWith("--") && rest[i+1]!==undefined) opt[rest[i].slice(2)]=rest[++i];
           else return {exitCode:2,stderr:"unexpected_argument "+rest[i]};
         }
+        let rightsChat:number|undefined;
         try {
           const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
           const group=opt.chat ? findGroup(store,bot,opt.chat) : undefined;
           const target=action==="create" ? (group!==undefined ? {chat:group,topic:0} : undefined) :
             opt.topic ? findTopic(store,bot,group,opt.topic) : undefined;
           if (!target) return {exitCode:2,stderr:action==="create" ? "group_required: --chat" : "topic_required: --topic"};
+          rightsChat=target.chat;
           const refusal=topicRefusal(caller,action,target.chat);
           if (refusal) return {exitCode:1,stderr:refusal};
           const tg=telegram(botToken,lifetime.signal,30_000,()=>target.chat,apiRoot);
@@ -2302,7 +2304,13 @@ export default async function plugin(bb: BbPluginApi) {
           }
           const result=await applyForumTopicChange(store,bot,target.chat,target.topic,action,tg);
           return {exitCode:0,stdout:JSON.stringify({done:true,action,topic:target.topic,result})};
-        } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
+        } catch (error) {
+          if (error instanceof TelegramFailure && error.code==="telegram_rights") {
+            const title=(rightsChat!==undefined ? store.get<{title?:string}>(`visibility:${bot}:group:${rightsChat}`)?.title : undefined) ?? opt.chat ?? "эта группа";
+            return {exitCode:1,stderr:missingRightRefusal(action,title)};
+          }
+          return {exitCode:1,stderr:String((error as Error).message)};
+        }
       }
       if(argv[0]==="send"){
         // bb telegram-projects send (--chat C [--topic T] | --person P | --answer ASK) (--text T | --text-file F) [--file PATH] [--reply-to MESSAGE] [--ask]

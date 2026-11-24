@@ -170,3 +170,15 @@ export async function applyForumTopicChange(store:Store,bot:number,chatId:number
   });
   return action==="close"?"Тема закрыта.":action==="reopen"?"Тема открыта.":"Тема и её сообщения удалены в Telegram.";
 }
+
+const RIGHTS:Record<string,string>={
+  create:"«Управление темами»", rename:"«Управление темами»", close:"«Управление темами»", reopen:"«Управление темами»",
+  delete:"«Удаление сообщений» и «Управление темами»", pin:"«Закрепление сообщений»", deleteMessage:"«Удаление сообщений»"};
+
+/** С77: Telegram refused for want of an admin right — the reason in words and how to ask the owner for it. */
+export function missingRightRefusal(action:string,chatTitle:string) {
+  const right=RIGHTS[action] ?? "нужного права администратора";
+  return `bot_lacks_right: у бота нет права ${right} в группе «${chatTitle}», поэтому Telegram отклонил действие. `+
+    `Попроси владельца сам: bb telegram-projects send --person owner --ask --text 'Включить боту право ${right} в группе «${chatTitle}»? `+
+    `Путь: группа → Настройки (Управление группой) → Администраторы → бот → ${right}. Нужно, чтобы …' — ответ придёт сюда; людям в чате скажи, что ждёшь права.`;
+}
