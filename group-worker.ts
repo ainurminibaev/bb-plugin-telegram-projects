@@ -61,7 +61,7 @@ type Job = {
   state:"pending"|"submitted"|"ready"|"sending"|"done"|"revoked";
   taskId?:string; progressId?:number|null;
   /** When the message was given to the thread; a submitted message without a turn does not live forever. */
-  submittedAt?:number; resubmitted?:boolean; started?:boolean;
+  submittedAt?:number; resubmitted?:boolean; started?:boolean; refusedNotified?:boolean;
   executionToken?:string; executorRetryAt?:number;
   pdfIndex?:number; failedPdfs?:string[];
   albumSent?:number[];
@@ -79,7 +79,8 @@ const GROUP_TOOL_ITEMS=new Set(["commandExecution","mcpToolCall","toolCall","fil
 // Keep thread ownership after disconnect: history may already contain group messages.
 export const groupTaskNote = (taskId:string) =>
   "Group taskId: " + taskId + ". Include this ID in internal approval requests to the owner coordinator. " +
-  "Файл для отправки в этот чат клади в outputs/" + taskId.slice(0,8) + "/ — оттуда он уходит и ссылкой в ответе, и командой send --file.";
+  "Файл для отправки в этот чат клади в outputs/" + taskId.slice(0,8) + "/ — оттуда он уходит и ссылкой в ответе, и командой send --file; " +
+  "старый файл (сделанный раньше) сначала скопируй в эту папку.";
 
 export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId: string) {
   const {chatId,topicId,threadId}=policy;
@@ -203,7 +204,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   /** The rules in force for a project and their fingerprint, from the platform plugin (0.4.4); null outside an organization. */
   turnRules?:(projectId:string)=>Promise<{version:string;text:string}|null>,
   /** The employee is paused (platform 0.4.7 pauseStatus); no call means not paused. */
-  paused?:()=>Promise<boolean>) {
+  paused?:()=>Promise<boolean>,
+  /** A group's or a person's conversation attaches only its own files (see server insideConversationFolder). */
+  mayAttach?:(threadId:string,route:{chatId:number;topicId:number;privateChat:boolean},path:string)=>Promise<boolean>) {
   const routes=new ReplyRoutes(store);
   let pausedNow:boolean|undefined;
   const isPaused=async()=>pausedNow??=(paused ? await paused().catch(()=>false) : false);
@@ -575,6 +578,22 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         return env.path;
       };
       let text=stripTelegramMarkers(job.answer!);
+      // A link to a file not of this conversation is not attached: the agent is told where to copy it and sends it
+      // itself (the owner's own forum is not limited).
+      const refused:string[]=[];
+      if (mayAttach && !executor && !policy.ownerSharedProject)
+        for (const link of localArtifacts(text))
+          if (!await mayAttach(r.threadId,{chatId:r.chatId,topicId:r.topicId,privateChat:!!policy.privateChat},link.path)) {
+            refused.push(link.path); text=text.replace(link.markdown,link.label || "");
+          }
+      if (refused.length && !job.refusedNotified) {
+        job.refusedNotified=true; store.put(key,job);
+        const dir=job.taskId ? "outputs/"+job.taskId.slice(0,8)+"/" : "outputs/ (новым файлом в этом ходе)";
+        const target=policy.privateChat ? "--person "+r.chatId : "--chat "+r.chatId+(r.topicId ? " --topic "+r.topicId : "");
+        await sdk.threads.send({threadId:r.threadId,mode:"queue-if-active",input:[{type:"text",mentions:[],text:
+          "[Мост Telegram] Файл(ы) из ответа не ушли в чат: они не из этого разговора — "+refused.join(", ")+
+          ". Скопируй их в "+dir+" и пришли командой bb telegram-projects send "+target+" --file <путь>. Ответ человеку не повторяй."}]}).catch(()=>undefined);
+      }
       const artifacts=localArtifacts(text);
       const caption=routedCaption(text,artifacts);
       const reply={chatId:r.chatId,topicId:r.topicId,replyTo:r.messageId};

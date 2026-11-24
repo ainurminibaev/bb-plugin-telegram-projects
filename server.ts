@@ -3085,7 +3085,8 @@ export default async function plugin(bb: BbPluginApi) {
                   groupTransport,signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined,cfg.language as "ru"|"en"),cfg.telegramFileHostId,
-                  (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum,()=>currentReactions,turnRulesOf,pausedOf);
+                  (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum,()=>currentReactions,turnRulesOf,pausedOf,
+                  (threadId,route,path)=>insideConversationFolder(threadId,path,route.privateChat ? {kind:"person",subject:route.chatId} : {kind:"group",chat:route.chatId,topic:route.topicId}));
                 const scheduleFull=!feedUp || Date.now()-lastScheduleFull>=60_000;
                 if (scheduleFull) lastScheduleFull=Date.now();
                 const scheduleOnly=scheduleFull ? undefined : new Set(scheduleDirty);
