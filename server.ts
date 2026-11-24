@@ -13,6 +13,7 @@ import {conversationOf,conversationOfThread,guardGroupMemory,movedConversationOf
 import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefusal,sendTargets} from "./send-command";
 import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
 import {sentInTurnKey} from "./group-worker";
+import {maxAlbumItems,sendAlbum} from "./media-album";
 import {acceptOwnerAskCallback,answerTurnText,askButtons,cleanQuestion,forwardOriginal,ownerQuestion,queueAnswerTurn,rememberAskMessage,turnMessageKey} from "./owner-ask";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
@@ -2223,7 +2224,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name:"send",
         summary:"Send a message or file to a group topic or a person with access; --ask remembers the question so the answer comes back",
-        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON|owner | --answer ASK) (--text TEXT | --text-file PATH, not stdin) [--file PATH] [--reply-to MESSAGE] [--ask]",
+        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON|owner | --answer ASK) (--text TEXT | --text-file PATH, not stdin) [--file PATH …] [--reply-to MESSAGE] [--ask]",
       },
       {
         name:"topic",
@@ -2362,11 +2363,13 @@ export default async function plugin(bb: BbPluginApi) {
         // bb telegram-projects send (--chat C [--topic T] | --person P | --answer ASK) (--text T | --text-file F) [--file PATH] [--reply-to MESSAGE] [--ask]
         const owner=ownerId(),bot=botId();
         if (!ctx.threadId || !owner || !bot) return {exitCode:1,stderr:"run_from_a_conversation_thread"};
-        const opt:Record<string,string>={}; let ask=false;
+        const opt:Record<string,string>={}; let ask=false; const files:string[]=[];
         const rest=argv.slice(1);
         for (let i=0;i<rest.length;i++) {
           if (rest[i]==="--ask") ask=true;
           else if (rest[i]==="--targets") opt.targets="1";
+          // С84: several files in one send: --file A --file B … (one album per up to ten files).
+          else if (rest[i]==="--file" && rest[i+1]!==undefined) { files.push(rest[++i]); opt.file??=files[0]; }
           else if (rest[i]==="--json") continue;
           else if (rest[i].startsWith("--") && rest[i+1]!==undefined) opt[rest[i].slice(2)]=rest[++i];
           else return {exitCode:2,stderr:"unexpected_argument "+rest[i]};
@@ -2459,7 +2462,23 @@ export default async function plugin(bb: BbPluginApi) {
           // A person's own message goes to the owner as it is, before the question (С67).
           if (ownerAsk?.turn && ownerAsk.turn.chat>0) await forwardOriginal(chat=>telegram(botToken,lifetime.signal,60_000,()=>chat,apiRoot),owner,ownerAsk.turn);
           const buttons=ownerAsk && remembered ? askButtons(remembered) : undefined;
-          const messageId=file || !text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file,replyTo})
+          let messageId:number|undefined;
+          if (files.length>1) {
+            if (ask) return {exitCode:2,stderr:"ask_with_one_file_only"};
+            const media:import("./media-album").AlbumMedia[]=[];
+            for (const path of files) {
+              const bytes=await readFile(path);
+              if (bytes.length>uploadLimit()) return {exitCode:1,stderr:"file_too_large: "+path};
+              media.push({kind:"document",name:safeTelegramFilename(path.split("/").at(-1) ?? "file"),data:new Blob([new Uint8Array(bytes)],{type:"application/octet-stream"})});
+            }
+            if (text?.trim()) messageId=(await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text})).at(-1);
+            for (let i=0;i<media.length;i+=maxAlbumItems) {
+              const chunk=media.slice(i,i+maxAlbumItems);
+              const first=chunk.length>1 ? (await sendAlbum(tg,{chatId:target.chat,topicId:target.topic,replyTo:replyTo ?? 0},chunk)).messageIds[0]
+                : await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,file:{name:chunk[0].name!,kind:"document",data:chunk[0].data as Blob,sha256:"",bytes:(chunk[0].data as Blob).size},replyTo});
+              messageId??=first;
+            }
+          } else messageId=file || !text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file,replyTo})
             : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text,...(buttons && {replyMarkup:buttons})})).at(-1);
           if (ownerAsk && remembered && messageId) rememberAskMessage(store,bot,messageId,remembered);
           if (opt.answer) closeAsk(store,bot,opt.answer);
