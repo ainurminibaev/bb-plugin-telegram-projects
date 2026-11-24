@@ -85,3 +85,22 @@ test("the answer becomes a request of the asking conversation under the original
   assert.match(job.route.text, /уйдёт сюда сам/);
   assert.equal(queueAnswerTurn(s as never, BOT, OWNER, {...ask, replyTo: undefined}, "x", {id: OWNER, name: "В"}), false);
 });
+
+test("С83: a question posted into the topic the work came from is answered there by the owner", async () => {
+  const s = memory();
+  const ask = rememberAsk(s as never, BOT, OWNER, {chat: OWNER, topic: 0}, "Отправить смету?");
+  s.put(`send:ask:${BOT}:${ask.id}`, {...s.get<any>(`send:ask:${BOT}:${ask.id}`), originThread: "orchestrator", postedChat: -1001});
+  const delivered: string[] = []; const edits: any[] = [];
+  const tg = (async () => ({})) as any;
+  const tgFor = (chat: number) => (async (method: string, body: any) => { edits.push([chat, method, body.chat_id]); return {}; }) as any;
+  const deliver = async (a: any, answer: string) => { delivered.push(a.id + ":" + answer); return true; };
+  const press = (from: number, chat: number) => acceptOwnerAskCallback({store: s as never, bot: BOT, owner: OWNER, tg, deliver, tgFor},
+    {callback_query: {id: "c", from: {id: from}, data: `oa:y:${ask.id}`, message: {message_id: 9, chat: {id: chat}}}});
+  await press(VIKTOR, -1001);
+  assert.deepEqual(delivered, [], "only the owner answers");
+  await press(OWNER, -2002);
+  assert.deepEqual(delivered, [], "not from another chat");
+  await press(OWNER, -1001);
+  assert.deepEqual(delivered, [`${ask.id}:да`]);
+  assert.ok(edits.some(([chat, m, id]) => chat === -1001 && m === "editMessageReplyMarkup" && id === -1001));
+});

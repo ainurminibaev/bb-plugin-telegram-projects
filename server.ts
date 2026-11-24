@@ -2426,8 +2426,16 @@ export default async function plugin(bb: BbPluginApi) {
           // A question to the owner from another conversation (С43, С67): where it comes from, who asks and their status,
           // the original request (a link, or the person's message forwarded), then buttons; the answer returns there.
           let ownerAsk:{turn?:import("./owner-ask").TurnMessage;thread?:string}|undefined;
+          // С83: an ordinary thread doing work handed over by a group's conversation writes to the owner there, in that topic.
+          let handedBy:{chat:number;topic:number}|undefined;
+          if (!caller && target.chat===owner && !opt.answer && ctx.threadId) {
+            const asked=(await bb.sdk.threads.events.list({threadId:ctx.threadId,order:"desc",limit:"30",types:["client/turn/requested"],signal:lifetime.signal}))
+              .find(e=>e.type==="client/turn/requested" && e.data.initiator==="agent" && e.data.senderThreadId);
+            const from=asked?.type==="client/turn/requested" && asked.data.senderThreadId ? await conversationOf(store,bb.sdk.threads,asked.data.senderThreadId,lifetime.signal) : undefined;
+            if (from?.kind==="group") { handedBy={chat:from.chat,topic:from.topic ?? 0}; target={chat:from.chat,topic:from.topic ?? 0}; }
+          }
           // П28: an ordinary thread of this BB writes to the owner: who it is, the text as sent, cut at 3500 characters.
-          if (!caller && target.chat===owner && !opt.answer && (opt.text || opt["text-file"])) {
+          if (!caller && (target.chat===owner || handedBy) && !opt.answer && (opt.text || opt["text-file"])) {
             const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
             const thread=await bb.sdk.threads.get({threadId:ctx.threadId}).catch(()=>undefined) as {title?:string;projectId?:string}|undefined;
             const project=thread?.projectId ? await bb.sdk.projects.get({projectId:thread.projectId}).catch(()=>undefined) as {name?:string}|undefined : undefined;
@@ -2478,7 +2486,7 @@ export default async function plugin(bb: BbPluginApi) {
           let remembered:string|undefined;
           if (ask && !caller && ownerAsk?.thread && !opt.answer) {
             const asked=rememberAsk(store,bot,owner,{chat:owner,topic:0},text ?? "");
-            store.put(`send:ask:${bot}:${asked.id}`,{...asked,originThread:ownerAsk.thread});
+            store.put(`send:ask:${bot}:${asked.id}`,{...asked,originThread:ownerAsk.thread,...(handedBy && {postedChat:handedBy.chat})});
             remembered=asked.id;
           }
           if (ask && caller && !opt.answer) {
@@ -2999,7 +3007,8 @@ export default async function plugin(bb: BbPluginApi) {
             }
             // The owner's «Да / Нет» under a question from another conversation (any kind of install).
             if (privateOwner && privateBot && cfg.chatEnabled && bridge && await acceptOwnerAskCallback({store,bot:privateBot,owner:privateOwner,
-                tg:telegram(botToken,signal,15000,()=>privateOwner,apiRoot),deliver:deliverOwnerAnswer},u)) {
+                tg:telegram(botToken,signal,15000,()=>privateOwner,apiRoot),deliver:deliverOwnerAnswer,
+                tgFor:chat=>telegram(botToken,signal,15000,()=>chat,apiRoot)},u)) {
               store.put("ingress:offset",u.update_id+1);
               continue;
             }

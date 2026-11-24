@@ -67,25 +67,30 @@ export async function forwardOriginal(tg: (chat: number) => Telegram, owner: num
 export type DeliverAnswer = (ask: Ask, answer: string, via: "button" | "text") => Promise<boolean>;
 
 /** The owner pressed «Да» or «Нет» under a question. Returns true when the update was this kind of button. */
-export async function acceptOwnerAskCallback(d: {store: Store; bot: number; owner: number; tg: Telegram; deliver: DeliverAnswer}, update: any) {
+export async function acceptOwnerAskCallback(d: {store: Store; bot: number; owner: number; tg: Telegram; deliver: DeliverAnswer;
+  tgFor?: (chat: number) => Telegram}, update: any) {
   const cq = update?.callback_query;
   if (cq?.data === "oa:done") { await d.tg("answerCallbackQuery", {callback_query_id: cq.id}).catch(() => {}); return true; }
   const m = /^oa:(y|n):([a-f0-9]{8})$/.exec(cq?.data ?? "");
   if (!cq || !m) return false;
-  if (cq.from?.id !== d.owner || cq.message?.chat?.id !== d.owner) {
+  const ask = d.store.get<Ask & {postedChat?: number}>(`send:ask:${d.bot}:${m[2]}`);
+  const chat = cq.message?.chat?.id;
+  // С83: a question posted into the topic the work came from is answered there, by the owner himself.
+  const here = chat === d.owner || (!!ask?.postedChat && chat === ask.postedChat);
+  if (cq.from?.id !== d.owner || !here) {
     await d.tg("answerCallbackQuery", {callback_query_id: cq.id}).catch(() => {});
     return true;
   }
-  const ask = d.store.get<Ask>(`send:ask:${d.bot}:${m[2]}`);
+  const tgHere = chat === d.owner || !d.tgFor ? d.tg : d.tgFor(chat);
   const answer = m[1] === "y" ? "да" : "нет";
   if (!ask || ask.target !== d.owner) {
     await d.tg("answerCallbackQuery", {callback_query_id: cq.id, text: "Этот вопрос уже закрыт."}).catch(() => {});
-    await d.tg("editMessageReplyMarkup", {chat_id: d.owner, message_id: cq.message.message_id, reply_markup: {inline_keyboard: []}}).catch(() => {});
+    await tgHere("editMessageReplyMarkup", {chat_id: chat, message_id: cq.message.message_id, reply_markup: {inline_keyboard: []}}).catch(() => {});
     return true;
   }
   const ok = await d.deliver(ask, answer, "button").catch(() => false);
   await d.tg("answerCallbackQuery", {callback_query_id: cq.id, text: ok ? `Передал: ${answer}` : "Не удалось передать ответ, попробуйте ещё раз."}).catch(() => {});
-  if (ok) await d.tg("editMessageReplyMarkup", {chat_id: d.owner, message_id: cq.message.message_id,
+  if (ok) await tgHere("editMessageReplyMarkup", {chat_id: chat, message_id: cq.message.message_id,
     reply_markup: {inline_keyboard: [[{text: `Ответ: ${answer}`, callback_data: "oa:done"}]]}}).catch(() => {});
   return true;
 }
