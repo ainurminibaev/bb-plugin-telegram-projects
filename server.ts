@@ -655,6 +655,8 @@ export default async function plugin(bb: BbPluginApi) {
   // One reading tool for the conversation archive. The calling conversation comes from the thread
   // BB names for this call; what it may read is decided in archive-access.ts.
   const archiveToolInput=archiveQuery.extend({
+    message:z.object({chat:z.number().int().optional(),message:z.number().int().positive()}).strict().optional()
+      .describe("One message by its number (С81): the text of the message someone answered to. Chat defaults to this conversation's chat."),
     file:z.object({chat:z.number().int(),message:z.number().int().positive()}).strict().optional()
       .describe("Download the file of one found message (chat and message from a search result). Returns a local path; open it with your usual tools."),
   }).strict();
@@ -670,6 +672,13 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const readable=readableChats(store,archive,bot,owner,conversation);
       const cfg=await settings.get();
+      if (args.message) {
+        const chat=args.message.chat ?? (conversation.kind==="group" ? conversation.chat : conversation.kind==="person" ? conversation.subject : owner);
+        if (!readable(chat)) throw Error("not_available_in_this_conversation");
+        const found=archive.message(bot,chat,args.message.message);
+        if (!found) throw Error("message_not_in_history");
+        return JSON.stringify(found);
+      }
       if (args.file) {
         if (!readable(args.file.chat)) throw Error("not_available_in_this_conversation");
         const f=archive.file(bot,args.file.chat,args.file.message);
@@ -2229,7 +2238,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name:"search-history",
         summary:"Read the conversation archive this conversation may see: words, author, period, last N, files; download a file",
-        usage:"bb telegram-projects search-history [words] [--author A] [--from YYYY-MM-DD[THH:MM]] [--to …] [--tz Europe/Moscow] [--last N] [--files] [--chat C] [--topic T] [--file CHAT:MESSAGE]",
+        usage:"bb telegram-projects search-history [words] [--author A] [--from YYYY-MM-DD[THH:MM]] [--to …] [--tz Europe/Moscow] [--last N] [--files] [--chat C] [--topic T] [--file CHAT:MESSAGE] [--message [CHAT:]MESSAGE]",
       },
       {
         name: "chat-forget",
@@ -2466,10 +2475,11 @@ export default async function plugin(bb: BbPluginApi) {
           const k=rest[i];
           if (k==="--files") a.files=true;
           else if (k==="--json") continue;
-          else if (["--author","--from","--to","--tz","--last","--chat","--topic","--file"].includes(k)) {
+          else if (["--author","--from","--to","--tz","--last","--chat","--topic","--file","--message"].includes(k)) {
             const v=rest[++i]; if (v===undefined) return {exitCode:2,stderr:"missing_value_for "+k};
             if (k==="--tz") a.timeZone=v; else if (k==="--last") a.last=Number(v); else if (k==="--topic") a.topic=Number(v);
             else if (k==="--file") { const [c,m]=v.split(":").map(Number); a.file={chat:c,message:m}; }
+            else if (k==="--message") { const parts=v.split(":").map(Number); a.message=parts.length>1 ? {chat:parts[0],message:parts[1]} : {message:parts[0]}; }
             else a[k.slice(2)]=v;
           } else words.push(k);
         }

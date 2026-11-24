@@ -140,7 +140,7 @@ test("only an authorized voice reply is transcribed and queued with the chosen T
  for(let i=0;i<2;i++)await processGroupInputs(store,sdk as any,8,5,()=>async()=>{throw Error("unexpected delivery");},
   new AbortController().signal,async v=>{assert.equal(v.fileId,"audio");calls++;return "убери третий пункт";});
  assert.equal(calls,1);assert.equal(sent.length,1);assert.equal(sent[0].threadId,"group");
- assert.match(sent[0].input[0].text,/first.pdf/);assert.match(sent[0].input[0].text,/"messageId":12/);
+ assert.match(sent[0].input[0].text,/first.pdf/);assert.match(sent[0].input[0].text,/№ 12 \(чат/);
  assert.match(sent[0].input[0].text,/убери третий пункт/);
 });
 

@@ -104,6 +104,16 @@ export function localSeconds(value:string,timeZone:string,end:boolean) {
 
 export const FILE_REMOVED="файл удалён по сроку";
 
+/** A stored message as the agent sees it in search results. */
+function toResult(r:any) {
+  return {chat:r.chat,chatTitle:r.chat_title,topic:r.topic,message:r.message,
+        date:new Date(r.date*1000).toISOString(),author:r.sender_name,authorId:r.sender,replyTo:r.reply_to??undefined,
+        album:r.album??undefined,file:r.file_id ? {kind:r.file_kind,name:r.file_name??undefined,size:r.file_size??undefined} :
+          r.file_removed ? {kind:r.file_kind,name:r.file_name??undefined,removed:FILE_REMOVED} : undefined,
+        text:String(r.text).slice(0,2000),transcript:r.transcript ? String(r.transcript).slice(0,2000) : undefined,
+        link:String(r.chat).startsWith("-100") && r.message>0 ? `https://t.me/c/${String(r.chat).slice(4)}/${r.topic ? r.topic+"/" : ""}${r.message}` : undefined};
+}
+
 export function openArchive(db:Database) {
   db.exec(`CREATE TABLE IF NOT EXISTS archive(
       bot INTEGER NOT NULL, chat INTEGER NOT NULL, topic INTEGER NOT NULL, message INTEGER NOT NULL, date INTEGER NOT NULL,
@@ -179,12 +189,12 @@ export function openArchive(db:Database) {
         return [w,cyrToLat(w),latToCyr(w)].some(v=>{const t=trigrams(v);return t.length && t.filter(g=>r.search.includes(g)).length>=Math.ceil(t.length*0.6);});
       });
       const found=(words.length ? rows.filter(matches) : rows).slice(0,q.last ?? 30);
-      return found.reverse().map(r=>({chat:r.chat,chatTitle:r.chat_title,topic:r.topic,message:r.message,
-        date:new Date(r.date*1000).toISOString(),author:r.sender_name,authorId:r.sender,replyTo:r.reply_to??undefined,
-        album:r.album??undefined,file:r.file_id ? {kind:r.file_kind,name:r.file_name??undefined,size:r.file_size??undefined} :
-          r.file_removed ? {kind:r.file_kind,name:r.file_name??undefined,removed:FILE_REMOVED} : undefined,
-        text:String(r.text).slice(0,2000),transcript:r.transcript ? String(r.transcript).slice(0,2000) : undefined,
-        link:String(r.chat).startsWith("-100") && r.message>0 ? `https://t.me/c/${String(r.chat).slice(4)}/${r.topic ? r.topic+"/" : ""}${r.message}` : undefined}));
+      return found.reverse().map(toResult);
+    },
+    /** С81: one message by its number, as a search result; the agent reads the text of a message it was answered to. */
+    message(bot:number,chat:number,message:number) {
+      const r=db.prepare("SELECT * FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as any;
+      return r ? toResult(r) : undefined;
     },
     /** Who sent a message, for С80 (own or someone else's). */
     sender(bot:number,chat:number,message:number) {

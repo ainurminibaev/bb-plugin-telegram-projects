@@ -136,3 +136,13 @@ test("a thread whose group conversation moved to another thread is told where it
   assert.match(text,/bb thread tell thr_new/);
   assert.equal(await movedConversationOf(store as any,threads as any,"thr_other"),undefined);
 });
+
+test("С81: one message by its number in one call",()=>{
+  const db=new Database(":memory:"); const a=openArchive(db as any);
+  a.record(BOT,msg(TEAM,ALICE,"Алиса","Согласуем макет к пятнице?"));
+  const id=a.find(BOT,()=>true,{last:1},"UTC")[0].message;
+  const one=a.message(BOT,TEAM,id)!;
+  assert.equal(one.text,"Согласуем макет к пятнице?");
+  assert.equal(one.author,"Алиса");
+  assert.equal(a.message(BOT,TEAM,id+1000),undefined);
+});

@@ -1079,9 +1079,9 @@ export class ChatBridge {
           const last = batch[batch.length-1];
           const gap = next.input.sentAt !== undefined && last.input.sentAt !== undefined
             ? (next.input.sentAt-last.input.sentAt)*1000 : next.at-last.at;
+          // П5: replies to different messages sent one after another are one task; each part keeps the number of
+          // the message it answers (С81), so the agent relates every answer to its own question.
           if (next.parts || next.input.albumId || next.input.ownerId !== r.input.ownerId || !isMessage(next.input) ||
-              (next.input.replyTo && next.input.replyTo !== r.input.replyTo &&
-               !batch.some(part => part.input.messageId === next.input.replyTo)) ||
               gap > collectionWindow(last.input,window) || batch.length >= 32) {
             boundary = true;
             break;
@@ -1737,8 +1737,9 @@ export class ChatBridge {
     );
   }
   private withReplyContext(input: ChatInput, text: string) {
+    // С81: the owner's answer names the message it answers; the agent reads its text by number when needed.
     if (!input.replyTo || !input.replyExcerpt) return text;
-    return text + "\n\n[Цитата из сообщения Telegram № " + input.replyTo + "]\n" + input.replyExcerpt;
+    return text + "\n\n[Ответ на сообщение Telegram № " + input.replyTo + "; текст: bb telegram-projects search-history --message " + input.replyTo + "]";
   }
   private async preparePart(input: ChatInput, b: Binding, text: string, batched: boolean, albumImages?:ImageAttachment[]): Promise<string | undefined> {
     if (input.voice) {

@@ -221,7 +221,8 @@ test("a forum root supplies no reply content to a command", () => {
     assert.equal(result.kind,"group");
     if (result.kind === "group") {
       assert.equal(result.text === command, replyId === 3);
-      assert.equal(result.text.includes("quoted"), replyId !== 3);
+      assert.equal(result.text.includes("quoted"), false, "С81: no quote text, only the message number");
+      assert.equal(result.text.includes("№ 2"), replyId !== 3);
     }
   }
 });

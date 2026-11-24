@@ -2244,7 +2244,8 @@ test("later reply carries the selected Telegram quote from its own topic", async
     if (routed.kind!=="chat") throw Error("missing input");
     await f.bridge.handle(routed.input);
     const task=f.calls.find(c=>c[0]==="spawn")[1].input[0].text;
-    assert.ok(task.includes("Запомни дату") && task.includes("№ 32") && task.endsWith("24 ноября"));
+    assert.ok(task.includes("Запомни дату") && task.includes("№ 32") && task.includes("search-history --message 32"));
+    assert.ok(!task.includes("Вебинар") && !task.includes("24 ноября"), "С81: no quote text");
     const other=routeUpdate({update_id:101,message:{...msg,message_thread_id:200}},OWNER_ID);
     assert.ok(other.kind==="chat" && !other.input.replyExcerpt);
   } finally {f.cleanup();}

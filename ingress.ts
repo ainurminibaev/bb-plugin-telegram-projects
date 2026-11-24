@@ -217,16 +217,17 @@ export function routeUpdate(
     const reply = m.reply_to_message;
     const sameTopic = reply?.chat?.id === group.chatId && (reply.message_thread_id ?? 0) === topicId;
     const repliedToMessage = sameTopic && reply.message_id !== topicId;
+    // С81: only which message it answers — the number, chat and topic; the agent reads the text itself when it needs it.
     const target = repliedToMessage && Number.isSafeInteger(reply.message_id) ? {
-      messageId:reply.message_id, fileName:reply.document?.file_name,
-      excerpt:String(reply.text ?? reply.caption ?? "").slice(0,600)
+      messageId:reply.message_id, chat:group.chatId, topic:topicId, ...(reply.document?.file_name && {fileName:reply.document.file_name})
     } : undefined;
     const canUseReply=sameTopicReply(m,group) && originalPerson(reply) &&
       (reply.from.id===from.id || (from.id===owner && group.includeTopicContext && !group.ownerSharedProject && originalPerson(m))) &&
       (group.acceptAfterSecond===undefined || (Number.isSafeInteger(reply.date) && reply.date>group.acceptAfterSecond));
     const examples=[groupExample(m), canUseReply ? groupExample(reply) : undefined]
       .filter((file):file is GroupExample=>!!file);
-    const prompt = target ? "Ответ на сообщение в этой теме: " + JSON.stringify(target) + "\n" + text : text;
+    const prompt = target ? "Ответ на сообщение № " + target.messageId + " (чат " + target.chat + ", тема " + target.topic + (target.fileName ? ", файл " + target.fileName : "") +
+      "; текст: bb telegram-projects search-history --message " + target.messageId + ")\n" + text : text;
     const senderName = [from.first_name, from.last_name].filter(Boolean).join(" ").slice(0, 64) || undefined;
     const ownerTopicText = from.id===owner && m.chat.type==="supergroup" && typeof m.text==="string" &&
       !m.forward_origin && !m.forward_date && !m.is_automatic_forward && !m.via_bot ? m.text : undefined;
