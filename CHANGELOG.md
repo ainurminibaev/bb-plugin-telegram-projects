@@ -1,3 +1,11 @@
+# 0.9.70
+
+- The final answer is hidden only by an exact repeat (words, without spacing, formatting or the answer marker) of a text the agent sent into the same chat and topic during this very turn; «Готово.» after «будет готово через минуту» is posted. A lost answer is worse than a double one.
+- С81: when the answered message is not in the conversation's memory, `search-history --message` gives Telegram's short quote (up to 200 characters, kept 30 days) marked as such, or says plainly that the text is unavailable and the agent should ask.
+- #5: a free answer in words to a form question reaches the agent (an option named in words is chosen; only free-text questions get the words).
+- A stopped run is said in two plain words under the request instead of a service line.
+- On the employee's pause (platform 0.4.7 pauseStatus) a waiting message shows only the «seen» sign; an older platform behaves as before.
+
 # 0.9.68
 
 - A thread deleted in BB while its topic stays bound no longer stops the scheduled-results pass (scheduled results of the other threads were not delivered; status showed «sync_failed»).
