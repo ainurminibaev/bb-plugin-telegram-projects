@@ -202,3 +202,13 @@ export function curatorTarget(curatorIds:number[],ask:boolean):{chat:number;topi
   if (!ask) return {error:"curator_only_with_a_question: куратору — вопрос с --ask; ответ вернётся сюда"};
   return {chat:curator,topic:0};
 }
+
+/**
+ * A file a group's or a person's conversation may send: received from Telegram in this very chat (its inbox and
+ * memory-download folders) or made by this conversation's own tasks (outputs/<task number>/). Paths are real paths.
+ */
+export function conversationMayAttach(real:string,where:{inboxRoots:string[];bot:number;chat:number;taskDirs:string[]}) {
+  const under=(dir:string)=>real.startsWith(dir.replace(/\/+$/,"")+"/");
+  return where.inboxRoots.some(root=>under(`${root}/groups/${where.bot}/${where.chat}`) || under(`${root}/archive/${where.bot}/${where.chat}`)) ||
+    where.taskDirs.some(under);
+}

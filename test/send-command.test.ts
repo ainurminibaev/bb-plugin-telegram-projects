@@ -1,7 +1,7 @@
 import {rememberGroupTitle} from "../thread-titles";
 import test from "node:test";
 import assert from "node:assert/strict";
-import {askNotes,ownerAskNotes,findGroup,findPerson,findTopic,openAsks,ownerReport,curatorTarget,rememberAsk,sendRefusal,sendTargets} from "../send-command";
+import {askNotes,ownerAskNotes,findGroup,findPerson,findTopic,openAsks,ownerReport,curatorTarget,conversationMayAttach,rememberAsk,sendRefusal,sendTargets} from "../send-command";
 import {setAccess} from "../rights";
 import {learnTopicName} from "../forum-defaults";
 import {migrateGroupChat} from "../group-migration";
@@ -173,4 +173,16 @@ test("agents-in-chats п.6: the curator is asked like the owner — a question o
   assert.match((curatorTarget([],true) as any).error,/^no_curator/);
   assert.match((curatorTarget([555],false) as any).error,/^curator_only_with_a_question/);
   assert.deepEqual(curatorTarget([555,777],true),{chat:555,topic:0});
+});
+
+test("a group's or person's conversation attaches only its chat's received files and its own tasks' results",()=>{
+  const where={inboxRoots:["/in"],bot:5,chat:-1001,taskDirs:["/dm/outputs/753a0807"]};
+  assert.equal(conversationMayAttach("/dm/outputs/753a0807/report.pdf",where),true,"own task's PDF");
+  assert.equal(conversationMayAttach("/in/groups/5/-1001/3/42/photo.jpg",where),true,"sent into this very group");
+  assert.equal(conversationMayAttach("/in/archive/5/-1001/77/doc.pdf",where),true,"downloaded from this chat's memory");
+  assert.equal(conversationMayAttach("/in/groups/5/7/0/7/owner.pdf",where),false,"the owner's private chat");
+  assert.equal(conversationMayAttach("/in/groups/5/-1002/0/9/other.pdf",where),false,"another group");
+  assert.equal(conversationMayAttach("/dm/outputs/security-audit/a.zip",where),false,"the shared outputs root");
+  assert.equal(conversationMayAttach("/dm/outputs/753a0807x/a.txt",where),false,"a lookalike folder");
+  assert.equal(conversationMayAttach("/etc/hostname",where),false);
 });

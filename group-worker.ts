@@ -78,7 +78,8 @@ const GROUP_TOOL_ITEMS=new Set(["commandExecution","mcpToolCall","toolCall","fil
 
 // Keep thread ownership after disconnect: history may already contain group messages.
 export const groupTaskNote = (taskId:string) =>
-  "Group taskId: " + taskId + ". Include this ID in internal approval requests to the owner coordinator.";
+  "Group taskId: " + taskId + ". Include this ID in internal approval requests to the owner coordinator. " +
+  "Файл для отправки в этот чат клади в outputs/" + taskId.slice(0,8) + "/ — оттуда он уходит и ссылкой в ответе, и командой send --file.";
 
 export function bindGroupTopic(store: Store, policy: GroupTopicPolicy, projectId: string) {
   const {chatId,topicId,threadId}=policy;

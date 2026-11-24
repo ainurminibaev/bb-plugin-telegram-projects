@@ -13,7 +13,7 @@ import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from 
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
 import {conversationOf,conversationOfThread,guardGroupMemory,movedConversationOf,movedConversationRefusal,readableChats} from "./archive-access";
-import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefusal,sendTargets,curatorTarget} from "./send-command";
+import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefusal,sendTargets,curatorTarget,conversationMayAttach} from "./send-command";
 import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
 import {sameWords,sentInTurnKey} from "./group-worker";
 import {maxAlbumItems,sendAlbum} from "./media-album";
@@ -76,7 +76,7 @@ import {
   type Events,
 } from "./events";
 import { makeChatControlPublisher, writeJsonAtomic } from "./json-file";
-import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomInt } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -1086,18 +1086,43 @@ export default async function plugin(bb: BbPluginApi) {
     return (await bb.sdk.plugins.callRpc({pluginId:"personal-assistant",method:"pauseStatus",input:{},
       outputSchema:z.object({paused:z.boolean(),since:z.number().nullable()})}).catch(()=>null))?.paused===true;
   }
-  /** Whether a file lies in the folder of the thread's environment or among files received from Telegram. */
-  async function insideConversationFolder(threadId:string,path:string) {
+  /** С: a group's or a person's conversation may attach only its own chat's received files and its own tasks' results. */
+  async function insideConversationFolder(threadId:string,path:string,caller:import("./archive-access").Conversation) {
     try {
+      const bot=botId(); if (!bot || caller.kind==="owner") return true;
+      const chat=caller.kind==="group" ? caller.chat : caller.subject;
       const real=await realpath(path);
-      const roots:string[]=[];
-      const thread=await bb.sdk.threads.get({threadId}) as {environmentId?:string|null};
-      if (thread?.environmentId) { const env=await bb.sdk.environments.get({environmentId:thread.environmentId}) as {path?:string}; if (env?.path) roots.push(env.path); }
       const cfg=await settings.get();
-      roots.push(...allInboxes(cfg.projectInboxRoots,cfg.telegramInboxRoot));
-      for (const root of roots) { const r=await realpath(root).catch(()=>""); if (r && (real===r || real.startsWith(r+"/"))) return true; }
-      return false;
+      const inboxRoots=(await Promise.all(allInboxes(cfg.projectInboxRoots,cfg.telegramInboxRoot).map(r=>realpath(r).catch(()=>"")))).filter(Boolean);
+      const policy=store.get<import("./ingress").GroupTopicPolicy>(`group:policy:${chat}:${caller.kind==="group" ? caller.topic ?? 0 : 0}`);
+      const threads=new Set([threadId,policy?.threadId].filter((t):t is string=>!!t));
+      const taskDirs:string[]=[];
+      for (const t of threads) {
+        const thread=await bb.sdk.threads.get({threadId:t}).catch(()=>undefined) as {environmentId?:string|null}|undefined;
+        const env=thread?.environmentId ? await bb.sdk.environments.get({environmentId:thread.environmentId}).catch(()=>undefined) as {path?:string}|undefined : undefined;
+        const root=env?.path ? await realpath(env.path).catch(()=>"") : "";
+        if (!root) continue;
+        for (const {key,value} of store.list<{threadId?:string}>("group:origin:"))
+          if (value.threadId && threads.has(value.threadId)) taskDirs.push(`${root}/outputs/${key.slice("group:origin:".length,"group:origin:".length+8)}`);
+      }
+      if (conversationMayAttach(real,{inboxRoots,bot,chat,taskDirs})) return true;
+      // A run without a task number (a schedule from the group): a file under outputs/ made during this very turn.
+      const started=(await bb.sdk.threads.events.list({threadId,order:"desc",limit:"1",types:["turn/started"]}))[0] as {createdAt?:number}|undefined;
+      const thread=await bb.sdk.threads.get({threadId}).catch(()=>undefined) as {environmentId?:string|null}|undefined;
+      const env=thread?.environmentId ? await bb.sdk.environments.get({environmentId:thread.environmentId}).catch(()=>undefined) as {path?:string}|undefined : undefined;
+      const outputs=env?.path ? (await realpath(env.path).catch(()=>""))+"/outputs/" : "";
+      if (!outputs || !real.startsWith(outputs) || !started?.createdAt) return false;
+      return (await stat(real)).mtimeMs>=started.createdAt-1000;
     } catch { return false; }
+  }
+  /** Where this conversation's file should go to be sent: the current task's folder, or outputs/ during this turn. */
+  async function sendableDir(threadId:string) {
+    const thread=await bb.sdk.threads.get({threadId}).catch(()=>undefined) as {environmentId?:string|null}|undefined;
+    const env=thread?.environmentId ? await bb.sdk.environments.get({environmentId:thread.environmentId}).catch(()=>undefined) as {path?:string}|undefined : undefined;
+    const base=(env?.path ?? "")+"/outputs/";
+    const job=store.list<{route?:{threadId?:string};taskId?:string;state?:string}>("group:in:").map(r=>r.value)
+      .find(j=>j.route?.threadId===threadId && j.taskId && j.state==="submitted");
+    return job?.taskId ? base+job.taskId.slice(0,8)+"/" : base+" (новый файл, созданный в этом ходе)";
   }
   async function turnRulesOf(projectId:string) {
     return bb.sdk.plugins.callRpc({pluginId:"personal-assistant",method:"turnRules",input:{projectId},
@@ -2683,9 +2708,8 @@ export default async function plugin(bb: BbPluginApi) {
           // A group's or a person's conversation sends only files of its own folder (or received from Telegram):
           // never the owner's or another conversation's files.
           if (caller && caller.kind!=="owner") {
-            const outside=[opt["text-file"],...files,opt.file].filter((p):p is string=>!!p);
-            for (const path of outside) if (!await insideConversationFolder(ctx.threadId,path))
-              return {exitCode:1,stderr:"file_outside_this_conversation: отправлять можно только файлы из папки этого разговора — "+path};
+            for (const path of new Set([...files,opt.file].filter((p):p is string=>!!p))) if (!await insideConversationFolder(ctx.threadId,path,caller))
+              return {exitCode:1,stderr:"file_outside_this_conversation: этот файл ("+path+") не из этого разговора. Скопируй его в "+await sendableDir(ctx.threadId)+" и сразу отправь оттуда той же командой."};
           }
           const text=opt["text-file"] ? await readFile(opt["text-file"],"utf8") : opt.text;
           let file:import("./outbound-message").OutboundFile|undefined;
