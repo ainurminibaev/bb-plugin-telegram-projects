@@ -30,7 +30,7 @@ const mention = (bot: number, rest: string) => {
 /** One store per agent (each has its own bridge); the passport says who leads shared chats by default. */
 function agent(bot: number, leadsByDefault?: boolean) {
   const store = memoryStore();
-  if (leadsByDefault !== undefined) store.put(leadsByDefaultKey, leadsByDefault);
+  if (leadsByDefault !== undefined) store.put(leadsByDefaultKey, leadsByDefault ? "yes" : "no");
   for (const other of [A, B, C]) noteAgentInChat(store as any, bot, CHAT, other, [A, B, C], usernames[other]);
   return { bot, store, policy: (topic = TOPIC) => withTopicMode(store as any, { ...base(bot), topicId: topic } as any, [A, B, C]) };
 }
@@ -133,4 +133,19 @@ test("a new topic: the chat's leader picks it up as before, another agent at the
 test("naming a leader is refused in words while the organization's bots do not see each other", () => {
   assert.match(leadRefusal([]) ?? "", /Сначала включите общение агентов/);
   assert.equal(leadRefusal([A, B]), undefined);
+});
+
+test("no word from the passport yet (auto): one agent leads as before; with the organization's bots listed — nobody answers twice", () => {
+  const alone = memoryStore();
+  alone.put(leadsByDefaultKey, "auto");
+  assert.equal(leadsChat(alone as any, A, CHAT), true, "no other bots: as before");
+  for (const bot of [A, B]) {
+    const st = memoryStore();
+    st.put(leadsByDefaultKey, "auto");
+    st.put(agentBotsKey, [A, B]);
+    assert.equal(leadsChat(st as any, bot, CHAT), false, "two agents without the passport's word: by mention, " + bot);
+  }
+  const named = memoryStore();
+  named.put(leadsByDefaultKey, "yes"); named.put(agentBotsKey, [A, B]);
+  assert.equal(leadsChat(named as any, A, CHAT), true, "the passport's yes");
 });

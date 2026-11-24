@@ -1,6 +1,8 @@
 // Agents in shared chats (agents-in-chats.md): the chat's default leader is set, not guessed. An employee whose
-// passport says «leads shared chats by default» (setting leadsChatsByDefault; absent — yes, as before) leads every
-// topic that has no leader of its own; one that does not answers by a mention. A topic's own leader, or another chat
+// passport says «leads shared chats by default» (setting leadsChatsByDefault: yes / no / auto) leads every topic that
+// has no leader of its own; one that does not answers by a mention. auto (no word from the passport yet): yes while
+// the organization has no other bots in this bridge's list — one agent, as before — and no once it has, so two agents
+// without the passport's word never both answer the owner. A topic's own leader, or another chat
 // leader, is named only by the owner or a curator (topic-mode), with a line in the chat the colleagues' bridges read.
 import type {Store} from "./model";
 import {directNameAddress,type GroupTopicPolicy} from "./ingress";
@@ -13,19 +15,20 @@ export const chatAgentsKey=(bot:number,chat:number)=>`chat:agents:${bot}:${chat}
 /** The agent's mode for the whole chat: the chat's leader leads every topic without a leader of its own, new ones too. */
 export const chatModeKey=(bot:number,chat:number)=>`chat:mode:${bot}:${chat}`;
 
-/**
- * The chat's default leader is the agent that was in the chat before the other agents of the organization: when the
- * first colleague shows up, an agent that already talks in this chat (has a bound topic) records itself as its leader.
- * For people nothing changes; the newcomer waits for mentions. The owner may name another leader (topic-mode --chat).
- */
-/** The installer's word from the passport: this agent leads shared chats by default (absent — yes, as before). */
+/** The installer's word from the passport: "yes", "no" or "auto" (none yet). */
 export const leadsByDefaultKey="rights:leads-chats-default";
-export const leadsByDefault=(store:Store)=>store.get<boolean>(leadsByDefaultKey)!==false;
+export function leadsByDefault(store:Store,bot:number) {
+  const word=store.get<unknown>(leadsByDefaultKey);
+  if (word==="yes" || word===true) return true;
+  if (word==="no" || word===false) return false;
+  const organization=store.get<number[]>("rights:agent-bots") ?? [];
+  return !organization.some(id=>id!==bot);
+}
 
 /** Whether this agent leads the chat: a choice made for this chat, else the passport's default. */
 export function leadsChat(store:Store,bot:number,chat:number) {
   const record=store.get<TopicModeRecord>(chatModeKey(bot,chat));
-  return record ? record.mode==="lead" : leadsByDefault(store);
+  return record ? record.mode==="lead" : leadsByDefault(store,bot);
 }
 /** Curators of this agent (people who may assign it to lead a topic): from the employee's passport, set by setup. */
 export const curatorsKey="rights:curators";
@@ -46,7 +49,7 @@ export function otherAgentsInChat(store:Store,bot:number,chat:number,organizatio
   return (store.get<number[]>(chatAgentsKey(bot,chat)) ?? []).filter(id=>id!==bot && organization.includes(id));
 }
 
-/** The mode of this agent in a topic: an explicit choice, or by default — leads when it is the only agent here. */
+/** The mode of this agent in a topic: its own leader named for the topic, else whether it leads the chat. */
 export function topicMode(store:Store,bot:number,chat:number,topic:number,_organization:number[]=[]) {
   const record=store.get<TopicModeRecord>(topicModeKey(bot,chat,topic));
   if (record?.mode==="lead" || record?.mode==="mention") return {mode:record.mode,explicit:true,record};

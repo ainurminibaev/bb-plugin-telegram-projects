@@ -371,7 +371,7 @@ export default async function plugin(bb: BbPluginApi) {
     employeePrivateRequests:{type:"boolean",label:"Запросы доступа в личке сотрудника",default:false},
     agentBots:{type:"string",label:"Боты агентов организации (Telegram ID через запятую): их сообщения в группах принимаются",default:""},
     agentChainLimit:{type:"number",label:"Сколько реплик агентов подряд без человека допустимо",default:12},
-    leadsChatsByDefault:{type:"boolean",label:"Ведёт общие чаты по умолчанию (из паспорта сотрудника): отвечает владельцу без отметки во всех темах без своего ведущего",default:true},
+    leadsChatsByDefault:{type:"string",label:"Ведёт общие чаты по умолчанию (из паспорта сотрудника): yes — отвечает владельцу без отметки во всех темах без своего ведущего; no — по отметке; auto — yes, пока в списке нет других ботов организации",default:"auto"},
     curators:{type:"string",label:"Кураторы этого агента (Telegram ID через запятую): вместе с владельцем назначают его ведущим темы",default:""},
     isolatedFileHost:{type:"string",label:"Машина с рабочими файлами группового исполнителя",default:""},
     agencyEnabled: {type:"boolean",label:"Уведомления из Агентства",default:false},
@@ -2545,7 +2545,9 @@ export default async function plugin(bb: BbPluginApi) {
         } catch (error) {
           return {exitCode:0,stdout:JSON.stringify({mode:action,changed:true,announced:false,reason:String((error as Error).message)})};
         }
-        return {exitCode:0,stdout:JSON.stringify({mode:action,changed:true,announced:true})};
+        return {exitCode:0,stdout:JSON.stringify({mode:action,changed:true,announced:true,
+          ...(action==="lead" && otherAgentsInChat(store,bot,place.chat,organization).length && {note:
+            "Прежний ведущий уступит, когда его мост увидит эту строку. Проверь: попроси владельца отметить прежнего ведущего с вопросом «кто ведёт эту тему?» — он должен ответить «не я»."})})};
       }
       if(argv[0]==="delete"){
         // С80: bb telegram-projects delete --message N — a message of this conversation's own chat.
@@ -3155,7 +3157,7 @@ export default async function plugin(bb: BbPluginApi) {
         store.put(installKindKey, cfg.installKind);
         store.put(agentBotsKey, String(cfg.agentBots ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
         store.put("rights:agent-chain-limit", Math.max(1, Math.min(50, Number(cfg.agentChainLimit) || 12)));
-        store.put(leadsByDefaultKey, cfg.leadsChatsByDefault !== false);
+        store.put(leadsByDefaultKey, ["yes","no"].includes(String(cfg.leadsChatsByDefault)) ? String(cfg.leadsChatsByDefault) : "auto");
         store.put(curatorsKey, String(cfg.curators ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
         consentTtlMs = Math.max(1, Number(cfg.consentMinutes) || 30) * 60_000;
         if (botId() && ownerId()) migrateLegacyRights(store, botId()!, profilePeople());
