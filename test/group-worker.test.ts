@@ -5,7 +5,7 @@ import {saveLocalTelegramFile} from "../telegram-files";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {acceptGroupUpdate} from "../ingress";
-import {bindGroupTopic,groupCliRestricted,processGroupInputs,sentInTurnKey} from "../group-worker";
+import {bindGroupTopic,groupCliRestricted,processGroupInputs,sameWords,sentInTurnKey} from "../group-worker";
 
 const pixel=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=","base64");
 const image={type:"image" as const,url:"data:image/png;base64,"+pixel.toString("base64")};
@@ -571,7 +571,7 @@ test("0.9.66: the agent already wrote into this topic during the turn — the fi
    // A limit-guard notice joins the running turn (24.11): the task must still see its end.
    event("client/turn/requested",{requestId:"guard",originPluginId:"limit-guard",initiator:"user",senderThreadId:null,input:[]});
    event("turn/input/accepted",{clientRequestId:"guard"});
-   if (wrote) { store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now()}); event("item/completed",{item:{type:"agentMessage",text:"Готово, написал выше."}}); }
+   if (wrote) { store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),texts:[sameWords("**Готово**, написал выше.")]}); event("item/completed",{item:{type:"agentMessage",text:"Готово, написал выше."}}); }
    event("turn/completed",{status:"completed"});
  }}};
  const sent:any[]=[];
@@ -579,5 +579,33 @@ test("0.9.66: the agent already wrote into this topic during the turn — the fi
  await tick(); await tick();
  assert.equal(rows.get("group:receipt:5:8")?.state,"done",wrote ? "wrote" : "silent");
  assert.equal(sent.filter(([m])=>m==="sendMessage").length,0,"nothing more is posted");
+ }
+});
+
+test("0.9.67: an interim message the agent sent («взял») never hides the turn's real result; a failed turn says so",async()=>{
+ for (const status of ["completed","failed"]) {
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"}},7,5));
+ const events:any[]=[];
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+ send:async(q:any)=>{
+   const event=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"g"}});
+   event("client/turn/requested",{requestId:"g",originPluginId:"telegram-projects",input:q.input});
+   event("turn/input/accepted",{clientRequestId:"g"});
+   store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),texts:[sameWords("Взял, займёт 10 минут.")]});
+   if (status==="completed") event("item/completed",{item:{type:"agentMessage",text:"Итог: отчёт готов."}});
+   event("turn/completed",{status});
+ }}};
+ const sent:any[]=[];
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{if(_m==="setMessageReaction")return {} as T;sent.push([_m,p]);return {} as T},new AbortController().signal);
+ await tick(); await tick();
+ const texts=sent.filter(([m])=>m==="sendMessage").map(([,p])=>p.text);
+ assert.equal(texts.length,1,status);
+ assert.match(texts[0],status==="completed" ? /Итог: отчёт готов/ : /Не получилось сделать/);
  }
 });

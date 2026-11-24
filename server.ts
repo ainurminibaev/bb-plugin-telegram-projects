@@ -12,7 +12,7 @@ import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} fro
 import {conversationOf,conversationOfThread,guardGroupMemory,movedConversationOf,movedConversationRefusal,readableChats} from "./archive-access";
 import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefusal,sendTargets} from "./send-command";
 import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
-import {sentInTurnKey} from "./group-worker";
+import {sameWords,sentInTurnKey} from "./group-worker";
 import {maxAlbumItems,sendAlbum} from "./media-album";
 import {renderTelegramParts} from "./telegram-ux";
 import {acceptOwnerAskCallback,answerTurnText,askButtons,cleanQuestion,forwardOriginal,ownerQuestion,queueAnswerTurn,rememberAskMessage,turnMessageKey} from "./owner-ask";
@@ -2530,8 +2530,12 @@ export default async function plugin(bb: BbPluginApi) {
           if (ownerAsk && remembered && messageId) rememberAskMessage(store,bot,messageId,remembered);
           if (opt.answer) closeAsk(store,bot,opt.answer);
           // A group conversation wrote into its own chat during the turn: the turn's final answer is not posted again.
-          if (caller?.kind==="group" && caller.chat===target.chat && (caller.topic ?? 0)===target.topic && !ask)
-            store.put(sentInTurnKey(ctx.threadId),{chat:target.chat,topic:target.topic,at:Date.now()});
+          if (caller?.kind==="group" && caller.chat===target.chat && (caller.topic ?? 0)===target.topic && !ask && text?.trim()) {
+            const prev=store.get<{chat:number;topic:number;at:number;texts?:string[]}>(sentInTurnKey(ctx.threadId));
+            const fresh=prev && prev.chat===target.chat && prev.topic===target.topic && Date.now()-prev.at<6*3600_000;
+            store.put(sentInTurnKey(ctx.threadId),{chat:target.chat,topic:target.topic,at:Date.now(),
+              texts:[...(fresh ? prev.texts ?? [] : []),sameWords(text)].slice(-10)});
+          }
           return {exitCode:0,stdout:JSON.stringify({sent:true,messageId,...(remembered && {ask:remembered})})};
         } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
       }

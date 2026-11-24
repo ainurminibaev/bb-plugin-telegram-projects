@@ -29,6 +29,8 @@ type GroupInput = Extract<Ingress,{kind:"group"}>;
 export const LOST_SUBMIT_MS=15*60_000;
 /** The agent's own message into its conversation's chat during a turn (send): the final answer is then not repeated. */
 export const sentInTurnKey=(threadId:string)=>"group:sent-in-turn:"+threadId;
+/** Text compared by its words only, so formatting and spacing do not make a repeat look new. */
+export const sameWords=(text:string)=>text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu," ").trim();
 /**
  * С50: slow work (a voice transcription, a file download) started once per key and taken when ready. Returns
  * undefined while it still runs, so the worker goes on with the other chats instead of waiting.
@@ -510,10 +512,14 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
               if (own || !isBusyAnswer(text)) {job.turnId=turn; job.answer=own ?? text;}
             }
             if (e.type==="turn/completed") {
-              const wrote=store.get<{chat:number;topic:number;at:number}>(sentInTurnKey(r.threadId));
-              const alreadySaid=!!wrote && wrote.chat===r.chatId && wrote.topic===(r.topicId ?? 0) && wrote.at>=(job.submittedAt ?? 0);
-              if (alreadySaid) job.answer=NO_REPLY;   // the agent already wrote here in this turn: no second copy
-              else if (e.data.status!=="completed") {job.answer="Не получилось сделать — повторите или уточните, пожалуйста."; job.stage="failed";}
+              const wrote=store.get<{chat:number;topic:number;at:number;texts?:string[]}>(sentInTurnKey(r.threadId));
+              const here=!!wrote && wrote.chat===r.chatId && wrote.topic===(r.topicId ?? 0) && wrote.at>=(job.submittedAt ?? 0);
+              const final=job.turnId===turn ? sameWords(stripTelegramMarkers(job.answer ?? "")) : "";
+              // The final answer repeats what the agent already sent here in this turn: no second copy. An interim
+              // message («взял, займёт 10 минут») never hides the real result.
+              const repeated=here && !!final && (wrote.texts ?? []).some(t=>t===final || t.includes(final));
+              if (e.data.status!=="completed") {job.answer="Не получилось сделать — повторите или уточните, пожалуйста."; job.stage="failed";}
+              else if (repeated) job.answer=NO_REPLY;
               else if (job.turnId!==turn || !job.answer?.trim()) job.answer=NO_REPLY;   // С79: no service line; the reaction stays
               job.state="ready";
             }
