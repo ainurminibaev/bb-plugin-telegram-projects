@@ -2671,6 +2671,22 @@ export class ChatBridge {
         return;
       }
     }
+    // #5: a free answer to a form question reaches the agent: an option named in words is chosen; otherwise the words
+    // go as the answer of every question (the agent reads them). Only a non-question interaction needs a button.
+    if (i.payload.kind === "user_question" &&
+        (i.payload.questions.length !== 1 || !i.payload.questions[0].allowFreeText)) {
+      const said = text.trim().toLowerCase();
+      const answers = Object.fromEntries(i.payload.questions.map((qq: any) => {
+        const option = (qq.options ?? []).find((o: any) => [o.label, o.value].some(v => String(v ?? "").trim().toLowerCase() === said));
+        return [qq.id, option ? {selected: [option.value]} : {selected: [], freeText: text}];
+      }));
+      try {
+        await this.d.sdk.threads.interactions.resolve({threadId: q.threadId, interactionId: q.interactionId,
+          resolution: {kind: "user_answer", answers} as never});
+        this.enqueue(b.topicId, this.tr("Ответ принят."));
+        return;
+      } catch { /* the form does not take free words: ask for a button below */ }
+    }
     if (
       i.payload.kind !== "user_question" ||
       i.payload.questions.length !== 1 ||

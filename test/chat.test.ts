@@ -3387,3 +3387,31 @@ test("С79: a message BB queues behind a busy turn gets no service line in the c
     assert.equal(f.sent.filter(x=>/очеред|BB/.test(x.text ?? "")).length,0);
   } finally {f.cleanup();}
 });
+
+test("#5: a free answer to a form question reaches the agent; an option named in words is chosen", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn('question-turn');
+    const q = {
+      id: "q", turnId: "question-turn", status: "pending",
+      payload: {kind: "user_question", questions: [
+        {id: "q1", prompt: "Когда созвон?", allowFreeText: false, multiSelect: false, options: [{label: "До обеда", value: "am"}, {label: "После обеда", value: "pm"}]},
+        {id: "q2", prompt: "Кого позвать?", allowFreeText: false, multiSelect: false, options: [{label: "Анну", value: "anna"}]},
+      ]},
+    };
+    f.setQuestions([q]);
+    await f.bridge.observe();
+    await f.bridge.flush();
+    const record = f.store.list<any>("chat:question:")[0];
+    assert.ok(record);
+    const replyTo = Number(record.key.split(":").at(-1));
+    await f.bridge.handle({ ...f.input("Давай завтра в три, Анну не зовём"), replyTo });
+    const resolved = f.calls.filter((x) => x[0] === "resolve");
+    assert.equal(resolved.length, 1);
+    assert.equal(resolved[0][1].resolution.answers.q1.freeText, "Давай завтра в три, Анну не зовём");
+    assert.ok(!f.sent.some((m: any) => /выбери кнопку/.test(m.text ?? "")));
+  } finally {
+    f.cleanup();
+  }
+});
