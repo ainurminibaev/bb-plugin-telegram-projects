@@ -15,6 +15,7 @@ export type ModelSdk = {
     get(args: { threadId: string }): Promise<Thread>;
     update(args: { threadId: string; model: string }): Promise<unknown>;
     spawn(args: Record<string, unknown>): Promise<{ id: string; projectId: string }>;
+    events?: { list(args: Record<string, unknown>): Promise<readonly { type: string; data: any }[]> };
   };
   providers: {
     list(args: { environmentId: string }): Promise<{ id: string; displayName?: string }[]>;
@@ -105,14 +106,21 @@ export async function groupModelCommand(o: { store: Store; sdk: ModelSdk; owner:
       await send(`Нет такой модели у ${said(asProvider, asProvider.id)}. Есть: ${list.slice(0, 20).map(x => x.model).join(", ")}`);
       return true;
     }
+    // С71: the bridge itself hands the new executor the former conversation's recent answers (a guest thread may not
+    // read a neighbouring thread), so it continues the open tasks.
+    const recent = o.sdk.threads.events ? (await o.sdk.threads.events.list({ threadId: thread.id, order: "desc", limit: "300",
+      types: ["item/completed"] }).catch(() => [])).flatMap(e => e.type === "item/completed" && e.data?.item?.type === "agentMessage" &&
+        !e.data.item.parentToolCallId && typeof e.data.item.text === "string" ? [e.data.item.text.trim().slice(0, 600)] : [])
+      .filter(t => t && t !== "NO_REPLY").slice(0, 8).reverse() : [];
     const child = await o.sdk.threads.spawn({ projectId: thread.projectId, visibility: "visible",
       environment: { type: "reuse", environmentId }, providerId: asProvider.id, ...(model && { model }),
       permissionMode: "accept-edits",
       input: [{ type: "text", visibility: "agent-only", mentions: [],
         // С71: the new executor continues the conversation — it reads the former thread itself (BB's own thread log).
-        text: "This Telegram topic conversation moved to you from another provider. The former conversation is thread " + thread.id +
-          ": read its recent turns with `bb thread log " + thread.id + " --limit 20` and note the open tasks and promises, " +
-          "so you continue them. Do not write to the chat now; reply NO_REPLY." }] });
+        text: "This Telegram topic conversation moved to you from another provider (former thread " + thread.id + "). " +
+          (recent.length ? "Its latest answers, oldest first — note the open tasks and promises and continue them:\n\n" +
+            recent.map((t, i) => (i + 1) + ". " + t).join("\n\n") + "\n\n" : "") +
+          "Earlier messages of the chat: `bb telegram-projects search-history`. Do not write to the chat now; reply NO_REPLY." }] });
     if (child.projectId !== thread.projectId) throw Error("thread_unconfirmed");
     const current = o.store.get<GroupTopicPolicy>(`group:policy:${m.chat.id}:${topic}`);
     if (current?.threadId !== policy.threadId || current.revision !== policy.revision) {

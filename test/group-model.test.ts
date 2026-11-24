@@ -17,7 +17,9 @@ function setup(status="idle") {
     t9:{id:"t9",projectId:"proj",environmentId:"env",providerId:"codex",model:"gpt-6.2-astra",status:"idle"}};
   const sent:string[]=[], updated:any[]=[], spawned:any[]=[];
   const sdk={threads:{get:async({threadId}:any)=>threads[threadId],update:async(a:any)=>{updated.push(a);threads[a.threadId].model=a.model;},
-      spawn:async(a:any)=>{spawned.push(a);return {id:"new-thread",projectId:a.projectId};}},
+      spawn:async(a:any)=>{spawned.push(a);return {id:"new-thread",projectId:a.projectId};},
+      events:{list:async()=>[{type:"item/completed",data:{item:{type:"agentMessage",text:"Обещал прислать смету к пятнице."}}},
+        {type:"item/completed",data:{item:{type:"agentMessage",text:"NO_REPLY"}}}]}},
     providers:{list:async()=>[{id:"codex",displayName:"Codex"},{id:"claude-code",displayName:"Claude Code"}],
       models:async({providerId}:any)=>({models:providerId==="codex" ? [{model:"gpt-6.2-astra"},{model:"gpt-6.2-sol"}] : [{model:"claude-opus-5-5"}]})}};
   const msg=(text:string,extra:object={})=>({update_id:1,message:{message_id:1,chat:{id:chat,type:"supergroup",is_forum:true},
@@ -54,7 +56,9 @@ test("С71: another provider moves this topic to a new thread of it; other topic
   assert.equal(spawned[0].model,"claude-opus-5-5");
   assert.deepEqual(spawned[0].environment,{type:"reuse",environmentId:"env"});
   // The new executor reads the former conversation itself and continues its open tasks.
-  assert.match(spawned[0].input[0].text,/bb thread log t4 --limit 20/);
+  assert.match(spawned[0].input[0].text,/former thread t4/);
+  assert.match(spawned[0].input[0].text,/смету к пятнице/);
+  assert.doesNotMatch(spawned[0].input[0].text,/1\. NO_REPLY/);
   assert.equal(store.get<any>(`group:policy:${chat}:4`).threadId,"new-thread");
   assert.equal(store.get<any>(`group:policy:${chat}:9`).threadId,"t9");
   assert.match(sent.at(-1)!,/новый разговор/);

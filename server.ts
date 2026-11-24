@@ -2354,7 +2354,9 @@ export default async function plugin(bb: BbPluginApi) {
         const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
         if (!caller) return {exitCode:1,stderr:"edit_only_from_a_telegram_conversation: править можно только в чате своего разговора"};
         const chat=caller.kind==="group" ? caller.chat : caller.kind==="person" ? caller.subject : owner;
-        if (archive?.sender(bot,chat,message)!==bot) return {exitCode:1,stderr:"edit_own_only: править можно только свои сообщения бота в этом чате"};
+        const stored=archive?.message(bot,chat,message);
+        if (archive?.sender(bot,chat,message)!==bot || (caller.kind==="group" && caller.topic!==undefined && stored && stored.topic!==caller.topic))
+          return {exitCode:1,stderr:"edit_own_only: править можно только свои сообщения бота в чате и теме этого разговора"};
         try {
           const tg=telegram(botToken,lifetime.signal,15_000,()=>chat,apiRoot);
           const parts=renderTelegramParts(body);
@@ -2521,9 +2523,16 @@ export default async function plugin(bb: BbPluginApi) {
             if (text?.trim()) messageId=(await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text})).at(-1);
             for (let i=0;i<media.length;i+=maxAlbumItems) {
               const chunk=media.slice(i,i+maxAlbumItems);
-              const first=chunk.length>1 ? (await sendAlbum(tg,{chatId:target.chat,topicId:target.topic,replyTo:replyTo ?? 0},chunk)).messageIds[0]
-                : await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,file:{name:chunk[0].name!,kind:"document",data:chunk[0].data as Blob,sha256:"",bytes:(chunk[0].data as Blob).size},replyTo});
-              messageId??=first;
+              try {
+                const first=chunk.length>1 ? (await sendAlbum(tg,{chatId:target.chat,topicId:target.topic,replyTo:replyTo ?? 0},chunk)).messageIds[0]
+                  : await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,file:{name:chunk[0].name!,kind:"document",data:chunk[0].data as Blob,sha256:"",bytes:(chunk[0].data as Blob).size},replyTo});
+                messageId??=first;
+              } catch (error) {
+                // Part went out: say exactly what, so only the rest is sent again (a full repeat would double it).
+                const sentText=text?.trim() ? "текст и " : "";
+                return {exitCode:1,stderr:`partial_send: ушли ${sentText}файлы 1–${i} из ${files.length}; не ушли начиная с ${files[i]} (${String((error as Error).message)}). `+
+                  `Повтори отправку только оставшихся файлов (${files.slice(i).join(" ")}), без текста.`};
+              }
             }
           } else messageId=file || !text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file,replyTo})
             : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text,...(buttons && {replyMarkup:buttons})})).at(-1);
