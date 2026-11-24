@@ -9,7 +9,7 @@ import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from 
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
 import {conversationOf,conversationOfThread,guardGroupMemory,movedConversationOf,movedConversationRefusal,readableChats} from "./archive-access";
-import {closeAsk,findGroup,findPerson,findTopic,rememberAsk,sendRefusal,sendTargets} from "./send-command";
+import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefusal,sendTargets} from "./send-command";
 import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
 import {acceptOwnerAskCallback,answerTurnText,askButtons,cleanQuestion,forwardOriginal,ownerQuestion,queueAnswerTurn,rememberAskMessage,turnMessageKey} from "./owner-ask";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
@@ -2350,7 +2350,13 @@ export default async function plugin(bb: BbPluginApi) {
             delete opt["text-file"];
             if (ask) ownerAsk={thread:ctx.threadId};
           }
-          if (target.chat===owner && caller && caller.kind!=="owner" && !opt.answer && (opt.text || opt["text-file"])) {
+          // A group's conversation reports to the owner (no question): text only, marked with the place, not too often.
+          if (target.chat===owner && caller?.kind==="group" && !ask && !opt.answer) {
+            const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
+            const report=ownerReport(store,bot,caller,body,!!opt.file);
+            if ("error" in report) return {exitCode:1,stderr:report.error};
+            opt.text=report.text; delete opt["text-file"]; delete opt["reply-to"];
+          } else if (target.chat===owner && caller && caller.kind!=="owner" && !opt.answer && (opt.text || opt["text-file"])) {
             const place=caller?.kind==="person" ? "лички «"+(accessList(store,bot).find(p=>p.id===caller.subject)?.name ?? caller.subject)+"»"
               : "группы «"+(store.get<{title?:string}>(`visibility:${bot}:group:${caller?.kind==="group" ? caller.chat : 0}`)?.title ?? "группа")+"»";
             const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";

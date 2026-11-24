@@ -1,7 +1,7 @@
 import {rememberGroupTitle} from "../thread-titles";
 import test from "node:test";
 import assert from "node:assert/strict";
-import {askNotes,ownerAskNotes,findGroup,findPerson,findTopic,openAsks,rememberAsk,sendRefusal,sendTargets} from "../send-command";
+import {askNotes,ownerAskNotes,findGroup,findPerson,findTopic,openAsks,ownerReport,rememberAsk,sendRefusal,sendTargets} from "../send-command";
 import {setAccess} from "../rights";
 import {learnTopicName} from "../forum-defaults";
 import {migrateGroupChat} from "../group-migration";
@@ -44,8 +44,10 @@ test("who may send where follows the calling conversation",()=>{
   assert.equal(sendRefusal(s,BOT,OWNER,undefined,{chat:OWNER,topic:0},groupsOf),undefined);
   assert.match(sendRefusal(s,BOT,OWNER,undefined,{chat:ALICE,topic:0},groupsOf)!,/send_only_from_a_telegram_conversation/);
   assert.match(sendRefusal(s,BOT,OWNER,undefined,{chat:TEAM,topic:0},groupsOf)!,/send_only_from_a_telegram_conversation/);
-  // С43: any conversation asks the owner only with a question whose answer comes back.
-  assert.match(no({kind:"group",chat:TEAM},{chat:OWNER,topic:0})!,/owner_only_with_a_question: send --person owner --ask/);
+  // С43: a person's conversation asks the owner only with a question whose answer comes back;
+  // a group's conversation may also send the owner a short report (text only, marked, not too often — server).
+  assert.equal(no({kind:"group",chat:TEAM},{chat:OWNER,topic:0}),undefined);
+  assert.match(no({kind:"person",subject:ALICE},{chat:OWNER,topic:0})!,/owner_only_with_a_question: send --person owner --ask/);
   assert.equal(sendRefusal(s,BOT,OWNER,{kind:"person",subject:ALICE},{chat:OWNER,topic:0},groupsOf,undefined,undefined,true),undefined);
   assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OWNER,topic:0},groupsOf,undefined,ALICE,true),undefined);
   assert.match(no({kind:"group",chat:TEAM},{chat:-1009,topic:0})!,/bot_is_not_in_this_group/);
@@ -145,4 +147,14 @@ test("General of a forum is a send target like a topic; a group without topics h
   assert.equal(rememberGroupTitle(s,BOT,{message:{chat:{id:TEAM,type:"supergroup",title:"Новый штурвал"},text:"hi"}}),TEAM);
   assert.equal(findGroup(s,BOT,"новый штурвал"),TEAM);
   assert.equal(rememberGroupTitle(s,BOT,{message:{chat:{id:TEAM,type:"supergroup",title:"Новый штурвал"},text:"hi"}}),undefined);
+});
+
+test("a group's report to the owner: text only, marked with the group, one per few minutes",()=>{
+  const s=setup() as any;
+  s.put(`visibility:${BOT}:group:${TEAM}`,{chat:TEAM,title:"Команда"});
+  const r=ownerReport(s,BOT,{kind:"group",chat:TEAM},"Готово: отчёт отправлен.",false,1_000_000) as {text:string};
+  assert.equal(r.text,"Из группы «Команда»:\nГотово: отчёт отправлен.");
+  assert.match((ownerReport(s,BOT,{kind:"group",chat:TEAM},"ещё",false,1_060_000) as any).error,/owner_report_too_soon/);
+  assert.ok("text" in ownerReport(s,BOT,{kind:"group",chat:TEAM},"ещё",false,1_000_000+3*60_000));
+  assert.match((ownerReport(s,BOT,{kind:"group",chat:TEAM,topic:5},"файл",true) as any).error,/owner_report_text_only/);
 });

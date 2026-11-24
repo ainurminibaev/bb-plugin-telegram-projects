@@ -107,8 +107,9 @@ export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversat
     if (caller.kind==="group" && caller.chat===target.chat) return;
     return "group_not_allowed_from_this_conversation";
   }
-  // Any conversation may ask the owner (С43): a question whose answer comes back here, never a plain message.
-  if (target.chat===owner) return caller.kind==="owner" || ask ? undefined :
+  // Any conversation may ask the owner (С43): a question whose answer comes back here. A group's conversation may also
+  // send the owner a short report («отпиши мне потом»): text only, marked with the group, see OWNER_REPORT_GAP_MS.
+  if (target.chat===owner) return caller.kind==="owner" || ask || caller.kind==="group" ? undefined :
     "owner_only_with_a_question: send --person owner --ask --text '<what is asked, who asks, yes or no>'; the answer comes back here";
   if (!reachable(store,bot,owner,target.chat))
     return "person_has_not_started_the_bot: mention them in a group instead and tell who asked why";
@@ -168,4 +169,22 @@ export function askNotes(store:Store,bot:number,target:number) {
   return openAsks(store,bot,target).map(a=>
     `Открытый вопрос по просьбе другого разговора: «${a.question}». Когда получишь ответ, передай его туда: `+
     `bb telegram-projects send --answer ${a.id} --text "…"`).join("\n");
+}
+
+/** A group conversation's plain report to the owner: at most one per this gap per conversation. */
+export const OWNER_REPORT_GAP_MS=3*60_000;
+
+/** A group conversation's report to the owner: the text marked with the place, or why it does not go. */
+export function ownerReport(store:Store,bot:number,caller:{kind:"group";chat:number;topic?:number},body:string,hasFile:boolean,now=Date.now()):
+  {text:string}|{error:string} {
+  if (hasFile) return {error:"owner_report_text_only: a report to the owner from a group is text only; put the file in this group or ask with --ask"};
+  const text=body.trim();
+  if (!text) return {error:"text_required"};
+  const gapKey=`send:owner-report:${bot}:${caller.chat}:${caller.topic ?? 0}`;
+  if (now-(store.get<number>(gapKey) ?? 0)<OWNER_REPORT_GAP_MS)
+    return {error:"owner_report_too_soon: one report to the owner per "+OWNER_REPORT_GAP_MS/60_000+" minutes from this conversation; put everything in one message"};
+  const title=store.get<{title?:string}>(`visibility:${bot}:group:${caller.chat}`)?.title ?? "группа";
+  const topicName=caller.topic ? groupTopics(store,bot,caller.chat).find(t=>t.topic===caller.topic)?.name : undefined;
+  store.put(gapKey,now);
+  return {text:`Из группы «${title}»${caller.topic ? ", тема «"+(topicName || caller.topic)+"»" : ""}:\n${text.length>3500 ? text.slice(0,3500)+"…" : text}`};
 }
