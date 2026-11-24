@@ -14,6 +14,7 @@ import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefu
 import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
 import {sentInTurnKey} from "./group-worker";
 import {maxAlbumItems,sendAlbum} from "./media-album";
+import {renderTelegramParts} from "./telegram-ux";
 import {acceptOwnerAskCallback,answerTurnText,askButtons,cleanQuestion,forwardOriginal,ownerQuestion,queueAnswerTurn,rememberAskMessage,turnMessageKey} from "./owner-ask";
 import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
@@ -2232,6 +2233,11 @@ export default async function plugin(bb: BbPluginApi) {
         usage:"bb telegram-projects topic (create --chat GROUP --name NAME [--text FIRST] | rename --topic TOPIC --name NAME | close|reopen|delete --topic TOPIC) [--chat GROUP]",
       },
       {
+        name:"edit",
+        summary:"Edit the bot's own message in this conversation's chat (С82)",
+        usage:"bb telegram-projects edit --message MESSAGE_ID --text TEXT",
+      },
+      {
         name:"delete",
         summary:"Delete a message in this conversation's own chat: the bot's own, or anyone's on the owner's word (С80)",
         usage:"bb telegram-projects delete --message MESSAGE_ID",
@@ -2280,7 +2286,7 @@ export default async function plugin(bb: BbPluginApi) {
       },
     ],
     async run(argv,ctx) {
-      if (!["search-history","send","topic","delete"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
+      if (!["search-history","send","topic","delete","edit"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
           (ctx.threadId && (await sharedGroupThreads(store,bb.sdk.threads,[ctx.threadId])).has(ctx.threadId))))
         return {exitCode: 1, stderr: "bridge_admin_command_unavailable_in_group"};
       if(argv[0]==="topic"){
@@ -2326,6 +2332,30 @@ export default async function plugin(bb: BbPluginApi) {
             const title=(rightsChat!==undefined ? store.get<{title?:string}>(`visibility:${bot}:group:${rightsChat}`)?.title : undefined) ?? opt.chat ?? "эта группа";
             return {exitCode:1,stderr:missingRightRefusal(action,title)};
           }
+          return {exitCode:1,stderr:String((error as Error).message)};
+        }
+      }
+      if(argv[0]==="edit"){
+        // С82: bb telegram-projects edit --message N --text T — the bot's own message in this conversation's chat.
+        const owner=ownerId(),bot=botId();
+        if (!ctx.threadId || !owner || !bot) return {exitCode:1,stderr:"run_from_a_conversation_thread"};
+        const at=(k:string)=>{const i=argv.indexOf(k);return i>0 ? argv[i+1] : undefined;};
+        const message=Number(at("--message")); const body=at("--text");
+        if (!Number.isSafeInteger(message) || message<=0 || !body?.trim()) return {exitCode:2,stderr:"usage: edit --message MESSAGE_ID --text TEXT"};
+        const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
+        if (!caller) return {exitCode:1,stderr:"edit_only_from_a_telegram_conversation: править можно только в чате своего разговора"};
+        const chat=caller.kind==="group" ? caller.chat : caller.kind==="person" ? caller.subject : owner;
+        if (archive?.sender(bot,chat,message)!==bot) return {exitCode:1,stderr:"edit_own_only: править можно только свои сообщения бота в этом чате"};
+        try {
+          const tg=telegram(botToken,lifetime.signal,15_000,()=>chat,apiRoot);
+          const parts=renderTelegramParts(body);
+          if (parts.length!==1) return {exitCode:1,stderr:"edit_text_too_long: новый текст должен уместиться в одно сообщение"};
+          await tg("editMessageText",{chat_id:chat,message_id:message,text:parts[0],parse_mode:"HTML",link_preview_options:{is_disabled:true}});
+          console.info(`[telegram-projects] edited message ${message} in ${chat} for ${ctx.threadId}`);
+          return {exitCode:0,stdout:JSON.stringify({edited:true,message})};
+        } catch (error) {
+          if (error instanceof TelegramFailure && error.code==="telegram_400")
+            return {exitCode:1,stderr:"edit_refused: Telegram не дал изменить — сообщение старше 48 часов, не текстовое или уже удалено"};
           return {exitCode:1,stderr:String((error as Error).message)};
         }
       }
