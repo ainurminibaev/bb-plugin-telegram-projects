@@ -236,6 +236,9 @@ const states: Record<string, string> = {
 
 const adoptedKey=(parent:string,worker:string)=>"reply:adopted:"+parent+":"+worker;
 
+/** С79: how many times the bridge hands a subthread's result over again before telling the person it will not come. */
+export const CHILD_REPORT_TRIES = 3;
+
 export class ChatBridge {
   /** Links and mentions of BB for the owner: off for an employee by default (see bb-mentions.ts). */
   private bbOn = () => this.d.bbMentions?.() ?? true;
@@ -668,15 +671,19 @@ export class ChatBridge {
         if (!this.s.get(key)) continue; // A native receipt arrived during the read.
         const queued = queue.find(q => q.originPluginId === "telegram-projects" &&
           q.content.some(block => block.type === "text" && block.text === value.marker.text));
+        // С79: an unconfirmed or exhausted hand-over of a subthread's result is not the person's business: the bridge
+        // hands the result over again (a few times), and only when it surely will not come says so in plain words.
+        // Gone from the queue means BB handed it to the agent (only the receipt is missing): sending it again could
+        // give a second answer, so that case stays silent. A hand-over BB gave up on is repeated.
+        const tries = (value as {tries?: number}).tries ?? 0;
         if (queued?.state === "failed_exhausted") {
-          this.enqueue(binding.topicId,this.tr("Рабочий тред завершился. BB исчерпал попытки передать его результат помощнику. Результат сохранён в истории рабочего треда."),
-            undefined,"child-report-exhausted:" + key);
-          this.s.put(key,{...value,state:"failed-reported"});
+          if (tries >= CHILD_REPORT_TRIES) {
+            this.enqueue(binding.topicId,this.tr("Не получилось довести эту задачу до результата. Напишите, если она ещё нужна, — сделаю заново."),
+              undefined,"child-report-lost:" + key);
+            this.s.put(key,{...value,state:"failed-reported"});
+          } else this.s.put(key,{...value,state:"reserved",tries:tries+1});
           continue;
         }
-        if (!queued) this.enqueue(binding.topicId,
-          this.tr("Рабочий тред завершился. Подтверждение передачи результата помощнику пока не пришло. История задачи сохранена в BB."),
-          undefined,"child-report-uncertain:" + key);
         this.s.put(key,{...value,state:queued ? "submitted" : "uncertain-reported",startedAt:Date.now()});
         continue;
       }
@@ -2202,9 +2209,7 @@ export class ChatBridge {
           ...(rulesInput ? [{type:"text" as const,visibility:"agent-only" as const,text:rulesInput,mentions:[]}] : []),
           ...(albumImages??[]),...metadata],
       });
-      if (dispatched?.delivery === "queued")
-        this.enqueue(b.topicId, this.tr("Сообщение в очереди. Помощник получит его, когда BB разрешит продолжить."),
-          undefined, "event:" + b.revision + ":queued:" + input.updateId, false, undefined, own);
+      // С79: a queued message is shown by the «seen» reaction alone; no service line reaches the person.
       if (!input.albumId) this.rememberDispatch(b.threadId, parts ?? [input], followUp?.route ?? own);
       if (rulesVersion) this.s.put("chat:rules-version:" + b.threadId, rulesVersion);
     } else {

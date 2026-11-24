@@ -16,8 +16,6 @@ export const english: Record<string, string> = {
   "Можно сменить модель или продолжить эту переписку с другим агентом.": "Change the model or continue this conversation with another agent.",
   "Другой агент → сохранить историю": "Another agent → keep history",
   "Получаю файл из Telegram…": "Receiving the file from Telegram…",
-  "Рабочий тред завершился. Подтверждение передачи результата помощнику пока не пришло. История задачи сохранена в BB.": "The worker thread finished. Delivery to the assistant has not been confirmed. The task history is available in BB.",
-  "Рабочий тред завершился. BB исчерпал попытки передать его результат помощнику. Результат сохранён в истории рабочего треда.": "The worker thread finished. BB exhausted its attempts to deliver the result to the assistant. The result is in the worker thread history.",
   "Работаю над задачей…": "Working on the task…",
   "Думаю над ответом…": "Thinking about the answer…",
   "Не удалось подтвердить ответ по журналу. Состояние исходной операции неизвестно.":
@@ -94,8 +92,6 @@ export const english: Record<string, string> = {
   "Голосовое сохранено целиком как файл. Автоматическое распознавание доступно для записей до 10 минут и 15 МБ.":
     "Voice recording saved in full as a file. Automatic transcription supports recordings up to 10 minutes and 15 MB.",
   "🎙 Распознано:\n": "🎙 Transcribed:\n",
-  "Сообщение в очереди. Помощник получит его, когда BB разрешит продолжить.":
-    "Your message is queued. The assistant will receive it when BB can continue.",
   "Отправь текст или голосовое сообщение. Вложения пока открывай в BB.":
     "Send text or a voice message. Open attachments in BB for now.",
   "В чате есть вопрос. Ответь через кнопку или ответом на его карточку. Если форма сложная — открой BB.":
@@ -205,6 +201,8 @@ export const english: Record<string, string> = {
     "✅ Bot running on Mac mini\n📱 SMS: Novofon → Mini → Telegram\n🔒 Your private chat only\nQueued: ",
   "\nПоследняя ошибка: ": "\nLast error: ",
   "Проверка сервиса": "Service test",
+  "Не получилось довести эту задачу до результата. Напишите, если она ещё нужна, — сделаю заново.":
+    "I could not bring this task to a result. Write if you still need it — I will do it again.",
   "номер Новофона": "Novofon number",
   "Проверка оформления. Код подтверждения: 123456. Это не настоящий код входа.":
     "Layout test. Verification code: 123456. This is not a real login code.",

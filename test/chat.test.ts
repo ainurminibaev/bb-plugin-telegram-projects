@@ -1925,7 +1925,7 @@ test("oversized voice stays a file and the owner is told after it is saved", asy
   } finally {f.cleanup();}
 });
 
-test("child report follows BB queue retries and announces exhaustion once in the original topic", async () => {
+test("С79: a child report BB gave up on is handed over again silently; the person hears only when it surely will not come", async () => {
   const f = fixture();
   try {
     await f.bridge.handle(f.input("Research"));
@@ -1937,16 +1937,34 @@ test("child report follows BB queue retries and announces exhaustion once in the
     f.sdk.threads.queuedMessages = {list:async()=>[{state,originPluginId:"telegram-projects",content:[marker]}]};
     await f.bridge.observe();
     assert.equal(f.data.get(key).state,"submitted");
-    assert.equal(f.sent.some(x=>x.text?.includes("исчерпал попытки")),false);
     state = "failed_exhausted";
-    f.store.put(key,{...f.data.get(key),startedAt:0});
-    await f.bridge.observe();await f.bridge.flush();
-    await f.bridge.observe();await f.bridge.flush();
-    const errors = f.sent.filter(x=>x.text?.includes("исчерпал попытки"));
-    assert.equal(errors.length,1);
-    assert.equal(errors[0].message_thread_id,100);
+    for (let i=0;i<10;i++) {
+      if (f.data.get(key)?.state==="failed-reported") break;
+      f.store.put(key,{...f.data.get(key),startedAt:0});
+      await f.bridge.observe();await f.bridge.flush();
+    }
+    const service = f.sent.filter(x=>/BB|тред|очеред|исчерпал/.test(x.text ?? ""));
+    assert.equal(service.length,0,"no service words reach the person");
+    assert.ok(f.calls.filter(c=>c[0]==="send").length>=1,"the result is handed over again");
+    const lost = f.sent.filter(x=>x.text?.includes("Не получилось довести эту задачу"));
+    assert.equal(lost.length,1);
+    assert.equal(lost[0].message_thread_id,100);
     assert.equal(f.data.get(key).state,"failed-reported");
-    assert.equal(f.calls.filter(c=>c[0]==="send").length,0);
+  } finally {f.cleanup();}
+});
+
+test("С79: a child report handed to the agent without a receipt stays silent", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Research"));
+    const key = 'reply:child-report:' + JSON.stringify(['thr_one','worker','original-turn']);
+    const marker = {type:"text",text:"fixture-receipt",visibility:"agent-only"};
+    const route = {kind:"telegram",chatId:OWNER_ID,topicId:100,updateId:19};
+    f.store.put(key,{state:"submitted",startedAt:0,route,marker,turnId:"original-turn",threadId:"worker"});
+    f.sdk.threads.queuedMessages = {list:async()=>[]};
+    await f.bridge.observe();await f.bridge.flush();
+    assert.equal(f.sent.filter(x=>/BB|тред|Подтверждение/.test(x.text ?? "")).length,0);
+    assert.equal(f.data.get(key).state,"uncertain-reported");
   } finally {f.cleanup();}
 });
 
@@ -3355,5 +3373,16 @@ test("a late album part stops saved busy text already queued in the shared outbo
     assert.equal(f.sent.filter(row=>row.method==="sendMessage").length,0);
     assert.equal(f.store.get<{busyExact:string}>(exact[0].key)?.busyExact,"cancelled");
     assert.equal(f.calls.filter(call=>call[0]==="send").length,1);
+  } finally {f.cleanup();}
+});
+
+test("С79: a message BB queues behind a busy turn gets no service line in the chat", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("first"));
+    f.sdk.threads.send = async (a: any) => { f.calls.push(["send", a]); return {delivery:"queued"}; };
+    await f.bridge.handle({...f.input("second"),updateId:2,messageId:2});
+    await f.bridge.flush();
+    assert.equal(f.sent.filter(x=>/очеред|BB/.test(x.text ?? "")).length,0);
   } finally {f.cleanup();}
 });
