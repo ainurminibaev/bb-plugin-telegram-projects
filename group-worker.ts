@@ -60,7 +60,7 @@ type Job = {
   state:"pending"|"submitted"|"ready"|"sending"|"done"|"revoked";
   taskId?:string; progressId?:number|null;
   /** When the message was given to the thread; a submitted message without a turn does not live forever. */
-  submittedAt?:number; resubmitted?:boolean;
+  submittedAt?:number; resubmitted?:boolean; started?:boolean;
   executionToken?:string; executorRetryAt?:number;
   pdfIndex?:number; failedPdfs?:string[];
   albumSent?:number[];
@@ -199,8 +199,12 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   verifyOwnerForum?:(policy:GroupTopicPolicy)=>Promise<boolean>,
   reactions?:()=>{chooser?:ReactionChooser;options:ReactionOption[]},
   /** The rules in force for a project and their fingerprint, from the platform plugin (0.4.4); null outside an organization. */
-  turnRules?:(projectId:string)=>Promise<{version:string;text:string}|null>) {
+  turnRules?:(projectId:string)=>Promise<{version:string;text:string}|null>,
+  /** The employee is paused (platform 0.4.7 pauseStatus); no call means not paused. */
+  paused?:()=>Promise<boolean>) {
   const routes=new ReplyRoutes(store);
+  let pausedNow:boolean|undefined;
+  const isPaused=async()=>pausedNow??=(paused ? await paused().catch(()=>false) : false);
   type Cleanup={chatId:number;messageId:number;retryAt?:number};
   for (const {key,value} of store.list<Cleanup>(`group:cleanup:${botId}:`)) {
     if (signal.aborted) return;
@@ -503,6 +507,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
             }
           }
           if (job.state==="submitted" && routes.sameTask(routes.destination(r.threadId,turn),dest)) {
+            job.started=true;
             if (e.type==="item/started" && GROUP_TOOL_ITEMS.has(e.data.item.type)) job.step=stepLabel(e.data.item as never);
             if (e.type==="item/completed" && e.data.item.type==="agentMessage" && !e.data.item.parentToolCallId) {
               const text=e.data.item.text;
@@ -540,7 +545,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         }
       }
       store.put(key,job);
-      if (job.state==="submitted") await updateProgress();
+      // On the employee's pause a message waiting for its end shows only the «seen» sign; the live line comes when
+      // its turn really starts.
+      if (job.state==="submitted" && (job.started || !await isPaused())) await updateProgress();
     }
     // С45: the bridge's service reaction over the chosen one: a question, a refusal or a failure.
     if (job.state==="ready" && job.stage && !job.stageShown && r.updateId>0) {

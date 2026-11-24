@@ -636,3 +636,24 @@ test("0.9.70: the final answer is hidden only by an exact repeat sent in this ve
  assert.equal(out.filter(([m])=>m==="sendMessage").length,shown ? 1 : 0,sent);
  }
 });
+
+test("0.9.70: on the employee's pause a waiting message shows no «thinking» line until its turn starts",async()=>{
+ for (const paused of [true,false]) {
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"}},7,5));
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async()=>[]},send:async()=>{}}};
+ const out:any[]=[];
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,()=>async <T>(m:string,p:any)=>{if(m!=="setMessageReaction")out.push([m,p]);return {message_id:99} as T},
+   new AbortController().signal,undefined,undefined,undefined,true,undefined,undefined,undefined,async()=>paused);
+ await tick();
+ const key=[...rows.keys()].find(k=>k.startsWith("group:in:"))!;
+ rows.set(key,{...rows.get(key),startedAt:0,progressAt:0,submittedAt:Date.now()});
+ await tick();
+ assert.equal(out.filter(([m])=>m==="sendMessage").length,paused ? 0 : 1,paused ? "paused" : "running");
+ }
+});

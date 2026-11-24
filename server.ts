@@ -1032,6 +1032,11 @@ export default async function plugin(bb: BbPluginApi) {
   // environment, agent and instructions as the owner's private chat. A person's private chat and
   // each group topic get one thread, created on first use.
   // The rules in force from the platform plugin (0.4.4); a platform without them (older version) gives nothing.
+  // Platform 0.4.7: the employee's pause; an older platform has no such call — not paused.
+  async function pausedOf() {
+    return (await bb.sdk.plugins.callRpc({pluginId:"personal-assistant",method:"pauseStatus",input:{},
+      outputSchema:z.object({paused:z.boolean(),since:z.number().nullable()})}).catch(()=>null))?.paused===true;
+  }
   async function turnRulesOf(projectId:string) {
     return bb.sdk.plugins.callRpc({pluginId:"personal-assistant",method:"turnRules",input:{projectId},
       outputSchema:z.object({version:z.string(),text:z.string()}).nullable()}).catch(()=>null);
@@ -2868,7 +2873,7 @@ export default async function plugin(bb: BbPluginApi) {
                   groupTransport,signal,
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined,cfg.language as "ru"|"en"),cfg.telegramFileHostId,
-                  (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum,()=>currentReactions,turnRulesOf);
+                  (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum,()=>currentReactions,turnRulesOf,pausedOf);
                 const scheduleFull=!feedUp || Date.now()-lastScheduleFull>=60_000;
                 if (scheduleFull) lastScheduleFull=Date.now();
                 const scheduleOnly=scheduleFull ? undefined : new Set(scheduleDirty);
