@@ -1,3 +1,4 @@
+import {ensureConversationFolder,ensureConversationProject,moveConversation,restoreConversation} from "./conversation-folder";
 import {TOPIC_ACTIONS,topicRefusal,type TopicAction} from "./topic-command";
 import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
@@ -207,6 +208,17 @@ export const rpcContract = defineRpcContract({
   unbindGroupTopic: {
     input:z.object({confirm:z.literal(true),chatId:z.number().int().negative(),topicId:z.number().int().nonnegative()}).strict(),
     output:z.object({removed:z.boolean()}),
+  },
+  // С76: an existing group (all its topics) or a person's chat moves from the owner's folder into its own one; the
+  // previous threads keep their history and files and are told whom to hand open work to. restore — the way back.
+  moveConversationToFolder:{
+    input:z.object({confirm:z.literal(true),chatId:z.number().int().safe(),dryRun:z.boolean().default(false)}).strict(),
+    output:z.object({path:z.string().optional(),projectId:z.string().optional(),
+      moved:z.array(z.object({topicId:z.number(),from:z.string(),to:z.string().optional()})),skipped:z.array(z.string())}),
+  },
+  restoreConversationFolder:{
+    input:z.object({confirm:z.literal(true),chatId:z.number().int().safe()}).strict(),
+    output:z.object({restored:z.array(z.object({topicId:z.number(),threadId:z.string()}))}),
   },
   providerHandoffStatus: {
     input: z.object({topicId: z.number().int().nonnegative()}).strict(), output: handoffStatusSchema.nullable(),
@@ -446,6 +458,12 @@ export default async function plugin(bb: BbPluginApi) {
     },
     telegramInboxRoot: {
       type: "string", label: "Private received-file directory", default: "",
+    },
+    conversationFoldersRoot: {
+      type: "string", label: "Own folder for each group and person's chat (С76; empty: they share the owner's folder)", default: "",
+    },
+    conversationRulesFile: {
+      type: "string", label: "Rules of the agent's role for conversation folders (an absolute path)", default: "",
     },
     projectInboxRoots: {
       type: "string", label: "Received-file directory per project (proj_id=/path, comma separated; others use the shared one)", default: "",
@@ -1104,24 +1122,45 @@ export default async function plugin(bb: BbPluginApi) {
       const source=await bb.sdk.threads.get({threadId:dm.threadId,signal});
       if (!source?.environmentId || source.projectId!==dm.projectId) return false;
       store.put(reserve,{at:Date.now()});
-      const thread=await bb.sdk.threads.spawn({projectId:dm.projectId,title:c.title,
+      // A folder that cannot be made keeps the conversation unbound (retried in ten minutes), never in the owner's folder.
+      const own=await ownConversationProject(dm.projectId,c).catch(error=>{
+        console.warn("[telegram-projects] С76: conversation folder:",error?.message ?? error);
+        return null;
+      });
+      if (own===null) return false;
+      const projectId=own ?? dm.projectId;
+      const thread=await bb.sdk.threads.spawn({projectId,title:c.title,
         visibility:"visible",permissionMode:"accept-edits",
         input:[{type:"text",visibility:"agent-only",mentions:[],
           text:"This thread is the Telegram conversation «"+c.title+"». Wait for a request. Reply with NO_REPLY, without using tools."}],
-        environment:{type:"reuse",environmentId:source.environmentId},
+        environment:own ? {type:"project-default"} : {type:"reuse",environmentId:source.environmentId},
         ...(source.providerId && {providerId:source.providerId})});
-      if (!thread.id || thread.projectId!==dm.projectId) return false;
+      if (!thread.id || thread.projectId!==projectId) return false;
       threadId=thread.id;
-      store.put(reserve,{at:Date.now(),threadId});
+      store.put(reserve,{at:Date.now(),threadId,...(own && {projectId:own})});
     }
+    const projectId=store.get<{projectId?:string}>(reserve)?.projectId ?? dm.projectId;
     if (owner!==ownerId() || bot!==botId() || stateTransferBusy) return false;
     bindGroupTopic(store,{chatId:c.chatId,topicId:c.topicId,threadId,
       ...(c.privateChat ? {privateChat:true as const} : {inOwnerProject:true as const}),
+      ...(projectId!==dm.projectId && {ownFolder:true as const}),
       ownerOnly:!!c.privateChat,allowedSenderIds:c.allowedSenderIds,requireMention:!c.privateChat,
       includeTopicContext:true,searchableHistory:true,retainFullHistory:true,
       ...(c.acceptAfterSecond!==undefined && {acceptAfterSecond:c.acceptAfterSecond}),
-      botId:bot,botUsername,ownerId:owner,revision:crypto.randomUUID()},dm.projectId);
+      botId:bot,botUsername,ownerId:owner,revision:crypto.randomUUID()},projectId);
     return true;
+  }
+  /** С76: the conversation's own folder and project, when the installer named the root of such folders. */
+  async function ownConversationProject(ownerProjectId:string,c:{chatId:number;title:string;privateChat?:boolean}) {
+    const cfg=await settings.get();
+    const root=String(cfg.conversationFoldersRoot ?? "").trim();
+    if (!root) return undefined;
+    const owner=await bb.sdk.projects.get({projectId:ownerProjectId});
+    const hostId=owner?.sources?.[0]?.hostId;
+    if (!hostId) throw Error("conversation_host_unknown");
+    const kind=c.privateChat ? "person" as const : "group" as const;
+    const path=await ensureConversationFolder(root,kind,c.chatId,c.title,String(cfg.conversationRulesFile ?? "").trim());
+    return ensureConversationProject(store,bb.sdk.projects as any,hostId,path,(kind==="group" ? "Группа: " : "Личка: ")+c.title);
   }
   // Retention of the conversation archive (В2): texts forever, files for archiveFileDays (0 — forever).
   async function expireArchiveFiles(cfg:{archiveFileDays?:number;telegramInboxRoot?:string;projectInboxRoots?:string}) {
@@ -2001,6 +2040,27 @@ export default async function plugin(bb: BbPluginApi) {
       store.put(key,{sourceTopicId,managers:[...new Set(managers)],closeManagers:[...new Set(closeManagers??[])],
         deleteManagers:[...new Set(deleteManagers)],since:Math.floor(Date.now()/1000)} satisfies ForumDefaults);
       return {enabled:true};
+    },
+    moveConversationToFolder: async ({chatId,dryRun})=>{
+      if (stateTransferBusy) throw Error("state_transfer_in_progress");
+      const owner=ownerId(), bot=botId();
+      const dm=store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId);
+      if (!owner || !bot || !dm) throw Error("bridge_not_ready");
+      return moveConversation({store,owner,bot,ownerProjectId:dm.projectId,
+        busy:(topic)=>["working","uncertain"].includes(String(store.get(topicStateKey(bot,chatId,topic)))),
+        title:movedTitle(chatId) ?? (chatId<0 ? "Группа "+chatId : "Личка "+chatId),
+        ensureProject:(title)=>ownConversationProject(dm.projectId,{chatId,title,privateChat:chatId>0}),
+        projectPath:async(projectId)=>(await bb.sdk.projects.get({projectId}))?.sources?.[0]?.path,
+        thread:(threadId)=>bb.sdk.threads.get({threadId}).catch(()=>undefined),
+        spawn:(a)=>bb.sdk.threads.spawn(a as any),
+        bind:(policy,projectId)=>bindGroupTopic(store,policy,projectId),
+        notice:(from,to,topic)=>void handOverNotices(from,to,chatId,topic).catch(()=>{}),
+      },chatId,dryRun);
+    },
+    restoreConversationFolder: async ({chatId})=>{
+      if (stateTransferBusy) throw Error("state_transfer_in_progress");
+      return restoreConversation({store,bind:(policy,projectId)=>bindGroupTopic(store,policy,projectId),
+        notice:(from,to,topic)=>void handOverNotices(from,to,chatId,topic).catch(()=>{})},chatId);
     },
     unbindGroupTopic: ({chatId,topicId})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");

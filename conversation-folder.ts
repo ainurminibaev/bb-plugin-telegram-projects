@@ -1,0 +1,130 @@
+// С76: every group and every person's private chat of an agent lives in its own folder and BB project, apart from
+// the owner's chat. The owner's folder (its local/, outputs/, notes) is then outside the conversation's working
+// directory: the agent of a group works and sends files only from its own folder, and gets its own rules.
+import {mkdir, writeFile, access, chmod, realpath} from "node:fs/promises";
+import {join, isAbsolute, resolve} from "node:path";
+import type {Store} from "./model";
+
+export type ConversationKind="group"|"person";
+export const conversationProjectKey=(path:string)=>"conversation:project:"+path;
+
+/** The folder name of one conversation: one per group (its topics share it) and one per person. */
+export function conversationFolderName(kind:ConversationKind,chatId:number) {
+  if (!Number.isSafeInteger(chatId)) throw Error("conversation_chat_invalid");
+  return `${kind}-${Math.abs(chatId)}`;
+}
+
+/** Rules of the folder: the agent's role comes from one file named by the installer, never the owner's folder. */
+export function conversationRules(kind:ConversationKind,title:string,rulesFile:string) {
+  const place=kind==="group" ? "группы" : "лички человека";
+  return [
+    `# Разговор ${place} «${title.replace(/[\r\n]/g," ").slice(0,120)}»`,
+    "",
+    "Это своя папка этого разговора (С76): работай и храни файлы только здесь.",
+    ...(rulesFile ? [`- Правила роли — ${rulesFile}: прочитай их в начале работы и следуй им.`] : []),
+    "- Свои заметки и договорённости этого разговора — `local/notes.md`; файлы для отправки в чат — `outputs/`.",
+    "- Папка лички владельца и её файлы этому разговору недоступны: не ищи их и не пересылай отсюда.",
+    "",
+  ].join("\n");
+}
+
+const exists=(path:string)=>access(path).then(()=>true,()=>false);
+
+/** Creates (or keeps) the folder with outputs/ and local/, and writes its rules once; returns its real path. */
+export async function ensureConversationFolder(root:string,kind:ConversationKind,chatId:number,title:string,rulesFile="") {
+  if (!root || !isAbsolute(root)) throw Error("conversation_root_invalid");
+  const path=join(resolve(root),conversationFolderName(kind,chatId));
+  for (const dir of [root,path,join(path,"outputs"),join(path,"local")]) {
+    await mkdir(dir,{recursive:true,mode:0o700});
+  }
+  await chmod(path,0o700);
+  const rules=join(path,"AGENTS.md");
+  if (!await exists(rules)) await writeFile(rules,conversationRules(kind,title,rulesFile),{mode:0o600,flag:"wx"}).catch(error=>{
+    if (error?.code!=="EEXIST") throw error;
+  });
+  const claude=join(path,"CLAUDE.md");
+  if (!await exists(claude)) await writeFile(claude,"@AGENTS.md\n",{mode:0o600,flag:"wx"}).catch(error=>{
+    if (error?.code!=="EEXIST") throw error;
+  });
+  return realpath(path);
+}
+
+type Projects={
+  get:(a:{projectId:string})=>Promise<{id:string;sources?:{hostId:string;path:string}[]}>;
+  list:(a?:any)=>Promise<{id:string;sources?:{hostId:string;path:string}[]}[]>;
+  create:(a:{name:string;source:{type:"local_path";hostId:string;path:string}})=>Promise<{id:string}>;
+};
+
+/** The BB project of a folder: remembered, found by its path, or created once. */
+export async function ensureConversationProject(store:Store,projects:Projects,hostId:string,path:string,name:string) {
+  const key=conversationProjectKey(path);
+  const known=store.get<string>(key);
+  if (known) {
+    const project=await projects.get({projectId:known}).catch(()=>undefined);
+    if (project?.sources?.some(s=>s.path===path)) return known;
+  }
+  const found=(await projects.list()).find(p=>p.sources?.some(s=>s.hostId===hostId && s.path===path));
+  const id=found?.id ?? (await projects.create({name:name.slice(0,80) || "Разговор",source:{type:"local_path",hostId,path}})).id;
+  if (!id) throw Error("conversation_project_unconfirmed");
+  store.put(key,id);
+  return id;
+}
+
+type Policy=import("./ingress").GroupTopicPolicy;
+type MoveDeps={
+  store:Store; owner:number; bot:number; ownerProjectId:string; title:string;
+  busy:(topicId:number)=>boolean;
+  ensureProject:(title:string)=>Promise<string|undefined>;
+  projectPath:(projectId:string)=>Promise<string|undefined>;
+  thread:(threadId:string)=>Promise<{title?:string|null;providerId?:string|null}|undefined>;
+  spawn:(a:{projectId:string;title:string;visibility:"visible";permissionMode:"accept-edits";input:any[];
+    environment:{type:"project-default"};providerId?:string})=>Promise<{id?:string;projectId?:string|null}>;
+  bind:(policy:Policy,projectId:string)=>void;
+  notice:(from:string,to:string,topicId:number)=>void;
+};
+export const movedKey=(chat:number,topic:number)=>`c76:moved:${chat}:${topic}`;
+
+/** С76: every binding of one chat that still lives in the owner's folder moves to the chat's own folder. */
+export async function moveConversation(d:MoveDeps,chatId:number,dryRun=false) {
+  const skipped:string[]=[];
+  const todo=d.store.list<Policy>(`group:policy:${chatId}:`).map(row=>row.value)
+    .filter(p=>p.botId===d.bot && p.ownerId===d.owner).filter(p=>{
+      if (p.ownFolder) { skipped.push(`topic ${p.topicId}: already in its own folder`); return false; }
+      if (p.projectId!==d.ownerProjectId) { skipped.push(`topic ${p.topicId}: not in the owner's folder`); return false; }
+      if (d.busy(p.topicId)) { skipped.push(`topic ${p.topicId}: a turn is running, try later`); return false; }
+      return true;
+    });
+  if (!todo.length || dryRun) return {moved:todo.map(p=>({topicId:p.topicId,from:p.threadId})),skipped};
+  const projectId=await d.ensureProject(d.title);
+  if (!projectId) throw Error("conversation_folders_root_not_set");
+  const moved:{topicId:number;from:string;to:string}[]=[];
+  for (const p of todo) {
+    const prior=await d.thread(p.threadId);
+    const thread=await d.spawn({projectId,title:prior?.title || d.title,visibility:"visible",permissionMode:"accept-edits",
+      input:[{type:"text",visibility:"agent-only",mentions:[],
+        text:"This thread now leads the Telegram conversation «"+d.title+"» in its own folder. Wait for a request. Reply with NO_REPLY, without using tools."}],
+      environment:{type:"project-default"},...(prior?.providerId && {providerId:prior.providerId})});
+    if (!thread.id || thread.projectId!==projectId) throw Error("conversation_thread_unconfirmed");
+    d.store.put(movedKey(chatId,p.topicId),{policy:p,at:Date.now()});
+    d.bind({...p,threadId:thread.id,ownFolder:true,revision:crypto.randomUUID()},projectId);
+    d.notice(p.threadId,thread.id,p.topicId);
+    moved.push({topicId:p.topicId,from:p.threadId,to:thread.id});
+  }
+  return {path:await d.projectPath(projectId),projectId,moved,skipped};
+}
+
+/** The way back: the saved bindings return to their previous threads in the owner's folder. */
+export function restoreConversation(d:{store:Store;bind:(policy:Policy,projectId:string)=>void;
+  notice:(from:string,to:string,topicId:number)=>void},chatId:number) {
+  const restored:{topicId:number;threadId:string}[]=[];
+  for (const {key,value} of d.store.list<{policy:Policy}>(`c76:moved:${chatId}:`)) {
+    const old=value?.policy;
+    if (!old?.threadId || !old.projectId) continue;
+    const current=d.store.get<Policy>(`group:policy:${chatId}:${old.topicId}`);
+    d.bind({...old,revision:crypto.randomUUID()},old.projectId);
+    if (current?.threadId && current.threadId!==old.threadId) d.notice(current.threadId,old.threadId,old.topicId);
+    d.store.del(key);
+    restored.push({topicId:old.topicId,threadId:old.threadId});
+  }
+  return {restored};
+}

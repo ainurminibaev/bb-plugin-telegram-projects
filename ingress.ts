@@ -15,6 +15,8 @@ export type GroupTopicPolicy = {
   privateChat?: true;
   /** The thread lives in the employee's own project, next to the owner's chat. */
   inOwnerProject?: true;
+  /** С76: …in the conversation's own folder and project, apart from the owner's chat (projectId is that project). */
+  ownFolder?: true;
   deliverySources?: string[];
   projectId?: string; // Older bindings used project and thread markers only.
   chatId: number;
