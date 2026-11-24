@@ -678,7 +678,10 @@ export default async function plugin(bb: BbPluginApi) {
         const chat=args.message.chat ?? (conversation.kind==="group" ? conversation.chat : conversation.kind==="person" ? conversation.subject : owner);
         if (!readable(chat)) throw Error("not_available_in_this_conversation");
         const found=archive.message(bot,chat,args.message.message);
-        if (!found) throw Error("message_not_in_history");
+        // The message is not in the conversation's memory (older than it, another bot's, archive off): say so plainly,
+        // so the agent asks the person instead of guessing.
+        if (!found) return JSON.stringify({message:args.message.message,unavailable:true,
+          note:"Текст исходного сообщения недоступен. Спроси человека, о каком сообщении речь, — не угадывай."});
         return JSON.stringify(found);
       }
       if (args.file) {
