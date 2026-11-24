@@ -66,11 +66,15 @@ test("retry preserves original task route after restart and a newer BB request",
   resumed.accept("thread","retry-turn","retry");
   assert.deepEqual(resumed.destination("thread","retry-turn"),tg);
 });
-test("mixed and unknown requests fail closed instead of leaking to Telegram", () => {
+test("a BB message steered into a Telegram task adds to it; unknown requests fail closed", () => {
   const {routes} = fixture(); routes.record("thread","tg",tg);
   routes.record("thread","bb",{kind:"bb"});
   routes.accept("thread","mixed","tg");routes.accept("thread","mixed","bb");
-  assert.equal(routes.destination("thread","mixed"),undefined);
+  // 0.9.66: the task keeps its destination (before, the turn turned ambiguous and the task was submitted again).
+  assert.deepEqual(routes.destination("thread","mixed"),tg);
+  routes.record("thread","tg2",{...tg,updateId:31});
+  routes.accept("thread","two","tg");routes.accept("thread","two","tg2");
+  assert.equal(routes.destination("thread","two"),undefined,"two Telegram tasks in one turn stay ambiguous");
   routes.accept("thread","unknown","missing");
   assert.equal(routes.destination("thread","unknown"),undefined);
   assert.equal(routes.retry("thread","retry","missing"),false);
@@ -284,4 +288,24 @@ test("a worker turn waiting for the owner's answer is not its result; the turn a
   routes.requested("child",{requestId:"later",originPluginId:"provider-codex",initiator:"user",input:[{type:"text",text:"x"}]});
   routes.accept("child","later-turn","later");
   assert.deepEqual(routes.destination("child","later-turn"),{kind:"bb"},"only the one answer continues the task");
+});
+
+test("0.9.66: a plugin's notice or a schedule steered into a Telegram task keeps the task's destination", () => {
+  const {routes} = fixture();
+  const marker = routes.ingress("topic",tg);
+  routes.requested("topic",{requestId:"voice",originPluginId:"telegram-projects",input:[marker]});
+  routes.accept("topic","t1","voice");
+  // The limit guard: a plugin's message, initiator user, no sender thread.
+  routes.requested("topic",{requestId:"guard",originPluginId:"limit-guard",initiator:"user",senderThreadId:null});
+  routes.accept("topic","t1","guard");
+  // A schedule's run, from the automations plugin.
+  routes.requested("topic",{requestId:"schedule",originPluginId:"automations",initiator:"system",senderThreadId:null});
+  routes.accept("topic","t1","schedule");
+  assert.deepEqual(routes.destination("topic","t1"),tg);
+  // A plain BB turn is not taken over by a later Telegram message's route either.
+  routes.requested("bbthread",{requestId:"work",initiator:"user",senderThreadId:null});
+  routes.accept("bbthread","t2","work");
+  routes.requested("bbthread",{requestId:"guard2",originPluginId:"limit-guard",initiator:"user",senderThreadId:null});
+  routes.accept("bbthread","t2","guard2");
+  assert.deepEqual(routes.destination("bbthread","t2"),{kind:"bb"});
 });

@@ -428,6 +428,10 @@ export class ReplyRoutes {
       // С48: another thread's message steered into a Telegram task is answered to that thread;
       // the task's result still goes where the task came from.
       const primaryRoute = this.routeOf(threadId, turn.requestIds[0]);
+      // Anything else that is not a Telegram message (a plugin's service notice such as the limit guard, a schedule,
+      // a person typing in BB) steered into a running Telegram task adds to it and never takes its answer away:
+      // otherwise the turn turns ambiguous, the task never sees its end, and the message is submitted again later.
+      if (primaryRoute?.kind === "telegram" && this.routeOf(threadId, id)?.kind === "bb" && aux?.kind !== "agent") return false;
       return !(aux?.kind === "child-notice" ||
         (aux?.kind === "bb-user" && primaryRoute?.kind === "telegram") ||
         (aux?.kind === "agent" && ((delegatedBy && aux.senderThreadId === delegatedBy) || primaryRoute?.kind === "telegram")));
