@@ -39,7 +39,7 @@ test("who may send where follows the calling conversation",()=>{
   assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:OTHER},{chat:ALICE,topic:0},groupsOf,undefined,OWNER),undefined,"group: the owner's request, person not seen in this group");
   assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:OTHER},{chat:ALICE,topic:0},groupsOf,undefined,999)!,/person_not_allowed/);
   assert.match(no({kind:"group",chat:OTHER},{chat:ALICE,topic:0})!,/person_not_allowed/);
-  assert.match(no({kind:"person",subject:ALICE},{chat:TEAM,topic:0})!,/group_not_allowed/);
+  assert.match(no({kind:"person",subject:ALICE},{chat:TEAM,topic:0})!,/relay_needs_addressee_in_this_group/);
   // П28: an ordinary BB thread (no Telegram conversation) writes only to the owner.
   assert.equal(sendRefusal(s,BOT,OWNER,undefined,{chat:OWNER,topic:0},groupsOf),undefined);
   assert.match(sendRefusal(s,BOT,OWNER,undefined,{chat:ALICE,topic:0},groupsOf)!,/send_only_from_a_telegram_conversation/);
@@ -157,4 +157,14 @@ test("a group's report to the owner: text only, marked with the group, one per f
   assert.match((ownerReport(s,BOT,{kind:"group",chat:TEAM},"ещё",false,1_060_000) as any).error,/owner_report_too_soon/);
   assert.ok("text" in ownerReport(s,BOT,{kind:"group",chat:TEAM},"ещё",false,1_000_000+3*60_000));
   assert.match((ownerReport(s,BOT,{kind:"group",chat:TEAM,topic:5},"файл",true) as any).error,/owner_report_text_only/);
+});
+
+test("С90: from an approved person's private chat a relay goes only to a group where both the requester and the addressee are",()=>{
+  const s=setup() as any;
+  const groupsOf=(p:number)=>p===ALICE ? [TEAM] : p===999 ? [TEAM,OTHER] : p===777 ? [OTHER] : [];
+  const alice={kind:"person" as const,subject:ALICE};
+  assert.equal(sendRefusal(s,BOT,OWNER,alice,{chat:TEAM,topic:0},groupsOf,undefined,undefined,false,999),undefined);
+  assert.match(sendRefusal(s,BOT,OWNER,alice,{chat:TEAM,topic:0},groupsOf)!,/relay_needs_addressee_in_this_group/);
+  assert.match(sendRefusal(s,BOT,OWNER,alice,{chat:TEAM,topic:0},groupsOf,undefined,undefined,false,777)!,/relay_needs_addressee/);
+  assert.match(sendRefusal(s,BOT,OWNER,alice,{chat:OTHER,topic:0},groupsOf,undefined,undefined,false,999)!,/group_not_allowed/,"not a group without the requester");
 });

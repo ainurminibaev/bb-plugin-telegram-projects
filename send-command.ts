@@ -92,7 +92,7 @@ const reachable=(store:Store,bot:number,owner:number,person:number)=>
 
 /** Undefined when allowed, otherwise the reason. */
 export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversation|undefined,target:SendTarget,
-  groupsOf:(person:number)=>number[],askId?:string,author?:number,ask?:boolean):string|undefined {
+  groupsOf:(person:number)=>number[],askId?:string,author?:number,ask?:boolean,relayTo?:number):string|undefined {
   // П28: an ordinary thread of this BB writes to the owner only (a group or a person stays a Telegram conversation's business).
   if (!caller) return target.chat===owner && !askId ? undefined : "send_only_from_a_telegram_conversation: an ordinary thread writes only to the owner (--person owner)";
   if (askId) {
@@ -105,6 +105,12 @@ export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversat
     if (!store.get(`visibility:${bot}:group:${target.chat}`)) return "bot_is_not_in_this_group";
     if (caller.kind==="owner") return;
     if (caller.kind==="group" && caller.chat===target.chat) return;
+    // С90: «скажи такому-то» from an approved person's private chat goes to a group where both of them are,
+    // with the addressee mentioned and «по просьбе …» (--for PERSON); never to a group without the requester.
+    if (caller.kind==="person" && groupsOf(caller.subject).includes(target.chat)) {
+      if (relayTo!==undefined && groupsOf(relayTo).includes(target.chat)) return;
+      return "relay_needs_addressee_in_this_group: передать можно только в группу, где состоите и вы, и адресат: --for ИМЯ";
+    }
     return "group_not_allowed_from_this_conversation";
   }
   // Any conversation may ask the owner (С43): a question whose answer comes back here. A group's conversation may also

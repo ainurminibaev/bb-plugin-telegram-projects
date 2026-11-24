@@ -2432,8 +2432,17 @@ export default async function plugin(bb: BbPluginApi) {
           else if (opt.chat) { const chat=findGroup(store,bot,opt.chat); target=opt.topic ? findTopic(store,bot,chat,opt.topic) : {chat,topic:0}; }
           else if (opt.topic) target=findTopic(store,bot,undefined,opt.topic);
           else return {exitCode:2,stderr:"target_required: --chat, --topic, --person or --answer; see --targets"};
-          const refusal=sendRefusal(store,bot,owner,caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author,ask);
+          const relayTo=opt.for ? findPerson(store,bot,opt.for) : undefined;
+          const refusal=sendRefusal(store,bot,owner,caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author,ask,relayTo);
           if (refusal) return {exitCode:1,stderr:refusal};
+          // С90: the relayed words are marked: the addressee mentioned, «по просьбе <requester>».
+          if (caller?.kind==="person" && target.chat<0 && relayTo!==undefined && (opt.text || opt["text-file"])) {
+            const people=accessList(store,bot);
+            const to=people.find(p=>p.id===relayTo), from=people.find(p=>p.id===caller.subject);
+            const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
+            opt.text=`[${to?.name ?? "коллега"}](tg://user?id=${relayTo}), ${body.trim()}\n\n— по просьбе ${from?.name ?? "коллеги"}`;
+            delete opt["text-file"];
+          }
           // A question to the owner from another conversation (С43, С67): where it comes from, who asks and their status,
           // the original request (a link, or the person's message forwarded), then buttons; the answer returns there.
           let ownerAsk:{turn?:import("./owner-ask").TurnMessage;thread?:string}|undefined;
