@@ -194,3 +194,11 @@ export function ownerReport(store:Store,bot:number,caller:{kind:"group";chat:num
   store.put(gapKey,now);
   return {text:`Из группы «${title}»${caller.topic ? ", тема «"+(topicName || caller.topic)+"»" : ""}:\n${text.length>3500 ? text.slice(0,3500)+"…" : text}`};
 }
+
+/** agents-in-chats п.6: the agent's curator as the addressee of a question (consent on work); undefined target with the reason otherwise. */
+export function curatorTarget(curatorIds:number[],ask:boolean):{chat:number;topic:number}|{error:string} {
+  const curator=curatorIds[0];
+  if (!curator) return {error:"no_curator: у этого агента куратор не назначен — спроси владельца (--person owner --ask)"};
+  if (!ask) return {error:"curator_only_with_a_question: куратору — вопрос с --ask; ответ вернётся сюда"};
+  return {chat:curator,topic:0};
+}

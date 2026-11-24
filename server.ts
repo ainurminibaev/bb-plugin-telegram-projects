@@ -1,6 +1,6 @@
 import {homedir} from "node:os";
 import {ensureConversationProject,moveConversation,ownFolderProject,restoreConversation} from "./conversation-folder";
-import {addressedToAgent,leadRefusal,leadsByDefault,leadsByDefaultKey,LEAD_NOTE,leadsChat,NO_LEADER_LINE,noLeaderToldKey,setChatMode,canAssignLead,chatAgentsCheckedKey,curatorsKey,noteAgentsLeaving,refreshChatAgents,modeLine,otherAgentsInChat,setTopicMode,topicMode,type TopicMode} from "./topic-mode";
+import {curators,addressedToAgent,leadRefusal,leadsByDefault,leadsByDefaultKey,LEAD_NOTE,leadsChat,NO_LEADER_LINE,noLeaderToldKey,setChatMode,canAssignLead,chatAgentsCheckedKey,curatorsKey,noteAgentsLeaving,refreshChatAgents,modeLine,otherAgentsInChat,setTopicMode,topicMode,type TopicMode} from "./topic-mode";
 import {TOPIC_ACTIONS,topicRefusal,type TopicAction} from "./topic-command";
 import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
@@ -13,7 +13,7 @@ import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from 
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
 import {conversationOf,conversationOfThread,guardGroupMemory,movedConversationOf,movedConversationRefusal,readableChats} from "./archive-access";
-import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefusal,sendTargets} from "./send-command";
+import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefusal,sendTargets,curatorTarget} from "./send-command";
 import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
 import {sameWords,sentInTurnKey} from "./group-worker";
 import {maxAlbumItems,sendAlbum} from "./media-album";
@@ -2602,16 +2602,23 @@ export default async function plugin(bb: BbPluginApi) {
           if (moved && (opt.targets || !(opt.person && ["owner","владелец"].includes(opt.person.trim().toLowerCase()))))
             return {exitCode:1,stderr:movedConversationRefusal(moved,movedTitle(moved.chatId))};
           if (opt.targets) return {exitCode:0,stdout:JSON.stringify(sendTargets(store,bot,owner,caller,p=>archive?.groupsOf(bot,p) ?? [],author))};
-          let target:{chat:number;topic:number};
+          let target:{chat:number;topic:number}; let curatorAsked=false;
           const answer=store.get<import("./send-command").Ask>(`send:ask:${bot}:${opt.answer}`);
           if (opt.answer) { if (!answer) return {exitCode:1,stderr:"no_open_question_for_this_answer"}; target=answer.origin; }
           else if (opt.person && ["owner","владелец"].includes(opt.person.trim().toLowerCase())) target={chat:owner,topic:0};
+          // agents-in-chats п.6: the agent's curator is an addressee like the owner — for a question (consent on work).
+          else if (opt.person && ["curator","куратор"].includes(opt.person.trim().toLowerCase())) {
+            const to=curatorTarget(curators(store),ask);
+            if ("error" in to) return {exitCode:1,stderr:to.error};
+            target=to; curatorAsked=true;
+          }
           else if (opt.person) target={chat:findPerson(store,bot,opt.person),topic:0};
           else if (opt.chat) { const chat=findGroup(store,bot,opt.chat); target=opt.topic ? findTopic(store,bot,chat,opt.topic) : {chat,topic:0}; }
           else if (opt.topic) target=findTopic(store,bot,undefined,opt.topic);
           else return {exitCode:2,stderr:"target_required: --chat, --topic, --person or --answer; see --targets"};
           const relayTo=opt.for ? findPerson(store,bot,opt.for) : undefined;
-          const refusal=sendRefusal(store,bot,owner,caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author,ask,relayTo);
+          // A question to the curator is allowed from any conversation, like one to the owner; his chat must be open.
+          const refusal=sendRefusal(store,bot,owner,curatorAsked ? {kind:"owner"} : caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author,ask,relayTo);
           if (refusal) return {exitCode:1,stderr:refusal};
           // С90: the relayed words are marked: the addressee mentioned, «по просьбе <requester>».
           if (caller?.kind==="person" && target.chat<0 && relayTo!==undefined && (opt.text || opt["text-file"])) {

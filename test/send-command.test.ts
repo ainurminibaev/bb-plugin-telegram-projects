@@ -1,7 +1,7 @@
 import {rememberGroupTitle} from "../thread-titles";
 import test from "node:test";
 import assert from "node:assert/strict";
-import {askNotes,ownerAskNotes,findGroup,findPerson,findTopic,openAsks,ownerReport,rememberAsk,sendRefusal,sendTargets} from "../send-command";
+import {askNotes,ownerAskNotes,findGroup,findPerson,findTopic,openAsks,ownerReport,curatorTarget,rememberAsk,sendRefusal,sendTargets} from "../send-command";
 import {setAccess} from "../rights";
 import {learnTopicName} from "../forum-defaults";
 import {migrateGroupChat} from "../group-migration";
@@ -167,4 +167,10 @@ test("С90: from an approved person's private chat a relay goes only to a group 
   assert.match(sendRefusal(s,BOT,OWNER,alice,{chat:TEAM,topic:0},groupsOf)!,/relay_needs_addressee_in_this_group/);
   assert.match(sendRefusal(s,BOT,OWNER,alice,{chat:TEAM,topic:0},groupsOf,undefined,undefined,false,777)!,/relay_needs_addressee/);
   assert.match(sendRefusal(s,BOT,OWNER,alice,{chat:OTHER,topic:0},groupsOf,undefined,undefined,false,999)!,/group_not_allowed/,"not a group without the requester");
+});
+
+test("agents-in-chats п.6: the curator is asked like the owner — a question only, and only when named",()=>{
+  assert.match((curatorTarget([],true) as any).error,/^no_curator/);
+  assert.match((curatorTarget([555],false) as any).error,/^curator_only_with_a_question/);
+  assert.deepEqual(curatorTarget([555,777],true),{chat:555,topic:0});
 });
