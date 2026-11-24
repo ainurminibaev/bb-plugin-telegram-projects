@@ -22,14 +22,21 @@ export async function deliverScheduledResults(store:Store,sdk:Pick<BbPluginApi["
     // С72: with the change feed only threads that changed are read; a safety pass reads them all.
     if (only && !only.has(threadId) && store.get(cursorKey(threadId))) continue;
     let cursor=store.get<Cursor>(cursorKey(threadId));
+    // A thread deleted in BB while its topic stays bound: skip it, never stop the pass for the other threads.
+    const gone=(error:unknown)=>/\b404\b|not found/i.test(String((error as Error)?.message ?? error));
     if (!cursor) {
       // Start at the present: earlier runs are not replayed.
-      const latest=await sdk.threads.events.list({threadId,order:"desc",limit:"1",signal});
+      let latest;
+      try { latest=await sdk.threads.events.list({threadId,order:"desc",limit:"1",signal}); }
+      catch (error) { if (gone(error)) continue; throw error; }
       store.put(cursorKey(threadId),{seq:latest[0]?.seq ?? 0,runs:{}});
       continue;
     }
-    const events=await sdk.threads.events.list({threadId,afterSeq:String(cursor.seq),limit:"100",signal,
-      types:["client/turn/requested","turn/input/accepted","item/completed","turn/completed"]});
+    let events;
+    try {
+      events=await sdk.threads.events.list({threadId,afterSeq:String(cursor.seq),limit:"100",signal,
+        types:["client/turn/requested","turn/input/accepted","item/completed","turn/completed"]});
+    } catch (error) { if (gone(error)) continue; throw error; }
     const runs={...cursor.runs};
     const byTurn=(turnId:string)=>Object.entries(runs).find(([,r])=>r.turnId===turnId);
     for (const e of events) {

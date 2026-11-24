@@ -49,3 +49,14 @@ test("a schedule's result goes to the topic where it was set; silent runs and ot
   await run(); await run();
   assert.equal(sent.length,2,"not sent a second time");
 });
+
+test("a thread deleted in BB while its topic stays bound does not stop the pass for the other threads",async()=>{
+  const store=memoryStore() as any;
+  store.put("group:policy:-100:3",{chatId:-100,topicId:3,threadId:"gone"});
+  store.put("group:policy:-100:4",{chatId:-100,topicId:4,threadId:"alive"});
+  const read:string[]=[];
+  const sdk={threads:{events:{list:async(q:any)=>{read.push(q.threadId);if(q.threadId==="gone")throw Error("HTTP 404: Thread not found");return [];}}}};
+  await deliverScheduledResults(store,sdk as any,()=>(async()=>({})) as any,new AbortController().signal,()=>true);
+  assert.deepEqual(read.sort(),["alive","gone"]);
+  assert.ok(store.get("group:schedule-cursor:alive") ?? [...store.list("")].some(({key}:any)=>key.includes("alive")),"the live thread is read");
+});
