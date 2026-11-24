@@ -1,3 +1,11 @@
+# 0.9.67
+
+- Fix of 0.9.66: an interim message the agent sent into its chat («взял, займёт 10 минут») no longer hides the turn's final answer; the answer is skipped only when it repeats a text already sent there, and a failed turn says so.
+- С71: the bridge itself hands a new executor the former conversation's latest answers (a guest thread may not read a neighbouring thread).
+- С84: when a later album of a multi-file send fails, the agent is told what already went and to send only the rest.
+- С82: a topic's conversation edits only its own messages in its own topic.
+- An unexpected failure of the polling or group pass is written to the plugin log (status showed only «sync_failed»).
+
 # 0.9.66
 
 - One incoming message, one submission: a service message of another plugin (the limit guard), a schedule's run or a person typing in BB that joins a running Telegram task no longer makes the turn ambiguous. Before, the task never saw its end: «typing» stayed, the answer was late and after 15 minutes the message was submitted again.
