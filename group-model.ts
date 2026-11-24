@@ -74,6 +74,7 @@ export async function groupModelCommand(o: { store: Store; sdk: ModelSdk; owner:
         own.length ? `Модели: ${own.slice(0, 20).map(x => x.model).join(", ")}` : "",
         others.length ? `Другие исполнители: ${others.join(", ")}` : "",
         "Сменить: /model <модель> или /model <исполнитель> [модель]. Действует со следующего сообщения, только в этой теме.",
+        "Другая модель — тот же разговор, история сохраняется. Другой исполнитель — новый разговор: он сам прочитает прежний и продолжит открытые дела.",
       ].filter(Boolean).join("\n"));
       return true;
     }
@@ -108,7 +109,10 @@ export async function groupModelCommand(o: { store: Store; sdk: ModelSdk; owner:
       environment: { type: "reuse", environmentId }, providerId: asProvider.id, ...(model && { model }),
       permissionMode: "accept-edits",
       input: [{ type: "text", visibility: "agent-only", mentions: [],
-        text: "Initialize a Telegram topic conversation moved from another provider. Wait for a Telegram request and reply NO_REPLY." }] });
+        // С71: the new executor continues the conversation — it reads the former thread itself (BB's own thread log).
+        text: "This Telegram topic conversation moved to you from another provider. The former conversation is thread " + thread.id +
+          ": read its recent turns with `bb thread log " + thread.id + " --limit 20` and note the open tasks and promises, " +
+          "so you continue them. Do not write to the chat now; reply NO_REPLY." }] });
     if (child.projectId !== thread.projectId) throw Error("thread_unconfirmed");
     const current = o.store.get<GroupTopicPolicy>(`group:policy:${m.chat.id}:${topic}`);
     if (current?.threadId !== policy.threadId || current.revision !== policy.revision) {

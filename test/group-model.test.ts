@@ -53,6 +53,8 @@ test("С71: another provider moves this topic to a new thread of it; other topic
   assert.equal(spawned[0].providerId,"claude-code");
   assert.equal(spawned[0].model,"claude-opus-5-5");
   assert.deepEqual(spawned[0].environment,{type:"reuse",environmentId:"env"});
+  // The new executor reads the former conversation itself and continues its open tasks.
+  assert.match(spawned[0].input[0].text,/bb thread log t4 --limit 20/);
   assert.equal(store.get<any>(`group:policy:${chat}:4`).threadId,"new-thread");
   assert.equal(store.get<any>(`group:policy:${chat}:9`).threadId,"t9");
   assert.match(sent.at(-1)!,/новый разговор/);
