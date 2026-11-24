@@ -117,7 +117,8 @@ export async function sendAlbum(tg:Telegram,target:Target,files:AlbumMedia[]) {
     if (!Number.isSafeInteger(id) || id<=0 || (index>0 && id<=ids[index-1]) ||
         row.media_group_id!==mediaGroupId || row.chat?.id!==chatId ||
         (topicId>0 && row.message_thread_id!==topicId) ||
-        (row.reply_to_message && row.reply_to_message.message_id!==replyTo))
+        // In a forum topic Telegram marks every message as a reply to the topic's root: that is not a reply.
+        (row.reply_to_message && row.reply_to_message.message_id!==replyTo && !(topicId>0 && row.reply_to_message.message_id===topicId)))
       throw Error("unconfirmed_album");
     if (kind==="photo") {
       if (!row.photo?.length) throw Error("unconfirmed_album");

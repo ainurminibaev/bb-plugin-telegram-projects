@@ -85,3 +85,11 @@ test("sendMediaGroup rejects mixed media, partial results and missing native rep
   await assert.rejects(sendAlbum(transport(3,false),target,files),/unconfirmed_album/);
   assert.deepEqual((await sendAlbum(transport(3,true),target,files)).messageIds,[20,21,22]);
 });
+
+test("an album without a reply in a forum topic is confirmed though Telegram marks it a reply to the topic's root",async()=>{
+  const files=[{kind:"document" as const,data:new Blob(["a"]),name:"a.txt"},{kind:"document" as const,data:new Blob(["bb"]),name:"b.txt"}];
+  const tg=(async <T>(_m:string,_b:Record<string,unknown>)=>files.map((f,i)=>({chat:{id:-7},message_thread_id:3,message_id:40+i,
+    media_group_id:"g",document:{file_id:"f"+i,file_name:f.name,file_size:(f.data as Blob).size},reply_to_message:{message_id:3}})) as T) as Telegram;
+  const r=await sendAlbum(tg,{chatId:-7,topicId:3,replyTo:0},files);
+  assert.deepEqual(r.messageIds,[40,41]);
+});
