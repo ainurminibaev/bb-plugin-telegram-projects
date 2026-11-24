@@ -433,6 +433,12 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
         !message.entities?.some((e:any)=>e.type==="mention" &&
           message.text.slice(e.offset,e.offset+e.length).toLowerCase()==="@"+policy.botUsername.toLowerCase()))) return;
     const replyId=message.reply_to_message?.message_id;
+    // С81 fallback: Telegram's own short quote of the answered message, kept aside; the agent gets it only when the
+    // message is missing from the conversation's memory (search-history --message).
+    if (Number.isSafeInteger(replyId)) {
+      const quoted=String(message.reply_to_message?.text ?? message.reply_to_message?.caption ?? "").trim().slice(0,200);
+      if (quoted) store.put(`reply:quote:${chatId}:${replyId}`,quoted);
+    }
     if (file && message.document?.mime_type==="application/pdf" && Number.isSafeInteger(replyId) &&
         replyId!==topicId && Number.isSafeInteger(message.from?.id) && !message.from.is_bot &&
         !message.sender_chat && canInvokeGroup(policy,owner,message.from.id)) {

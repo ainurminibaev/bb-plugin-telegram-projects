@@ -680,8 +680,13 @@ export default async function plugin(bb: BbPluginApi) {
         const found=archive.message(bot,chat,args.message.message);
         // The message is not in the conversation's memory (older than it, another bot's, archive off): say so plainly,
         // so the agent asks the person instead of guessing.
-        if (!found) return JSON.stringify({message:args.message.message,unavailable:true,
-          note:"Текст исходного сообщения недоступен. Спроси человека, о каком сообщении речь, — не угадывай."});
+        if (!found) {
+          const quote=store.get<string>(`reply:quote:${chat}:${args.message.message}`);
+          return JSON.stringify(quote ? {message:args.message.message,quote,
+            note:"Текста в памяти переписки нет, цитата из Telegram (до 200 знаков)."} :
+            {message:args.message.message,unavailable:true,
+              note:"Текст исходного сообщения недоступен. Спроси человека, о каком сообщении речь, — не угадывай."});
+        }
         return JSON.stringify(found);
       }
       if (args.file) {

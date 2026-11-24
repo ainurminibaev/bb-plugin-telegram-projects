@@ -1739,6 +1739,7 @@ export class ChatBridge {
   private withReplyContext(input: ChatInput, text: string) {
     // С81: the owner's answer names the message it answers; the agent reads its text by number when needed.
     if (!input.replyTo || !input.replyExcerpt) return text;
+    this.s.put(`reply:quote:${input.chatId}:${input.replyTo}`, input.replyExcerpt.trim().slice(0, 200));
     return text + "\n\n[Ответ на сообщение Telegram № " + input.replyTo + "; текст: bb telegram-projects search-history --message " + input.replyTo + "]";
   }
   private async preparePart(input: ChatInput, b: Binding, text: string, batched: boolean, albumImages?:ImageAttachment[]): Promise<string | undefined> {
