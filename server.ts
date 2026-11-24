@@ -1,5 +1,6 @@
 import {homedir} from "node:os";
 import {ensureConversationProject,moveConversation,ownFolderProject,restoreConversation} from "./conversation-folder";
+import {addressedToAgent,leadsChat,setChatMode,canAssignLead,chatAgentsCheckedKey,curatorsKey,noteAgentsLeaving,refreshChatAgents,modeLine,otherAgentsInChat,setTopicMode,topicMode,type TopicMode} from "./topic-mode";
 import {TOPIC_ACTIONS,topicRefusal,type TopicAction} from "./topic-command";
 import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
@@ -56,7 +57,7 @@ import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
 import { acceptGroupUpdate, contextMediaPrefix, offsetForServer, routeUpdate, skipExcludedForumUpdate, unboundAddressedGroupMessage, type GroupTopicPolicy } from "./ingress";
-import { accessList, accessModeKey, agentBotsKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, senderRole, setAccess } from "./rights";
+import { accessList, accessModeKey, agentBots, agentBotsKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings, senderRole, setAccess } from "./rights";
 import { handleConsentCallback, watchConsents } from "./consent";
 import { handleSetupUpdate, notifyGroupsAdded, welcomeScreen } from "./setup-screens";
 import { menuCommands } from "./commands";
@@ -370,6 +371,7 @@ export default async function plugin(bb: BbPluginApi) {
     employeePrivateRequests:{type:"boolean",label:"Запросы доступа в личке сотрудника",default:false},
     agentBots:{type:"string",label:"Боты агентов организации (Telegram ID через запятую): их сообщения в группах принимаются",default:""},
     agentChainLimit:{type:"number",label:"Сколько реплик агентов подряд без человека допустимо",default:12},
+    curators:{type:"string",label:"Кураторы этого агента (Telegram ID через запятую): вместе с владельцем назначают его ведущим темы",default:""},
     isolatedFileHost:{type:"string",label:"Машина с рабочими файлами группового исполнителя",default:""},
     agencyEnabled: {type:"boolean",label:"Уведомления из Агентства",default:false},
     employeeRole: {
@@ -845,6 +847,18 @@ export default async function plugin(bb: BbPluginApi) {
   const reviveForumTopic=(owner:number,bot:number,signal:AbortSignal,topic:NonNullable<ReturnType<typeof describeForumTopic>>)=>
     reviveArchivedForumTopic(store,{owner,bot,check:forumCheck(owner,bot,signal),current:forumCurrent(owner,bot),
       threads:bb.sdk.threads as never,signal,bind:(policy,projectId)=>bindGroupTopic(store,policy,projectId)},topic);
+  // Agents in chats: which bots of the organization are in a group — asked of Telegram once a day per chat and again
+  // when a bot joins or leaves, so a colleague that never wrote counts too.
+  async function checkChatAgents(update:unknown,signal:AbortSignal) {
+    const me=botId();
+    const m=(update as {message?:any;edited_message?:any})?.message ?? (update as {edited_message?:any})?.edited_message;
+    const chat=m?.chat?.id;
+    if (!me || !Number.isSafeInteger(chat) || chat>=0 || !agentBots(store).length) return;
+    if (m.left_chat_member) noteAgentsLeaving(store,me,chat,m,agentBots(store));
+    if (m.new_chat_members || m.left_chat_member) store.del(chatAgentsCheckedKey(me,chat));
+    await refreshChatAgents(store,me,chat,agentBots(store),
+      user=>telegram(botToken,signal,5_000,()=>chat,apiRoot)("getChatMember",{chat_id:chat,user_id:user}) as never).catch(()=>false);
+  }
   async function inheritForumTopic(owner:number,bot:number,signal:AbortSignal,update:unknown) {
     const topic=describeForumTopic(store,bot,owner,update);
     if (topic?.policy && !topic.service) {
@@ -855,6 +869,13 @@ export default async function plugin(bb: BbPluginApi) {
     if (!topic || !candidate) return topic?.service??false;
     const {chat,topic:topicId}=topic;
     const {source,metadata}=candidate;
+    // Agents in chats (item 3): with another agent of the organization here, a topic gets this agent's conversation at
+    // the first message addressed to it, not when the topic appears — an agent nobody called costs nothing.
+    const firstMessage=(update as {message?:any})?.message;
+    // …except the agent that leads the chat (it led General when the colleague came): the owner's new topic is its.
+    const chatLead=leadsChat(store,bot,chat) && firstMessage?.from?.id===owner && !firstMessage?.forum_topic_created;
+    if (otherAgentsInChat(store,bot,chat,agentBots(store)).length && !chatLead &&
+        !addressedToAgent(firstMessage,bot,source.botUsername,source.addressName)) return topic.service;
     const executor=source.isolated?groupExecutor(chat,topicId,true):undefined;
     if (source.isolated && (!executor || executor.threadId===source.threadId || executor.projectId===source.projectId)) return topic.service;
     const targetKey=`group:policy:${chat}:${topicId}`;
@@ -2369,6 +2390,11 @@ export default async function plugin(bb: BbPluginApi) {
         usage:"bb telegram-projects edit --message MESSAGE_ID --text TEXT",
       },
       {
+        name:"topic-mode",
+        summary:"Lead this topic (hear people without a mention) or leave it to mentions — on the word of the owner or a curator; status shows who leads",
+        usage:"bb telegram-projects topic-mode (lead|mention|status) [--chat]  (--chat: the whole chat — every topic without its own leader, new ones too)",
+      },
+      {
         name:"delete",
         summary:"Delete a message in this conversation's own chat: the bot's own, or anyone's on the owner's word (С80)",
         usage:"bb telegram-projects delete --message MESSAGE_ID",
@@ -2491,6 +2517,34 @@ export default async function plugin(bb: BbPluginApi) {
             return {exitCode:1,stderr:"edit_refused: Telegram не дал изменить — сообщение старше 48 часов, не текстовое или уже удалено"};
           return {exitCode:1,stderr:String((error as Error).message)};
         }
+      }
+      if(argv[0]==="topic-mode"){
+        // Agents in chats: the agent leads its topic or waits for mentions, on the word of the owner or its curator.
+        const owner=ownerId(),bot=botId();
+        if (!ctx.threadId || !owner || !bot) return {exitCode:1,stderr:"run_from_a_conversation_thread"};
+        const action=argv[1];
+        if (!["lead","mention","status"].includes(action)) return {exitCode:2,stderr:"usage: topic-mode (lead|mention|status)"};
+        const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
+        if (caller?.kind!=="group") return {exitCode:1,stderr:"Режим темы есть только у разговора группы или темы."};
+        const place={chat:caller.chat as number,topic:caller.topic as number};
+        const organization=agentBots(store);
+        const now=topicMode(store,bot,place.chat,place.topic,organization);
+        const wholeChat=argv.includes("--chat");
+        if (action==="status") return {exitCode:0,stdout:JSON.stringify({mode:now.mode,explicit:now.explicit,
+          chatLead:leadsChat(store,bot,place.chat),agents:otherAgentsInChat(store,bot,place.chat,organization)})};
+        const author=store.get<number>("group:turn-author:"+ctx.threadId);
+        if (author===undefined || !canAssignLead(store,owner,author))
+          return {exitCode:1,stderr:"Назначать ведущего темы и отпускать его может только владелец или куратор этого агента. Скажи это человеку словами."};
+        const changed=wholeChat ? setChatMode(store,bot,place.chat,action as TopicMode,author)
+          : setTopicMode(store,bot,place.chat,place.topic,action as TopicMode,author,organization);
+        if (!changed) return {exitCode:0,stdout:JSON.stringify({mode:action,chat:wholeChat,changed:false})};
+        try {
+          await sendFormattedText(telegram(botToken,lifetime.signal,15_000,()=>place.chat,apiRoot),
+            {chatId:place.chat,topicId:place.topic,markdown:modeLine(action as TopicMode,wholeChat)});
+        } catch (error) {
+          return {exitCode:0,stdout:JSON.stringify({mode:action,changed:true,announced:false,reason:String((error as Error).message)})};
+        }
+        return {exitCode:0,stdout:JSON.stringify({mode:action,changed:true,announced:true})};
       }
       if(argv[0]==="delete"){
         // С80: bb telegram-projects delete --message N — a message of this conversation's own chat.
@@ -3100,6 +3154,7 @@ export default async function plugin(bb: BbPluginApi) {
         store.put(installKindKey, cfg.installKind);
         store.put(agentBotsKey, String(cfg.agentBots ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
         store.put("rights:agent-chain-limit", Math.max(1, Math.min(50, Number(cfg.agentChainLimit) || 12)));
+        store.put(curatorsKey, String(cfg.curators ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
         consentTtlMs = Math.max(1, Number(cfg.consentMinutes) || 30) * 60_000;
         if (botId() && ownerId()) migrateLegacyRights(store, botId()!, profilePeople());
         // С62: people approved earlier (or whose conversation could not be made then) get their greeting, once.
@@ -3192,6 +3247,7 @@ export default async function plugin(bb: BbPluginApi) {
               const renamedGroup=rememberGroupTitle(store,privateBot,u);
               const renamedTopic=(u as {message?:{forum_topic_edited?:{name?:string};chat?:{id?:number}}}).message;
               if (renamedGroup!==undefined) void applyThreadTitles(store,bb.sdk,privateBot,renamedGroup).catch(()=>{});
+              void checkChatAgents(u,signal).catch(()=>{});
               activeTelegramWrites++;
               try {
                 if (await inheritForumTopic(privateOwner,privateBot,signal,u)) {
@@ -3248,6 +3304,7 @@ export default async function plugin(bb: BbPluginApi) {
                 title:unbound.topicId ? `${unbound.title} · тема ${unbound.topicId}` : unbound.title,
                 acceptAfterSecond:unbound.date-1},signal).catch(()=>false);
             }
+            if (cfg.chatEnabled) void checkChatAgents(u,signal).catch(()=>{});   // in the background: no message waits
             if (cfg.chatEnabled && acceptGroupUpdate(store, u, ownerId(), botId())) continue;
             const route = routeUpdate(u, ownerId(), store.get("pair:code"));
             if (route.kind === "pair") {

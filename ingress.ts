@@ -1,10 +1,11 @@
+import {noteAgentInChat,noteColleagueLead,noteOwnActivity,withTopicMode} from "./topic-mode";
 import {albumHasPosition,albumKey,albumKnown,collectAlbum,mediaGroupId,queueAlbumWarning,releaseAlbums} from "./media-album";
 import {forumName} from "./forum-defaults";
 import {isTopicPaused} from "./topic-lifecycle";
 import {historyCutoff,historyPrefix,topicPassages} from "./topic-search";
 import type { Store } from "./model";
 import {isSharedOwnerPolicy} from "./group-binding";
-import { effectiveGroupPolicy } from "./rights";
+import { agentBots, effectiveGroupPolicy } from "./rights";
 import type { ChatInput } from "./chat";
 import {maxImageBytes} from "./group-attachments";
 import {MAX_INCOMING_BYTES} from "./telegram-files";
@@ -17,6 +18,9 @@ export type GroupTopicPolicy = {
   inOwnerProject?: true;
   /** С76: …in the conversation's own folder and project, apart from the owner's chat (projectId is that project). */
   ownFolder?: true;
+  /** Agents in chats: this agent leads the topic or is called by a mention (topic-mode.ts; set per message). */
+  leadMode?: "lead" | "mention";
+  leadExplicit?: boolean;
   deliverySources?: string[];
   projectId?: string; // Older bindings used project and thread markers only.
   chatId: number;
@@ -131,7 +135,7 @@ function addressForms(name:string) {
     name.replace(/([^аеёиоуыэюяйь])$/u,"$1у"),name.replace(/ь$/u,"ю")];
 }
 
-function directNameAddress(text:string,name?:string) {
+export function directNameAddress(text:string,name?:string) {
   if (!name) return false;
   const match=text.trimStart().match(/^([\p{L}][\p{L}\p{M} -]{0,39})[,:]\s*(\S)/u);
   return match?.[1].trim().normalize("NFC").toLowerCase()===name.normalize("NFC").toLowerCase();
@@ -165,7 +169,7 @@ export function messageTopic(m: any): number {
 }
 
 export type Ingress =
-  | {kind: "group"; ownerTopicText?: string; ownerUnaddressed?: true; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; ownText?: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string}
+  | {kind: "group"; ownerTopicText?: string; ownerUnaddressed?: true; leaderUnaddressed?: true; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; ownText?: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
   | { kind: "tasks"; topicId: number }
   | { kind: "pair"; userId: number }
@@ -213,9 +217,14 @@ export function routeUpdate(
     const toSomeoneElse=(!!replyAuthor && replyAuthor.id!==group.botId && m.reply_to_message.message_id!==topicId) ||
       entities.some((e: any) => (e.type==="mention" && text.slice(e.offset, e.offset + e.length).toLowerCase()!==username) ||
         (e.type==="text_mention" && e.user?.id!==group.botId));
-    const ownerUnaddressed=group.requireMention && !addressed && from.id===owner &&
+    // Agents in chats: with another agent of the organization here, the owner's message without a mention goes only
+    // to the topic's leader; an agent that leads by an explicit choice also hears people without a mention.
+    const ownerUnaddressed=group.requireMention && !addressed && from.id===owner && group.leadMode!=="mention" &&
       group.ownerWithoutMention!==false && !toSomeoneElse && !repliesToDifferentBot && !group.ownerSharedProject;
-    if (group.requireMention && !ownerUnaddressed && (!addressed || repliesToDifferentBot)) return {kind: "ignore"};
+    const leaderUnaddressed=group.requireMention && !addressed && !ownerUnaddressed && group.leadMode==="lead" &&
+      group.leadExplicit===true && !from.is_bot && originalPerson(m) && !toSomeoneElse && !repliesToDifferentBot &&
+      !group.ownerSharedProject;
+    if (group.requireMention && !ownerUnaddressed && !leaderUnaddressed && (!addressed || repliesToDifferentBot)) return {kind: "ignore"};
     const reply = m.reply_to_message;
     const sameTopic = reply?.chat?.id === group.chatId && (reply.message_thread_id ?? 0) === topicId;
     const repliedToMessage = sameTopic && reply.message_id !== topicId;
@@ -233,7 +242,7 @@ export function routeUpdate(
     const senderName = [from.first_name, from.last_name].filter(Boolean).join(" ").slice(0, 64) || undefined;
     const ownerTopicText = from.id===owner && m.chat.type==="supergroup" && typeof m.text==="string" &&
       !m.forward_origin && !m.forward_date && !m.is_automatic_forward && !m.via_bot ? m.text : undefined;
-    return {kind: "group", ...(ownerTopicText && {ownerTopicText}), ...(ownerUnaddressed && {ownerUnaddressed:true as const}), chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
+    return {kind: "group", ...(ownerTopicText && {ownerTopicText}), ...(ownerUnaddressed && {ownerUnaddressed:true as const}), ...(leaderUnaddressed && {leaderUnaddressed:true as const}), chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
       threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice}), ...(examples.length && {examples})};
   }
   if (!m || m.chat?.type !== "private" || from?.id !== m.chat?.id)
@@ -398,6 +407,14 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
   if (!Number.isSafeInteger(chatId) || !Number.isSafeInteger(topicId) || topicId < 0) return false;
   if (privateChat ? guest || chatId <= 0 || chatId === owner || message.from?.id !== chatId || topicId !== 0 : chatId >= 0) return false;
   let accepted = false;
+  // Agents in chats: an agent bot of the organization seen in this group (its message or its joining).
+  if (!privateChat) {
+    for (const who of [message.from, ...(message.new_chat_members ?? [])])
+      if (who?.is_bot) noteAgentInChat(store, botId, chatId, who.id, agentBots(store),
+        who.username ? "@"+who.username : who.first_name);
+    // One leader per topic and chat: a colleague announcing it leads here makes this agent step back.
+    if (message.from?.is_bot) noteColleagueLead(store, botId, chatId, topicId, message.from.id, String(message.text ?? ""), agentBots(store));
+  }
   store.atomic(() => {
     if (isTopicPaused(store,botId,chatId,topicId)) return;
     const bound = store.get<GroupTopicPolicy>(`group:policy:${chatId}:${topicId}`);
@@ -407,7 +424,7 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     if (bound.ownerSharedProject && (!isSharedOwnerPolicy(bound) || guest || (message.is_topic_message===true)!==(topicId>0) ||
         !originalPerson(message) || message.from.id!==owner)) return;
     // Who may call the bot here follows the access list and the group settings.
-    const policy = effectiveGroupPolicy(store, bound, owner);
+    const policy = withTopicMode(store, effectiveGroupPolicy(store, bound, owner), agentBots(store));
     // Telegram dates have second precision. The binding second is ambiguous.
     if (policy.acceptAfterSecond !== undefined && (!Number.isSafeInteger(message.date) ||
         message.date <= policy.acceptAfterSecond)) return;
@@ -423,6 +440,7 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       return;
     }
     const route = routeUpdate(update, owner, undefined, policy);
+    if (route.kind === "group" && !message.from?.is_bot) noteOwnActivity(store, botId, chatId, agentBots(store));
     // С74: a chain of agent bots' messages without a person in between is limited; any person's message resets it.
     const chainKey=`group:agent-chain:${chatId}:${topicId}`;
     if (!edit && message.from && !message.from.is_bot && !message.sender_chat) {

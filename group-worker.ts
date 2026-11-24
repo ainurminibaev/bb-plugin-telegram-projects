@@ -1,3 +1,4 @@
+import {topicNote} from "./topic-mode";
 import {albumCaption,albumChanged,albumKind,deliverAlbumWarnings,sendAlbum,type AlbumMedia} from "./media-album";
 import {beginTopicSend,isTopicPaused} from "./topic-lifecycle";
 import {groupThreadMatches,isSharedOwnerPolicy,sharedGroupScopeKey,sharedGroupThreadKey} from "./group-binding";
@@ -280,7 +281,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     // С45: every message that reached this agent gets a visible sign at once: 👀, then the chosen reaction.
     // A message of the owner without a mention may not be for the agent (С55): no sign until it answers.
     // С74: no reaction is chosen for an agent bot's message.
-    if (r.updateId>0 && !job.acked && !r.ownerUnaddressed && !agentBots(store).includes(r.senderId)) {
+    if (r.updateId>0 && !job.acked && !r.ownerUnaddressed && !r.leaderUnaddressed && !agentBots(store).includes(r.senderId)) {
       job.acked=true; job.startedAt??=Date.now(); store.put(key,job);
       const set=reactions?.();
       void acknowledge(reactTg,r.chatId,r.messageId,r.ownText ?? r.text,set?.chooser,set?.options ?? DEFAULT_REACTION_OPTIONS,
@@ -288,7 +289,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     }
     // С46: one live status message: the agent's first line and the current step; guests see the step only.
     const updateProgress=async()=>{
-      if (!visibleProgress || policy.ownerSharedProject || r.ownerUnaddressed || r.updateId<=0 || job.progressId===null) return;
+      if (!visibleProgress || policy.ownerSharedProject || r.ownerUnaddressed || r.leaderUnaddressed || r.updateId<=0 || job.progressId===null) return;
       const text=progressText({agentLine:job.agentLine,step:job.step,guest:job.guest,startedAt:job.startedAt ?? Date.now()});
       if (!text || text===job.progressText || Date.now()-(job.progressAt ?? 0)<5000) return;
       try {
@@ -459,7 +460,11 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const people=policy.privateChat ? "" : peopleNote(store,botId,owner,r.senderId);
       // С55: the owner wrote without a mention; the agent decides whether the message is meant for it.
       const unaddressed=r.ownerUnaddressed ? "Владелец написал в группе без отметки. Если реплика обращена не к тебе (он говорит с другими людьми), ничего не делай и ответь ровно "+NO_REPLY+"." : "";
-      const rules=[rulesBase,people,asks,unaddressed].filter(Boolean).join("\n");
+      const leader=r.leaderUnaddressed ? "Сообщение в теме без отметки; ты ведёшь эту тему. Если оно обращено не к тебе или ответ не нужен, ничего не делай и ответь ровно "+NO_REPLY+"." : "";
+      // Agents in chats (items 5 and 7): who leads the topic, which colleagues are here, a colleague called once.
+      const topic=topicNote(store,policy,agentBots(store),id=>store.get<string>(`chat:agent-name:${id}`),
+        agentBots(store).includes(r.senderId));
+      const rules=[rulesBase,people,asks,unaddressed,leader,topic].filter(Boolean).join("\n");
       // A running session keeps the rules it started with: the rules in force come with the turn — in full once per edit,
       // otherwise one line (0.9.59).
       const rulesVersionKey="group:rules-version:"+r.threadId;
