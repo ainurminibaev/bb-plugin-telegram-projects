@@ -518,8 +518,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
               // The final answer repeats what the agent already sent here in this turn: no second copy. An interim
               // message («взял, будет готово через 10 минут») never hides the real result («Готово.»): a part only
               // counts as a repeat for a long answer, and only texts sent during this task count.
-              const repeated=here && !!final && (wrote.sent ?? []).some(x=>x.at>=(job.submittedAt ?? 0) &&
-                (x.t===final || (final.length>=40 && x.t.includes(final))));
+              // Only an exact repeat (words, without spacing and formatting) of what the agent sent here during this
+              // very turn is skipped; a lost answer is worse than a double one, so any doubt publishes.
+              const repeated=here && !!final && (wrote.sent ?? []).some(x=>x.at>=(job.submittedAt ?? 0) && x.t===final);
               if (e.data.status!=="completed") {job.answer="Не получилось сделать — повторите или уточните, пожалуйста."; job.stage="failed";}
               else if (repeated) job.answer=NO_REPLY;
               else if (job.turnId!==turn || !job.answer?.trim()) job.answer=NO_REPLY;   // С79: no service line; the reaction stays

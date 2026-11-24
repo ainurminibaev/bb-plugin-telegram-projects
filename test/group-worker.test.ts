@@ -610,3 +610,29 @@ test("0.9.67: an interim message the agent sent («взял») never hides the t
  assert.match(texts[0],status==="completed" ? /Итог: отчёт готов/ : /Не получилось сделать/);
  }
 });
+
+test("0.9.70: the final answer is hidden only by an exact repeat sent in this very turn",async()=>{
+ for (const [sent,at,shown] of [["Готово, будет готово через 10 минут.",0,true],["Отчёт готов, файл выше.",-24*3600_000,true],["**Отчёт  готов**, файл выше.",0,false]] as const) {
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"}},7,5));
+ const events:any[]=[];
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+ send:async(q:any)=>{
+   const event=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"g"}});
+   event("client/turn/requested",{requestId:"g",originPluginId:"telegram-projects",input:q.input});
+   event("turn/input/accepted",{clientRequestId:"g"});
+   store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),sent:[{t:sameWords(sent),at:Date.now()+at}]});
+   event("item/completed",{item:{type:"agentMessage",text:sent.startsWith("Готово,") ? "Готово." : "Отчёт готов, файл выше."}});
+   event("turn/completed",{status:"completed"});
+ }}};
+ const out:any[]=[];
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{if(_m==="setMessageReaction")return {} as T;out.push([_m,p]);return {} as T},new AbortController().signal);
+ await tick(); await tick();
+ assert.equal(out.filter(([m])=>m==="sendMessage").length,shown ? 1 : 0,sent);
+ }
+});
