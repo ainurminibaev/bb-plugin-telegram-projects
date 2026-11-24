@@ -23,9 +23,6 @@ export const announceKey=(bot:number,chat:number)=>`chat:announce:${bot}:${chat}
 const SETTLED=3600_000;
 const MIGRATED="topic-mode:migrated";
 
-const talksHere=(store:Store,bot:number,chat:number)=>store.list<GroupTopicPolicy>(`group:policy:${chat}:`)
-  .some(({value:p})=>p?.botId===bot && !p.privateChat && !p.ownerSharedProject && !p.isolated);
-
 /**
  * Once, when this version first starts (server start, before any message — a fresh installation has no bindings yet): a chat this agent already talks in counts as bound "before" (0), and a colleague
  * the previous version already knew counts as known "before" (0). Without it an update would make every agent a
@@ -46,7 +43,8 @@ export function migrateTopicModes(store:Store,bot:number) {
 /** Every accepted message: since when this agent talks in the chat, and — while no one leads it — a new try to lead it. */
 export function noteOwnActivity(store:Store,bot:number,chat:number,organization:number[],now=Date.now()) {
   if (chat>=0) return;
-  if (store.get(boundSinceKey(bot,chat))===undefined && talksHere(store,bot,chat)) store.put(boundSinceKey(bot,chat),now);
+  // Called for a message accepted by this agent's binding here: it talks in this chat (no scan on the message path).
+  if (store.get(boundSinceKey(bot,chat))===undefined) store.put(boundSinceKey(bot,chat),now);
   claimChatLead(store,bot,chat,organization,now);
 }
 
@@ -62,7 +60,7 @@ export function claimChatLead(store:Store,bot:number,chat:number,organization:nu
   if (!known.some(id=>id!==bot && (!organization.length || organization.includes(id)))) return false;
   const since=store.get<number>(agentsSinceKey(bot,chat));
   const bound=store.get<number>(boundSinceKey(bot,chat));
-  if (since===undefined || bound===undefined || !talksHere(store,bot,chat)) return false;
+  if (since===undefined || bound===undefined) return false;
   if (bound!==0 && !(since>0 && bound+SETTLED<=since)) return false;
   store.put(chatModeKey(bot,chat),{mode:"lead",by:0,at:now} satisfies TopicModeRecord);
   store.put(announceKey(bot,chat),now);
