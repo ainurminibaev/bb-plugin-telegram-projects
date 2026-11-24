@@ -211,6 +211,11 @@ export const rpcContract = defineRpcContract({
   },
   // С76: an existing group (all its topics) or a person's chat moves from the owner's folder into its own one; the
   // previous threads keep their history and files and are told whom to hand open work to. restore — the way back.
+  // For other plugins (case cards, С65): which Telegram chat and topic a thread (or its subthread) talks to; read only.
+  conversationOf:{
+    input:z.object({threadId:z.string().min(1).max(160)}).strict(),
+    output:z.object({kind:z.enum(["owner","group","person"]),chatId:z.number(),topicId:z.number()}).nullable(),
+  },
   moveConversationToFolder:{
     input:z.object({confirm:z.literal(true),chatId:z.number().int().safe(),dryRun:z.boolean().default(false)}).strict(),
     output:z.object({path:z.string().optional(),projectId:z.string().optional(),
@@ -2040,6 +2045,14 @@ export default async function plugin(bb: BbPluginApi) {
       store.put(key,{sourceTopicId,managers:[...new Set(managers)],closeManagers:[...new Set(closeManagers??[])],
         deleteManagers:[...new Set(deleteManagers)],since:Math.floor(Date.now()/1000)} satisfies ForumDefaults);
       return {enabled:true};
+    },
+    conversationOf: async ({threadId})=>{
+      const owner=ownerId();
+      const found=await conversationOf(store,bb.sdk.threads,threadId).catch(()=>undefined);
+      if (!found) return null;
+      if (found.kind==="group") return {kind:"group" as const,chatId:found.chat as number,topicId:(found.topic ?? 0) as number};
+      if (found.kind==="person") return {kind:"person" as const,chatId:found.subject as number,topicId:0};
+      return owner ? {kind:"owner" as const,chatId:owner,topicId:0} : null;
     },
     moveConversationToFolder: async ({chatId,dryRun})=>{
       if (stateTransferBusy) throw Error("state_transfer_in_progress");
