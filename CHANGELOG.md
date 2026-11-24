@@ -1,3 +1,16 @@
+# 0.9.66
+
+- One incoming message, one submission: a service message of another plugin (the limit guard), a schedule's run or a person typing in BB that joins a running Telegram task no longer makes the turn ambiguous. Before, the task never saw its end: «typing» stayed, the answer was late and after 15 minutes the message was submitted again.
+- The turn's final answer is not posted again when the agent already wrote into this chat during the turn; the place note tells it to answer this chat in the final reply.
+- No service lines: a turn without a text answer stays silent (the reaction remains); a failed one, a lost receipt, /stop, /chats and an unconfirmed answer are said in a person's words.
+- С81: a reply reaches the agent as the message number, chat and topic, without the quoted text; `search-history --message [CHAT:]N` returns that message in one call. П5: replies to different messages in a row are one task, each with its own number.
+- С82: `edit --message N --text T` corrects the bot's own message in the conversation's chat.
+- С84: several files in one send (`--file A --file B …`) go as albums of up to ten; an album in a forum topic is confirmed correctly.
+- С83: an ordinary thread doing work a group's conversation handed it writes to the owner in that topic; «Да / Нет» work there.
+- С71: /model says what happens to the history; a new executor reads the former conversation and continues its open tasks.
+- С80: the owner's word to delete someone else's message lives only in a turn his Telegram message started.
+- A file link with a line number (path:44, #L44) sends the file itself.
+
 # 0.9.65
 
 - A group's conversation can delete a message in its own chat (С80): `bb telegram-projects delete --message N` — the bot's own message always (within Telegram's term), anyone else's only on the owner's word; never in another conversation's chat. No right or past the term — the reason and how to ask the owner. Each deletion is logged.
