@@ -186,6 +186,10 @@ export function openArchive(db:Database) {
         text:String(r.text).slice(0,2000),transcript:r.transcript ? String(r.transcript).slice(0,2000) : undefined,
         link:String(r.chat).startsWith("-100") && r.message>0 ? `https://t.me/c/${String(r.chat).slice(4)}/${r.topic ? r.topic+"/" : ""}${r.message}` : undefined}));
     },
+    /** Who sent a message, for С80 (own or someone else's). */
+    sender(bot:number,chat:number,message:number) {
+      return (db.prepare("SELECT sender FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as {sender:number}|undefined)?.sender;
+    },
     file(bot:number,chat:number,message:number) {
       return db.prepare("SELECT file_id,file_name,file_kind,file_size,file_removed FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as
         {file_id:string|null;file_name:string|null;file_kind:string|null;file_size:number|null;file_removed:number|null}|undefined;

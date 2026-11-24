@@ -1,0 +1,41 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { telegram } from "../adapters";
+import { TelegramFailure } from "../model";
+import { deleteRefusal } from "../delete-command";
+import { missingRightRefusal } from "../forum-commands";
+
+const OWNER = 1001, BOT = 2002, TEAM = -100700, OTHER = -100800, PERSON = 3003;
+const group = { kind: "group" as const, chat: TEAM };
+
+test("С80: the bot's own message in its own chat is deleted without asking", () => {
+  assert.equal(deleteRefusal({ caller: group, owner: OWNER, bot: BOT, chat: TEAM, sender: BOT, author: PERSON }), undefined);
+});
+
+test("С80: someone else's message needs the owner's word", () => {
+  assert.match(deleteRefusal({ caller: group, owner: OWNER, bot: BOT, chat: TEAM, sender: PERSON, author: PERSON })!,
+    /^delete_others_only_by_owner: .*--ask/);
+  assert.match(deleteRefusal({ caller: group, owner: OWNER, bot: BOT, chat: TEAM, sender: undefined, author: undefined })!,
+    /delete_others_only_by_owner/);
+  assert.equal(deleteRefusal({ caller: group, owner: OWNER, bot: BOT, chat: TEAM, sender: PERSON, author: OWNER }), undefined);
+});
+
+test("С80: only in the conversation's own chat", () => {
+  assert.match(deleteRefusal({ caller: group, owner: OWNER, bot: BOT, chat: OTHER, sender: BOT, author: OWNER })!, /^delete_only_in_own_chat/);
+  assert.match(deleteRefusal({ caller: undefined, owner: OWNER, bot: BOT, chat: TEAM, sender: BOT, author: OWNER })!, /^delete_only_from_a_telegram_conversation/);
+  assert.equal(deleteRefusal({ caller: { kind: "person", subject: PERSON }, owner: OWNER, bot: BOT, chat: PERSON, sender: BOT, author: PERSON }), undefined);
+});
+
+test("С80: no right or past the term — the reason and how to ask the owner", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ ok: false, error_code: 400,
+      description: "Bad Request: message can't be deleted" }), { status: 400 });
+    const api = telegram(async () => "test-token", new AbortController().signal, 1000, () => TEAM);
+    await assert.rejects(api("deleteMessage", { chat_id: TEAM, message_id: 90 }),
+      (e: unknown) => e instanceof TelegramFailure && e.code === "telegram_cannot_delete");
+  } finally { globalThis.fetch = original; }
+  const text = missingRightRefusal("deleteMessage", "Команда");
+  assert.match(text, /«Удаление сообщений» в группе «Команда»/);
+  assert.match(text, /--person owner --ask/);
+});

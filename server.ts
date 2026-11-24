@@ -4,6 +4,7 @@ import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
 import {learnTopicName,rememberForumName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,forumAutoOffKey,forumAutoKey,reviveArchivedForumTopic,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
 import {applyForumTopicChange,handleOwnerForumCommand,missingRightRefusal} from "./forum-commands";
+import {deleteLog,deleteRefusal} from "./delete-command";
 import {topicStateKey,isTopicPaused} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
@@ -2220,6 +2221,11 @@ export default async function plugin(bb: BbPluginApi) {
         usage:"bb telegram-projects topic (create --chat GROUP --name NAME [--text FIRST] | rename --topic TOPIC --name NAME | close|reopen|delete --topic TOPIC) [--chat GROUP]",
       },
       {
+        name:"delete",
+        summary:"Delete a message in this conversation's own chat: the bot's own, or anyone's on the owner's word (С80)",
+        usage:"bb telegram-projects delete --message MESSAGE_ID",
+      },
+      {
         name:"search-history",
         summary:"Read the conversation archive this conversation may see: words, author, period, last N, files; download a file",
         usage:"bb telegram-projects search-history [words] [--author A] [--from YYYY-MM-DD[THH:MM]] [--to …] [--tz Europe/Moscow] [--last N] [--files] [--chat C] [--topic T] [--file CHAT:MESSAGE]",
@@ -2263,7 +2269,7 @@ export default async function plugin(bb: BbPluginApi) {
       },
     ],
     async run(argv,ctx) {
-      if (!["search-history","send","topic"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
+      if (!["search-history","send","topic","delete"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
           (ctx.threadId && (await sharedGroupThreads(store,bb.sdk.threads,[ctx.threadId])).has(ctx.threadId))))
         return {exitCode: 1, stderr: "bridge_admin_command_unavailable_in_group"};
       if(argv[0]==="topic"){
@@ -2308,6 +2314,33 @@ export default async function plugin(bb: BbPluginApi) {
           if (error instanceof TelegramFailure && error.code==="telegram_rights") {
             const title=(rightsChat!==undefined ? store.get<{title?:string}>(`visibility:${bot}:group:${rightsChat}`)?.title : undefined) ?? opt.chat ?? "эта группа";
             return {exitCode:1,stderr:missingRightRefusal(action,title)};
+          }
+          return {exitCode:1,stderr:String((error as Error).message)};
+        }
+      }
+      if(argv[0]==="delete"){
+        // С80: bb telegram-projects delete --message N — a message of this conversation's own chat.
+        const owner=ownerId(),bot=botId();
+        if (!ctx.threadId || !owner || !bot) return {exitCode:1,stderr:"run_from_a_conversation_thread"};
+        const i=argv.indexOf("--message"); const message=Number(i>0 ? argv[i+1] : NaN);
+        if (!Number.isSafeInteger(message) || message<=0) return {exitCode:2,stderr:"usage: delete --message MESSAGE_ID"};
+        const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
+        const chat=caller?.kind==="group" ? caller.chat : caller?.kind==="person" ? caller.subject : owner;
+        const sender=archive?.sender(bot,chat,message);
+        const author=store.get<number>("group:turn-author:"+ctx.threadId) ?? (caller?.kind==="owner" ? owner : undefined);
+        const refusal=deleteRefusal({caller,owner,bot,chat,sender,author});
+        if (refusal) return {exitCode:1,stderr:refusal};
+        try {
+          const tg=telegram(botToken,lifetime.signal,15_000,()=>chat,apiRoot);
+          if (await tg("deleteMessage",{chat_id:chat,message_id:message})!==true) throw Error("delete_unconfirmed");
+          deleteLog(store,bot,{thread:ctx.threadId,chat,message,own:sender===bot,author});
+          console.info(`[telegram-projects] deleted message ${message} in ${chat} for ${ctx.threadId} (${sender===bot ? "own" : "by owner"})`);
+          return {exitCode:0,stdout:JSON.stringify({deleted:true,message})};
+        } catch (error) {
+          if (error instanceof TelegramFailure && (error.code==="telegram_rights" || error.code==="telegram_cannot_delete")) {
+            const title=chat<0 ? store.get<{title?:string}>(`visibility:${bot}:group:${chat}`)?.title ?? "эта группа" : "этот чат";
+            return {exitCode:1,stderr:(error.code==="telegram_cannot_delete" ? "Telegram не дал удалить: старше 48 часов или нет права. " : "")+
+              missingRightRefusal("deleteMessage",title)};
           }
           return {exitCode:1,stderr:String((error as Error).message)};
         }

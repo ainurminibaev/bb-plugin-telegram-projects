@@ -140,6 +140,7 @@ export function telegram(
           // С77: the bot lacks an admin right — said apart, so the agent can ask the owner for that right.
           : /not enough rights|CHAT_ADMIN_REQUIRED|have no rights|administrator rights|RIGHT_FORBIDDEN/i.test(d)
             ? "telegram_rights"
+            : /message can't be deleted/i.test(d) ? "telegram_cannot_delete"
             : `telegram_${data.error_code ?? r.status}`;
       throw new TelegramFailure(
         code,
