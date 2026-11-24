@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {mkdtemp, readFile, stat, writeFile, realpath} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {guardReachesFolders,conversationFolderName,ensureConversationFolder,ensureConversationProject,conversationProjectKey,moveConversation,restoreConversation,movedKey} from "../conversation-folder";
+import {ownFolderProject,guardReachesFolders,conversationFolderName,ensureConversationFolder,ensureConversationProject,conversationProjectKey,moveConversation,restoreConversation,movedKey} from "../conversation-folder";
 import {bindGroupTopic} from "../group-worker";
 import {groupThreadMatches} from "../group-binding";
 
@@ -155,4 +155,37 @@ test("С76: own folders only where the guest guard reaches them for the account"
   assert.equal(await guardReachesFolders(home),true);
   const codex=await mkdtemp(join(tmpdir(),"c76-codex-"));
   assert.equal(await guardReachesFolders(home,codex),false,"CODEX_HOME is where Codex reads hooks");
+});
+
+test("С76: a folder the bridge makes on a working installation is guarded before its first turn; without the guard nothing is made", async()=>{
+  const {mkdir,readdir}=await import("node:fs/promises");
+  const base=await mkdtemp(join(tmpdir(),"c76-run-"));
+  const home=join(base,"home"), owner=join(base,"employees","alpha"), root=join(base,"conversations");
+  await mkdir(owner,{recursive:true});
+  await writeFile(join(owner,"AGENTS.md"),"# role\n");
+  const store=memoryStore();
+  const made:any[]=[];
+  const projects={
+    get:async({projectId}:{projectId:string})=>projectId==="proj_owner" ? {id:"proj_owner",sources:[{hostId:"host_1",path:owner}]}
+      : {id:projectId,sources:made.filter(m=>m.id===projectId).map(m=>m.source)},
+    list:async()=>made.map(m=>({id:m.id,sources:[m.source]})),
+    create:async(a:any)=>{const p={id:"proj_g"+(made.length+1),source:a.source,name:a.name};made.push(p);return {id:p.id};},
+  };
+  const d={root,rulesFile:join(owner,"AGENTS.md"),home,store:store as any,projects,ownerProjectId:"proj_owner"};
+  // the installation is running, the guard is not registered for the account: no folder, no project, no binding
+  await assert.rejects(ownFolderProject(d,{chatId:-100777,title:"Новая группа"}),/conversation_guard_missing/);
+  assert.equal(made.length,0);
+  assert.equal(await readdir(root).then(x=>x.length,()=>0),0,"no folder before the guard");
+  // the installer registered the guard for the account: the folder and its project are made, with the marker
+  await mkdir(join(home,".codex"),{recursive:true}); await mkdir(join(home,".claude"),{recursive:true});
+  const hook=JSON.stringify({hooks:{PreToolUse:[{matcher:"*",hooks:[{type:"command",command:"python3 "+owner+"/.bb/hooks/guest-thread-guard.py"}]}]}});
+  await writeFile(join(home,".codex","hooks.json"),hook); await writeFile(join(home,".claude","settings.json"),hook);
+  const id=await ownFolderProject(d,{chatId:-100777,title:"Новая группа"});
+  assert.equal(id,"proj_g1");
+  const folder=made[0].source.path;
+  assert.deepEqual(JSON.parse(await readFile(join(folder,".vallis-conversation.json"),"utf8")),{installation:owner},
+    "the platform takes the organization's rules and the role from the installation");
+  assert.equal(made[0].name,"Группа: Новая группа");
+  // own folders off: the conversation stays where it was
+  assert.equal(await ownFolderProject({...d,root:""},{chatId:-1,title:"x"}),undefined);
 });

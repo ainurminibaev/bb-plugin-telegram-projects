@@ -65,6 +65,12 @@ export async function ensureConversationFolder(root:string,kind:ConversationKind
   if (!await exists(claude)) await writeFile(claude,"@AGENTS.md\n"+(rulesFile ? "@"+rulesFile+"\n" : ""),{mode:0o600,flag:"wx"}).catch(error=>{
     if (error?.code!=="EEXIST") throw error;
   });
+  // The platform reads the organization's rules and the role from the installation named here (turn rules, С76).
+  if (linkFrom && isAbsolute(linkFrom)) {
+    const marker=join(path,".vallis-conversation.json"), wanted=JSON.stringify({installation:linkFrom})+"\n";
+    const {readFile}=await import("node:fs/promises");
+    if (await readFile(marker,"utf8").catch(()=>"")!==wanted) await writeFile(marker,wanted,{mode:0o600});
+  }
   if (linkFrom && isAbsolute(linkFrom)) for (const rel of SHARED_LINKS) {
     const source=join(linkFrom,rel), target=join(path,rel);
     if (!await exists(source) || await lstat(target).then(()=>true,()=>false)) continue;
@@ -170,4 +176,21 @@ export function restoreConversation(d:{store:Store;bind:(policy:Policy,projectId
     restored.push({topicId:old.topicId,threadId:old.threadId});
   }
   return {restored};
+}
+
+/**
+ * The own folder and project of a new conversation (С76), or undefined when own folders are off. Nothing is made, and
+ * the conversation is not bound, unless the guest guard already reaches the folder: a group never takes a turn in a
+ * folder without it, also when the bridge makes the folder long after the installation.
+ */
+export async function ownFolderProject(d:{root:string;rulesFile:string;home:string;codexHome?:string;store:Store;
+  projects:Projects;ownerProjectId:string},c:{chatId:number;title:string;privateChat?:boolean}) {
+  if (!d.root) return undefined;
+  if (!await guardReachesFolders(d.home,d.codexHome)) throw Error("conversation_guard_missing: run setup.py of the platform");
+  const owner=await d.projects.get({projectId:d.ownerProjectId});
+  const hostId=owner?.sources?.[0]?.hostId;
+  if (!hostId) throw Error("conversation_host_unknown");
+  const kind=c.privateChat ? "person" as const : "group" as const;
+  const path=await ensureConversationFolder(d.root,kind,c.chatId,c.title,d.rulesFile,owner?.sources?.[0]?.path ?? "");
+  return ensureConversationProject(d.store,d.projects,hostId,path,(kind==="group" ? "Группа: " : "Личка: ")+c.title);
 }

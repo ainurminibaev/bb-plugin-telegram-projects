@@ -1,5 +1,5 @@
 import {homedir} from "node:os";
-import {ensureConversationFolder,ensureConversationProject,guardReachesFolders,moveConversation,restoreConversation} from "./conversation-folder";
+import {ensureConversationProject,moveConversation,ownFolderProject,restoreConversation} from "./conversation-folder";
 import {TOPIC_ACTIONS,topicRefusal,type TopicAction} from "./topic-command";
 import {deliverScheduledResults} from "./group-schedule";
 import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
@@ -1172,17 +1172,8 @@ export default async function plugin(bb: BbPluginApi) {
   /** С76: the conversation's own folder and project, when the installer named the root of such folders. */
   async function ownConversationProject(ownerProjectId:string,c:{chatId:number;title:string;privateChat?:boolean}) {
     const cfg=await settings.get();
-    const root=String(cfg.conversationFoldersRoot ?? "").trim();
-    if (!root) return undefined;
-    // No conversation works in its own folder before the guest guard reaches it (setup.py puts it for the account).
-    if (!await guardReachesFolders(homedir(),process.env.CODEX_HOME)) throw Error("conversation_guard_missing: run setup.py of the platform");
-    const owner=await bb.sdk.projects.get({projectId:ownerProjectId});
-    const hostId=owner?.sources?.[0]?.hostId;
-    if (!hostId) throw Error("conversation_host_unknown");
-    const kind=c.privateChat ? "person" as const : "group" as const;
-    const path=await ensureConversationFolder(root,kind,c.chatId,c.title,String(cfg.conversationRulesFile ?? "").trim(),
-      owner?.sources?.[0]?.path ?? "");
-    return ensureConversationProject(store,bb.sdk.projects as any,hostId,path,(kind==="group" ? "Группа: " : "Личка: ")+c.title);
+    return ownFolderProject({root:String(cfg.conversationFoldersRoot ?? "").trim(),rulesFile:String(cfg.conversationRulesFile ?? "").trim(),
+      home:homedir(),codexHome:process.env.CODEX_HOME,store,projects:bb.sdk.projects as any,ownerProjectId},c);
   }
   // Retention of the conversation archive (В2): texts forever, files for archiveFileDays (0 — forever).
   async function expireArchiveFiles(cfg:{archiveFileDays?:number;telegramInboxRoot?:string;projectInboxRoots?:string}) {
