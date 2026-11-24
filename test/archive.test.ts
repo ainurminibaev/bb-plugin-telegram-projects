@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import {archiveRow,latToCyr,localSeconds,normalize,openArchive,searchText} from "../archive";
-import {conversationOfThread,groupMemory,guardGroupMemory,readableChats} from "../archive-access";
+import {conversationOfThread,groupMemory,guardGroupMemory,movedConversationOf,movedConversationRefusal,readableChats} from "../archive-access";
 
 const OWNER=7, BOT=5, TEAM=-1001, OTHER=-1002, ALICE=21, BOB=22;
 function memoryStore(){
@@ -118,4 +118,21 @@ test("history kept before the archive moves into it once, without duplicates or 
   assert.ok(old.message<0,"an old number never clashes with the group's current messages");
   assert.equal(old.link,undefined);
   assert.equal(a.find(BOT,()=>true,{words:"уже в архиве"},"UTC")[0].message,live.message,"the live message is untouched");
+});
+
+test("a thread whose group conversation moved to another thread is told where it went", async () => {
+  const store=memoryStore();
+  store.put("group:policy:-100500:0",{chatId:-100500,topicId:0,threadId:"thr_new"});
+  store.put("group:thread:thr_new","group:policy:-100500:0");
+  store.put("group:thread:thr_old","group:policy:-100500:0");
+  const threads={get:async ({threadId}:{threadId:string})=>({id:threadId,parentThreadId:threadId==="thr_child" ? "thr_old" : null})};
+  assert.equal(conversationOfThread(store as any,"thr_old"),undefined);
+  assert.equal(await movedConversationOf(store as any,threads as any,"thr_new"),undefined);
+  const moved=(await movedConversationOf(store as any,threads as any,"thr_child"))!;
+  assert.deepEqual(moved,{chatId:-100500,topicId:0,threadId:"thr_new",privateChat:false});
+  const text=movedConversationRefusal(moved,"Рубка");
+  assert.match(text,/^conversation_moved: /);
+  assert.match(text,/группы «Рубка»/);
+  assert.match(text,/bb thread tell thr_new/);
+  assert.equal(await movedConversationOf(store as any,threads as any,"thr_other"),undefined);
 });

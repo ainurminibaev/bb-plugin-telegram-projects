@@ -8,7 +8,7 @@ import {topicStateKey,isTopicPaused} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
-import {conversationOf,conversationOfThread,guardGroupMemory,readableChats} from "./archive-access";
+import {conversationOf,conversationOfThread,guardGroupMemory,movedConversationOf,movedConversationRefusal,readableChats} from "./archive-access";
 import {closeAsk,findGroup,findPerson,findTopic,rememberAsk,sendRefusal,sendTargets} from "./send-command";
 import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
 import {acceptOwnerAskCallback,answerTurnText,askButtons,cleanQuestion,forwardOriginal,ownerQuestion,queueAnswerTurn,rememberAskMessage,turnMessageKey} from "./owner-ask";
@@ -662,7 +662,10 @@ export default async function plugin(bb: BbPluginApi) {
       const owner=ownerId(),bot=botId();
       if (!owner || !bot || !archive) throw Error("archive_unavailable");
       const conversation=await conversationOf(store,bb.sdk.threads,threadId,signal);
-      if (!conversation) throw Error("telegram_conversation_required");
+      if (!conversation) {
+        const moved=await movedConversationOf(store,bb.sdk.threads,threadId,signal);
+        throw Error(moved ? movedConversationRefusal(moved,movedTitle(moved.chatId)) : "telegram_conversation_required");
+      }
       const readable=readableChats(store,archive,bot,owner,conversation);
       const cfg=await settings.get();
       if (args.file) {
@@ -1049,6 +1052,16 @@ export default async function plugin(bb: BbPluginApi) {
     ].join("\n")}]});
     return true;
   }
+  async function handOverNotices(from:string,to:string,chatId:number,topicId:number) {
+    const place="«"+(movedTitle(chatId) ?? "группа")+"»"+(topicId ? ", тема "+topicId : "");
+    const service=(text:string)=>[{type:"text" as const,mentions:[],text:"[Мост Telegram] "+text+" Отвечать на это не нужно."}];
+    await bb.sdk.threads.send({threadId:from,mode:"queue-if-active",input:service(
+      `Разговор ${place} теперь ведёт тред ${to}. Отсюда отправка в этот чат и список адресатов недоступны. `+
+      `Незаконченное по этому чату передай туда: bb thread tell ${to} '…' (что сделать и где лежит результат).`)}).catch(()=>undefined);
+    await bb.sdk.threads.send({threadId:to,mode:"queue-if-active",input:service(
+      `Этот тред теперь ведёт разговор ${place}. Прежний тред — ${from}: в нём история и, возможно, незаконченные дела и результаты этого чата; при необходимости сверься с ним (bb thread show ${from}).`)}).catch(()=>undefined);
+  }
+  const movedTitle=(chat:number)=>store.get<{title?:string}>(`visibility:${botId()}:group:${chat}`)?.title;
   async function bindConversation(owner:number,bot:number,c:{chatId:number;topicId:number;title:string;
     privateChat?:boolean;allowedSenderIds?:number[];acceptAfterSecond?:number},signal:AbortSignal) {
     if (store.get(`group:policy:${c.chatId}:${c.topicId}`)) return true;
@@ -1920,10 +1933,14 @@ export default async function plugin(bb: BbPluginApi) {
       if (owner!==ownerId() || bot!==botId() || stateTransferBusy) throw Error("bot_changed");
       const topicState=store.get(topicStateKey(bot,chatId,topicId));
       if (topicState==="deleted" || topicState==="working" || topicState==="uncertain") throw Error("forum_topic_unavailable");
+      const before=store.get<GroupTopicPolicy>(`group:policy:${chatId}:${topicId}`)?.threadId;
       bindGroupTopic(store,{ownerSharedProject,ownerTopicManagerProjectId,addressName,deliverySources:deliverySources ? [...new Set(deliverySources)].sort() : store.get<{deliverySources?:string[]}>(`group:policy:${chatId}:${topicId}`)?.deliverySources,isolated:!!executor,searchableHistory,retainFullHistory,includeTopicContext,allowedSenderIds:[...new Set(allowedSenderIds)].sort((a,b)=>a-b),chatId,topicId,threadId,ownerOnly,requireMention,botId:bot,botUsername:me.username,
         ownerId:owner,revision:crypto.randomUUID()},projectId);
       store.del(forumOptOutKey(bot,chatId,topicId));
       void applyThreadTitles(store,bb.sdk,bot,chatId).catch(()=>{});   // С66
+      // The conversation moved to another thread: neither thread loses the work silently. The former one learns where
+      // to pass what it still holds; the new one learns where the earlier work and its results are.
+      if (before && before!==threadId) void handOverNotices(before,threadId,chatId,topicId).catch(()=>{});
       return warning ? {bound:true as const,warning} : {bound:true as const};
     },
     setForumTopicDefaults: async ({chatId,sourceTopicId,enabled,managers,closeManagers,deleteManagers})=>{
@@ -2304,6 +2321,10 @@ export default async function plugin(bb: BbPluginApi) {
           const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
           // Who started the current turn of a group conversation: rights follow the author, not the place (С44).
           const author=ctx.threadId ? store.get<number>("group:turn-author:"+ctx.threadId) : undefined;
+          // A thread whose group conversation moved to another thread is told so in words, not left with an empty list.
+          const moved=caller || !ctx.threadId ? undefined : await movedConversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
+          if (moved && (opt.targets || !(opt.person && ["owner","владелец"].includes(opt.person.trim().toLowerCase()))))
+            return {exitCode:1,stderr:movedConversationRefusal(moved,movedTitle(moved.chatId))};
           if (opt.targets) return {exitCode:0,stdout:JSON.stringify(sendTargets(store,bot,owner,caller,p=>archive?.groupsOf(bot,p) ?? [],author))};
           let target:{chat:number;topic:number};
           const answer=store.get<import("./send-command").Ask>(`send:ask:${bot}:${opt.answer}`);

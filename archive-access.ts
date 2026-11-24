@@ -58,6 +58,36 @@ export async function conversationOf(store:Store,threads:Pick<BbPluginApi["sdk"]
   return undefined;
 }
 
+/**
+ * A thread that was the conversation of a group or a person until the binding moved to another thread: it keeps its
+ * claim but no longer acts for that place. Says where the conversation went, so the refusal can name it.
+ */
+export function movedConversationOfThread(store:Store,threadId:string):{chatId:number;topicId:number;threadId:string;privateChat:boolean}|undefined {
+  const scope=store.get<string>("group:thread:"+threadId);
+  const policy=scope ? store.get<GroupTopicPolicy>(scope) : undefined;
+  if (!policy || !policy.threadId || policy.threadId===threadId) return;
+  return {chatId:policy.chatId,topicId:policy.topicId,threadId:policy.threadId,privateChat:!!policy.privateChat};
+}
+
+export async function movedConversationOf(store:Store,threads:Pick<BbPluginApi["sdk"]["threads"],"get">,threadId:string,signal?:AbortSignal) {
+  let current:string|undefined=threadId;
+  for (let depth=0;current && depth<8;depth++) {
+    if (conversationOfThread(store,current)) return;
+    const moved=movedConversationOfThread(store,current);
+    if (moved) return moved;
+    const thread=await threads.get({threadId:current,signal}) as {parentThreadId?:string|null};
+    current=thread.parentThreadId ?? undefined;
+  }
+  return undefined;
+}
+
+/** The refusal for a thread whose conversation moved: in words, with where to pass the work. */
+export function movedConversationRefusal(moved:{chatId:number;topicId:number;threadId:string;privateChat:boolean},title?:string) {
+  const place=moved.privateChat ? "лички" : "группы «"+(title ?? "группа")+"»"+(moved.topicId ? ", тема "+moved.topicId : "");
+  return "conversation_moved: этот тред больше не ведёт разговор "+place+" — его ведёт тред "+moved.threadId+
+    ". Отправка туда и список адресатов отсюда недоступны. Передай дело тому треду: bb thread tell "+moved.threadId+" '…' (что сделать и где лежит результат).";
+}
+
 export function readableChats(store:Store,archive:Pick<Archive,"groupsOf">,bot:number,owner:number,c:Conversation) {
   const shared=(chat:number)=>chat<0 && groupMemory(store,bot,chat)==="shared";
   if (c.kind==="owner") return (chat:number)=>chat<0 || chat===owner;
