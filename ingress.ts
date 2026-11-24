@@ -423,7 +423,12 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     const route = routeUpdate(update, owner, undefined, policy);
     // С74: a chain of agent bots' messages without a person in between is limited; any person's message resets it.
     const chainKey=`group:agent-chain:${chatId}:${topicId}`;
-    if (!edit && message.from && !message.from.is_bot && !message.sender_chat) store.del(chainKey);
+    if (!edit && message.from && !message.from.is_bot && !message.sender_chat) {
+      store.del(chainKey);
+      // Who started the matter: the person the agents ask whether to go on when the chain reaches its limit.
+      const who=[message.from.first_name,message.from.last_name].filter(Boolean).join(" ").slice(0,64);
+      store.put(chainKey+":person",{id:message.from.id,name:who,username:message.from.username});
+    }
     if (guest && (!policy.requireMention || route.kind!=="group" ||
         !message.entities?.some((e:any)=>e.type==="mention" &&
           message.text.slice(e.offset,e.offset+e.length).toLowerCase()==="@"+policy.botUsername.toLowerCase()))) return;
@@ -593,7 +598,7 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     }
     store.del(senderFiles);
     if (route.kind==="group" && message.from?.is_bot && policy.agentBots?.includes(message.from.id)) {
-      const limit=store.get<number>("rights:agent-chain-limit") ?? 3;
+      const limit=store.get<number>("rights:agent-chain-limit") ?? 12;
       const n=(store.get<number>(chainKey) ?? 0)+1;
       store.put(chainKey,n);
       if (n>limit) {
@@ -601,7 +606,12 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
         accepted=true;
         return;
       }
-      if (n===limit) route.text=`[Мост Telegram] Это ${n}-я реплика агентов подряд без человека. Ответь одной строкой, отметь человека, которому нужно решить, и дальше с ботом не переписывайся.\n`+route.text;
+      // Soft limit: at the limit the agent does not answer the colleague but asks the person who started the matter.
+      if (n===limit) {
+        const person=store.get<{id:number;name?:string;username?:string}>(chainKey+":person");
+        const whom=person ? (person.username ? "@"+person.username : `[${person.name || "человек"}](tg://user?id=${person.id})`) : "человека, которому решать";
+        route.text=`[Мост Telegram] Это ${n}-я реплика агентов подряд без человека. Коллеге не отвечай: одной строкой спроси ${whom}, продолжать ли, и жди его ответа.\n`+route.text;
+      }
     }
     const key = `group:in:${botId}:${route.updateId}`;
     // Telegram can publish the same source through ordinary and guest updates.

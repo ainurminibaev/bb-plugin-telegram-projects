@@ -349,7 +349,7 @@ export default async function plugin(bb: BbPluginApi) {
     isolatedPrivateThread:{type:"string",label:"Тред изолированного личного исполнителя",default:""},
     employeePrivateRequests:{type:"boolean",label:"Запросы доступа в личке сотрудника",default:false},
     agentBots:{type:"string",label:"Боты агентов организации (Telegram ID через запятую): их сообщения в группах принимаются",default:""},
-    agentChainLimit:{type:"number",label:"Сколько реплик агентов подряд без человека допустимо",default:3},
+    agentChainLimit:{type:"number",label:"Сколько реплик агентов подряд без человека допустимо",default:12},
     isolatedFileHost:{type:"string",label:"Машина с рабочими файлами группового исполнителя",default:""},
     agencyEnabled: {type:"boolean",label:"Уведомления из Агентства",default:false},
     employeeRole: {
@@ -2529,8 +2529,8 @@ export default async function plugin(bb: BbPluginApi) {
                 messageId??=first;
               } catch (error) {
                 // Part went out: say exactly what, so only the rest is sent again (a full repeat would double it).
-                const sentText=text?.trim() ? "текст и " : "";
-                return {exitCode:1,stderr:`partial_send: ушли ${sentText}файлы 1–${i} из ${files.length}; не ушли начиная с ${files[i]} (${String((error as Error).message)}). `+
+                const went=[text?.trim() ? "текст" : "", i>0 ? `файлы 1–${i} из ${files.length}` : ""].filter(Boolean).join(" и ") || "ничего";
+                return {exitCode:1,stderr:`partial_send: ушло: ${went}; не ушли файлы начиная с ${files[i]} (${String((error as Error).message)}). `+
                   `Повтори отправку только оставшихся файлов (${files.slice(i).join(" ")}), без текста.`};
               }
             }
@@ -2540,10 +2540,10 @@ export default async function plugin(bb: BbPluginApi) {
           if (opt.answer) closeAsk(store,bot,opt.answer);
           // A group conversation wrote into its own chat during the turn: the turn's final answer is not posted again.
           if (caller?.kind==="group" && caller.chat===target.chat && (caller.topic ?? 0)===target.topic && !ask && text?.trim()) {
-            const prev=store.get<{chat:number;topic:number;at:number;texts?:string[]}>(sentInTurnKey(ctx.threadId));
-            const fresh=prev && prev.chat===target.chat && prev.topic===target.topic && Date.now()-prev.at<6*3600_000;
+            const prev=store.get<{chat:number;topic:number;at:number;sent?:{t:string;at:number}[]}>(sentInTurnKey(ctx.threadId));
+            const same=prev && prev.chat===target.chat && prev.topic===target.topic;
             store.put(sentInTurnKey(ctx.threadId),{chat:target.chat,topic:target.topic,at:Date.now(),
-              texts:[...(fresh ? prev.texts ?? [] : []),sameWords(text)].slice(-10)});
+              sent:[...(same ? (prev.sent ?? []).filter(x=>Date.now()-x.at<6*3600_000) : []),{t:sameWords(text),at:Date.now()}].slice(-10)});
           }
           return {exitCode:0,stdout:JSON.stringify({sent:true,messageId,...(remembered && {ask:remembered})})};
         } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
@@ -2968,7 +2968,7 @@ export default async function plugin(bb: BbPluginApi) {
         store.put(accessModeKey, cfg.accessPermissionMode);
         store.put(installKindKey, cfg.installKind);
         store.put(agentBotsKey, String(cfg.agentBots ?? "").split(/[\s,]+/).map(Number).filter(n => Number.isSafeInteger(n) && n > 0));
-        store.put("rights:agent-chain-limit", Math.max(1, Math.min(20, Number(cfg.agentChainLimit) || 3)));
+        store.put("rights:agent-chain-limit", Math.max(1, Math.min(50, Number(cfg.agentChainLimit) || 12)));
         consentTtlMs = Math.max(1, Number(cfg.consentMinutes) || 30) * 60_000;
         if (botId() && ownerId()) migrateLegacyRights(store, botId()!, profilePeople());
         // С62: people approved earlier (or whose conversation could not be made then) get their greeting, once.

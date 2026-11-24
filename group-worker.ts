@@ -512,12 +512,14 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
               if (own || !isBusyAnswer(text)) {job.turnId=turn; job.answer=own ?? text;}
             }
             if (e.type==="turn/completed") {
-              const wrote=store.get<{chat:number;topic:number;at:number;texts?:string[]}>(sentInTurnKey(r.threadId));
-              const here=!!wrote && wrote.chat===r.chatId && wrote.topic===(r.topicId ?? 0) && wrote.at>=(job.submittedAt ?? 0);
+              const wrote=store.get<{chat:number;topic:number;at:number;sent?:{t:string;at:number}[]}>(sentInTurnKey(r.threadId));
+              const here=!!wrote && wrote.chat===r.chatId && wrote.topic===(r.topicId ?? 0);
               const final=job.turnId===turn ? sameWords(stripTelegramMarkers(job.answer ?? "")) : "";
               // The final answer repeats what the agent already sent here in this turn: no second copy. An interim
-              // message («взял, займёт 10 минут») never hides the real result.
-              const repeated=here && !!final && (wrote.texts ?? []).some(t=>t===final || t.includes(final));
+              // message («взял, будет готово через 10 минут») never hides the real result («Готово.»): a part only
+              // counts as a repeat for a long answer, and only texts sent during this task count.
+              const repeated=here && !!final && (wrote.sent ?? []).some(x=>x.at>=(job.submittedAt ?? 0) &&
+                (x.t===final || (final.length>=40 && x.t.includes(final))));
               if (e.data.status!=="completed") {job.answer="Не получилось сделать — повторите или уточните, пожалуйста."; job.stage="failed";}
               else if (repeated) job.answer=NO_REPLY;
               else if (job.turnId!==turn || !job.answer?.trim()) job.answer=NO_REPLY;   // С79: no service line; the reaction stays

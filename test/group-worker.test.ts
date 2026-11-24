@@ -571,7 +571,7 @@ test("0.9.66: the agent already wrote into this topic during the turn — the fi
    // A limit-guard notice joins the running turn (24.11): the task must still see its end.
    event("client/turn/requested",{requestId:"guard",originPluginId:"limit-guard",initiator:"user",senderThreadId:null,input:[]});
    event("turn/input/accepted",{clientRequestId:"guard"});
-   if (wrote) { store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),texts:[sameWords("**Готово**, написал выше.")]}); event("item/completed",{item:{type:"agentMessage",text:"Готово, написал выше."}}); }
+   if (wrote) { store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),sent:[{t:sameWords("**Готово**, написал выше."),at:Date.now()}]}); event("item/completed",{item:{type:"agentMessage",text:"Готово, написал выше."}}); }
    event("turn/completed",{status:"completed"});
  }}};
  const sent:any[]=[];
@@ -597,7 +597,8 @@ test("0.9.67: an interim message the agent sent («взял») never hides the t
    const event=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"g"}});
    event("client/turn/requested",{requestId:"g",originPluginId:"telegram-projects",input:q.input});
    event("turn/input/accepted",{clientRequestId:"g"});
-   store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),texts:[sameWords("Взял, займёт 10 минут.")]});
+   store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),sent:[{t:sameWords("Взял, отчёт будет готов через 10 минут."),at:Date.now()},
+     {t:sameWords("Итог: отчёт готов."),at:Date.now()-24*3600_000}]});
    if (status==="completed") event("item/completed",{item:{type:"agentMessage",text:"Итог: отчёт готов."}});
    event("turn/completed",{status});
  }}};
