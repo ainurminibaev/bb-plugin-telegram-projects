@@ -1,3 +1,10 @@
+# 0.9.68
+
+- A thread deleted in BB while its topic stays bound no longer stops the scheduled-results pass (scheduled results of the other threads were not delivered; status showed «sync_failed»).
+- A short final answer («Готово.») is never taken for a repeat of an interim message; only texts sent during this task count.
+- Agent chains (С74): the limit is 12 replies by default; at the limit the agent asks the person who started the matter whether to go on instead of answering the colleague.
+- С90: from an approved person's private chat, `send --chat GROUP --for PERSON` relays words into a group where both are, with the addressee mentioned and «по просьбе …».
+
 # 0.9.67
 
 - Fix of 0.9.66: an interim message the agent sent into its chat («взял, займёт 10 минут») no longer hides the turn's final answer; the answer is skipped only when it repeats a text already sent there, and a failed turn says so.
