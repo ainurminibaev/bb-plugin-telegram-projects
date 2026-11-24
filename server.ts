@@ -1170,12 +1170,21 @@ export default async function plugin(bb: BbPluginApi) {
     const c = await settings.get();
     return {localRoot:c.telegramLocalRoot, inboxRoot:c.telegramInboxRoot};
   };
-  const safeError = (e: unknown) =>
-    e instanceof TelegramFailure
+  let lastLoggedError="";
+  const safeError = (e: unknown) => {
+    const code = e instanceof TelegramFailure
       ? e.code
       : e instanceof Error && /^[a-z_]+(?::[a-zA-Z0-9_]+)?$/.test(e.message)
         ? e.message
         : "sync_failed";
+    // An unexpected failure is written to the plugin log once (its message and where), without tokens or texts.
+    if (code==="sync_failed") {
+      const where=(e instanceof Error ? (e.stack ?? "").split("\n").slice(0,3).join(" | ") : String(e))
+        .replace(/bot\d+:[A-Za-z0-9_-]+/g,"bot***").slice(0,400);
+      if (where!==lastLoggedError) { lastLoggedError=where; bb.log.warn("Telegram Projects: unexpected failure: "+where); }
+    }
+    return code;
+  };
   async function status() {
     const cfg = await settings.get();
     return {
