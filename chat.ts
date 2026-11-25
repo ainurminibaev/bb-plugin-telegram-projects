@@ -333,6 +333,8 @@ export class ChatBridge {
       employeeProject?: () => string | undefined;
       /** С102: what only those who set the installation up must see (a journal line). */
       setupNote?: (text: string) => void;
+      /** С103: one line — whether the agent has written in this chat and topic today, and the local time. */
+      todayOf?: (chatId: number, topicId: number) => string;
       rich: () => boolean;
       transcribe?: (v: NonNullable<ChatInput["voice"]>) => Promise<string>;
       receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{
@@ -2239,6 +2241,8 @@ export class ChatBridge {
         mode: busy || followUp ? "steer-if-active" : "queue-if-active",
         input: [{ type: "text", text: followUp ? followUp.prefix + text : await this.withCatchUp(b.threadId, text), mentions: [] },
           ...(rulesInput ? [{type:"text" as const,visibility:"agent-only" as const,text:rulesInput,mentions:[]}] : []),
+          ...(() => { try { const day = this.d.todayOf?.(input.chatId, input.topicId);
+            return day ? [{type:"text" as const,visibility:"agent-only" as const,text:day,mentions:[]}] : []; } catch { return []; } })(),
           ...(albumImages??[]),...metadata],
       });
       // С79: a queued message is shown by the «seen» reaction alone; no service line reaches the person.

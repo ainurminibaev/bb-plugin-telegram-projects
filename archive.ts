@@ -196,6 +196,13 @@ export function openArchive(db:Database) {
       const r=db.prepare("SELECT * FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as any;
       return r ? toResult(r) : undefined;
     },
+    /** С103: when the bot itself last wrote in this chat (and topic, when given), in Telegram seconds. */
+    lastSent(bot:number,chat:number,topic?:number) {
+      const row=(topic===undefined
+        ? db.prepare("SELECT max(date) AS d FROM archive WHERE bot=? AND chat=? AND sender=?").get(bot,chat,bot)
+        : db.prepare("SELECT max(date) AS d FROM archive WHERE bot=? AND chat=? AND topic=? AND sender=?").get(bot,chat,topic,bot)) as {d:number|null}|undefined;
+      return row?.d ?? undefined;
+    },
     /** Who sent a message, for С80 (own or someone else's). */
     sender(bot:number,chat:number,message:number) {
       return (db.prepare("SELECT sender FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as {sender:number}|undefined)?.sender;

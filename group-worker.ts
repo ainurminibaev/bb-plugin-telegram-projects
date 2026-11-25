@@ -206,7 +206,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   /** The employee is paused (platform 0.4.7 pauseStatus); no call means not paused. */
   paused?:()=>Promise<boolean>,
   /** A group's or a person's conversation attaches only its own files (see server insideConversationFolder). */
-  mayAttach?:(threadId:string,route:{chatId:number;topicId:number;privateChat:boolean},path:string)=>Promise<boolean>) {
+  mayAttach?:(threadId:string,route:{chatId:number;topicId:number;privateChat:boolean},path:string)=>Promise<boolean>,
+  /** С103: one line — whether the agent has written in this chat and topic today, and the local time. */
+  todayOf?:(chatId:number,topicId:number)=>string) {
   const routes=new ReplyRoutes(store);
   let pausedNow:boolean|undefined;
   const isPaused=async()=>pausedNow??=(paused ? await paused().catch(()=>false) : false);
@@ -468,7 +470,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       // Agents in chats (items 5 and 7): who leads the topic, which colleagues are here, a colleague called once.
       const topic=topicNote(store,policy,agentBots(store),id=>store.get<string>(`chat:agent-name:${id}`),
         agentBots(store).includes(r.senderId));
-      const rules=[rulesBase,people,asks,unaddressed,leader,topic].filter(Boolean).join("\n");
+      const day=todayOf ? (()=>{try {return todayOf(r.chatId,r.topicId);} catch {return "";}})() : "";
+      const rules=[rulesBase,people,asks,unaddressed,leader,topic,day].filter(Boolean).join("\n");
       // A running session keeps the rules it started with: the rules in force come with the turn — in full once per edit,
       // otherwise one line (0.9.59).
       const rulesVersionKey="group:rules-version:"+r.threadId;

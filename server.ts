@@ -35,6 +35,7 @@ import { transcribeWithVoiceRouter } from "./voice-router";
 import {MAX_INCOMING_BYTES, maxRoutedDocumentBytes, openInboxDirs, safeTelegramFilename, saveLocalTelegramFile, setUploadLimit, telegramApiRoot as checkedApiRoot, uploadLimit } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
 import { translate } from "./locale";
+import { today, todayLine } from "./today";
 import {
   preferencesSchema,
   diagnosisSchema,
@@ -628,6 +629,13 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const lifetime = new AbortController();
   let bridge: ChatBridge | undefined;
+  // С103: the organization's time zone (the bridge's timeZone setting; empty — Europe/Moscow) for «today».
+  let orgTimeZone = "";
+  const todayOf = (chatId: number, topicId: number) => {
+    const bot = botId();
+    if (!bot || !archive) return "";
+    return todayLine(today(archive.lastSent(bot, chatId, topicId), Date.now(), orgTimeZone));
+  };
   // One dispatch handler for the whole bridge: a second registration could replace the first.
   let scheduleAccess: ((ctx: Parameters<typeof handoffDispatch>[1]) => Promise<{action: "reject"; message: string} | undefined>) | undefined;
   bb.experimental_hooks.on("message.dispatch", async ctx =>
@@ -2793,6 +2801,8 @@ export default async function plugin(bb: BbPluginApi) {
           // A person's own message goes to the owner as it is, before the question (С67).
           if (ownerAsk?.turn && ownerAsk.turn.chat>0) await forwardOriginal(chat=>telegram(botToken,lifetime.signal,60_000,()=>chat,apiRoot),owner,ownerAsk.turn);
           const buttons=ownerAsk && remembered ? askButtons(remembered) : undefined;
+          // С103: whether the bot had written there today, taken before this message goes out.
+          const day=archive ? today(archive.lastSent(bot,target.chat,target.topic),Date.now(),orgTimeZone || String((await settings.get()).timeZone ?? "")) : undefined;
           let messageId:number|undefined;
           if (files.length>1) {
             if (ask) return {exitCode:2,stderr:"ask_with_one_file_only"};
@@ -2827,7 +2837,8 @@ export default async function plugin(bb: BbPluginApi) {
             store.put(sentInTurnKey(ctx.threadId),{chat:target.chat,topic:target.topic,at:Date.now(),
               sent:[...(same ? (prev.sent ?? []).filter(x=>Date.now()-x.at<6*3600_000) : []),{t:sameWords(text),at:Date.now()}].slice(-10)});
           }
-          return {exitCode:0,stdout:JSON.stringify({sent:true,messageId,...(remembered && {ask:remembered})})};
+          return {exitCode:0,stdout:JSON.stringify({sent:true,messageId,...(remembered && {ask:remembered}),
+            ...(day && {firstToday:day.firstToday,localTime:day.localTime})})};
         } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
       }
       if(argv[0]==="search-history"){
@@ -3083,6 +3094,7 @@ export default async function plugin(bb: BbPluginApi) {
             try { setUploadLimit(cfg.telegramApiRoot); } catch { /* invalid setting: cloud limit stays */ }
             bbMentions = cfg.bbMentions as BbMentionsSetting;
             employeeProjectSetting = String(cfg.employeeProject ?? "").trim();
+            orgTimeZone = String(cfg.timeZone ?? "").trim();
             if (!bridge) {
               if (spool) await mkdir(spool, { recursive: true, mode: 0o700 });
               activeAbort = new AbortController();
@@ -3108,6 +3120,7 @@ export default async function plugin(bb: BbPluginApi) {
                 bbMentions: () => bbMentionsOn(store, bbMentions),
                 employeeProject: () => employeeProjectSetting || undefined,
                 setupNote: (text) => bb.log.warn("Telegram setup: " + text),
+                todayOf,
                 wake: wakeChat,
                 reactions: () => currentReactions,
                 transcribe: async (v) => {
@@ -3151,7 +3164,8 @@ export default async function plugin(bb: BbPluginApi) {
                   voice=>transcribeTelegramVoice(botToken,bb.sdk,voice,signal,apiRoot,localFiles,
                     cfg.voiceRouterPath ? audio=>transcribeWithVoiceRouter(cfg.voiceRouterPath,audio,signal) : undefined,cfg.language as "ru"|"en"),cfg.telegramFileHostId,
                   (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum,()=>currentReactions,turnRulesOf,pausedOf,
-                  (threadId,route,path)=>insideConversationFolder(threadId,path,route.privateChat ? {kind:"person",subject:route.chatId} : {kind:"group",chat:route.chatId,topic:route.topicId}));
+                  (threadId,route,path)=>insideConversationFolder(threadId,path,route.privateChat ? {kind:"person",subject:route.chatId} : {kind:"group",chat:route.chatId,topic:route.topicId}),
+                  (chatId,topicId)=>{ orgTimeZone=String(cfg.timeZone ?? "").trim(); return todayOf(chatId,topicId); });
                 const scheduleFull=!feedUp || Date.now()-lastScheduleFull>=60_000;
                 if (scheduleFull) lastScheduleFull=Date.now();
                 const scheduleOnly=scheduleFull ? undefined : new Set(scheduleDirty);
