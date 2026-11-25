@@ -2797,7 +2797,8 @@ export default async function plugin(bb: BbPluginApi) {
           const day=archive ? today(archive.lastSent(bot,target.chat,target.topic),Date.now(),orgTimeZone || String((await settings.get()).timeZone ?? "")) : undefined;
           const ownPlace=caller && (caller.kind==="owner" ? target.chat===owner :
             caller.kind==="person" ? target.chat===caller.subject : target.chat===caller.chat && (caller.topic ?? 0)===target.topic);
-          if (day && !ownPlace && !opt.answer && text?.trim() && holdFirstToday(store,`${target.chat}:${target.topic}`,day))
+          // The owner's own chat never waits: reports to him go there every day, and a greeting there is noise.
+          if (day && !ownPlace && target.chat!==owner && !opt.answer && text?.trim() && holdFirstToday(store,`${target.chat}:${target.topic}`,day))
             return {exitCode:0,stdout:JSON.stringify({sent:false,firstToday:true,localTime:day.localTime,hint:FIRST_TODAY_HINT})};
           let remembered:string|undefined;
           if (ask && !caller && ownerAsk?.thread && !opt.answer) {
