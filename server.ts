@@ -2539,9 +2539,25 @@ export default async function plugin(bb: BbPluginApi) {
             if (!name) return {exitCode:2,stderr:"name_required: --name"};
             if (action==="create") {
               const made=await tg<{message_thread_id:number}>("createForumTopic",{chat_id:target.chat,name});
-              rememberForumName(store,bot,target.chat,made.message_thread_id,name,Date.now());
-              if (opt.text) await sendOutboundMessage(tg,{chatId:target.chat,topicId:made.message_thread_id,text:opt.text});
-              return {exitCode:0,stdout:JSON.stringify({created:true,topic:made.message_thread_id,name})};
+              const topicId=made.message_thread_id, now=Math.floor(Date.now()/1000);
+              rememberForumName(store,bot,target.chat,topicId,name,Date.now(),true,now);
+              // The bot gets no update about its own topic: the topic gets its conversation here, as one the owner made (С54).
+              const owner=ownerId();
+              let conversation=false;
+              if (owner) {
+                try {
+                  await inheritForumTopic(owner,bot,lifetime.signal,{update_id:Date.now(),message:{message_id:topicId,
+                    message_thread_id:topicId,is_topic_message:true,date:now,from:{id:bot,is_bot:true},
+                    chat:{id:target.chat,type:"supergroup",is_forum:true},forum_topic_created:{name}}});
+                  if (!store.get(`group:policy:${target.chat}:${topicId}`) && (await settings.get()).installKind==="employee") {
+                    const title=store.get<{title?:string}>(`visibility:${bot}:group:${target.chat}`)?.title ?? "группа";
+                    await bindConversation(owner,bot,{chatId:target.chat,topicId,title:`${title} · ${name}`},lifetime.signal);
+                  }
+                } catch (error) { bb.log.warn("Telegram topic conversation deferred: "+String((error as Error)?.message ?? error)); }
+                conversation=!!store.get(`group:policy:${target.chat}:${topicId}`);
+              }
+              if (opt.text) await sendOutboundMessage(tg,{chatId:target.chat,topicId,text:opt.text});
+              return {exitCode:0,stdout:JSON.stringify({created:true,topic:topicId,name,conversation})};
             }
             if (await tg("editForumTopic",{chat_id:target.chat,message_thread_id:target.topic,name})!==true) throw Error("rename_unconfirmed");
             rememberForumName(store,bot,target.chat,target.topic,name,Date.now());
