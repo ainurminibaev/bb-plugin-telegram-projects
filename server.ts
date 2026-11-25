@@ -3096,6 +3096,12 @@ export default async function plugin(bb: BbPluginApi) {
             await publishControl(true, cfg.language);
             await bridge.tick();
             const owner = ownerId(), bot = botId();
+            const employeeProject=String(cfg.employeeProject ?? "").trim();
+            if (owner && employeeProject && store.get("owner-chat:bind-employee-project")) {
+              await bridge.bindOwnerChat(employeeProject)
+                .catch(error=>bb.log.warn("Telegram owner chat binding: "+String(error?.message ?? error)));
+              store.del("owner-chat:bind-employee-project");
+            }
             if (owner && bot) {
               const groupTransport=(chatId:number)=>telegram(botToken,signal,15000,()=>chatId,apiRoot);
               try {
@@ -3407,10 +3413,8 @@ export default async function plugin(bb: BbPluginApi) {
               if (profilePath!==undefined && route.userId!==readEmployeeProfile(profilePath).owner) {store.put("ingress:offset",u.update_id+1);continue;}
               store.put("owner:id", route.userId);
               store.del("pair:code");
-              // An employee's install names its project: the owner's chat goes there at once (С102).
-              const employeeProject=String(cfg.employeeProject ?? "").trim();
-              if (employeeProject && bridge) await bridge.bindOwnerChat(employeeProject)
-                .catch(error=>bb.log.warn("Telegram owner chat binding: "+String(error?.message ?? error)));
+              // An employee's install names its project: the owner's chat goes there once the chat bridge runs (С102).
+              if (String(cfg.employeeProject ?? "").trim()) store.put("owner-chat:bind-employee-project",true);
               await tg("sendMessage", {
                 text: translate(
                   cfg.language as "ru" | "en",
