@@ -4,7 +4,7 @@ import { ReplyRoutes } from "../reply-routing";
 import { routeUpdate } from "../ingress";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatBridge, inputSchema, setFollowupStartWait, splitText, type ChatInput } from "../chat";
@@ -1482,7 +1482,8 @@ test("artifact delivered once before final, unavailable path explicitly reported
     assert.equal(docs.length,1); assert.equal(docs[0].document_filename,'report.pdf');
     assert.equal(await docs[0].document.text(),'%PDF-1.4 test');
     const final=f.sent.find(x=>x.text?.startsWith('Готово:'));
-    assert.ok(final.text.includes('файл отправлен выше')); assert.ok(final.text.includes('не удалось отправить файл'));
+    assert.ok(final.text.includes('файл отправлен выше')); assert.ok(final.text.includes('missing.pdf') && !final.text.includes('не удалось'));
+    assert.ok(f.calls.some(c=>c[0]==='send' && /Файл не приложен: missing\.pdf/.test(c[1].input[0].text)),'the agent is told why');
     assert.ok(final.text.includes('<a href="https://example.org">Источник</a>'));
     assert.ok(f.sent.indexOf(docs[0]) < f.sent.indexOf(final));
   } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
@@ -1727,7 +1728,8 @@ test("oversized photos never silently fall back to documents", async () => {
     ]);
     await f.bridge.observe(); await f.bridge.flush();
     assert.equal(f.sent.filter(x=>['sendPhoto','sendDocument'].includes(x.method)).length,0);
-    assert.ok(f.sent.some(x=>x.text?.includes('не удалось отправить файл')));
+    assert.ok(!f.sent.some(x=>x.text?.includes('не удалось')),'no service words to the person');
+    assert.ok(f.calls.some(c=>c[0]==='send' && /Файл не приложен: big\.png/.test(c[1].input[0].text)),'the agent is told why');
   } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
 });
 
@@ -1818,7 +1820,7 @@ test('uncertain album does not retry or fall back to individual photos',async()=
   await f.bridge.flush();await f.bridge.flush();
   assert.equal(f.sent.filter(x=>x.method==='sendMediaGroup').length,1);
   assert.equal(f.sent.filter(x=>['sendPhoto','sendDocument'].includes(x.method)).length,0);
-  assert.ok(f.sent.some(x=>x.text?.includes('не удалось подтвердить')));
+  assert.ok(!f.sent.some(x=>x.text?.includes('не удалось')),'no service words to the person');
   assert.ok([...f.data.entries()].filter(([k])=>k.startsWith('chat:file:')).every(([,v])=>v==='uncertain'));
  } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
 });
@@ -1829,7 +1831,7 @@ test('album validates all paths before sending any bytes',async()=>{
   f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:`[Первый](${dir}/a.png) [Нет файла](${dir}/missing.png)`,deliveryId:'album_missing_001'});
   await f.bridge.flush();
   assert.equal(f.sent.filter(x=>['sendMediaGroup','sendPhoto','sendDocument'].includes(x.method)).length,0);
-  assert.ok(f.sent.some(x=>x.text?.includes('не удалось отправить')));
+  assert.ok(f.sent.some(x=>x.text?.includes('missing.png') && !x.text.includes('не удалось')));
  } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});}
 });
 test('confirmed album rate limit retries the group once without duplicate photos',async()=>{
@@ -2526,7 +2528,7 @@ test("explicit files[] alone form an album; unsafe or unknown paths are refused 
   const f=fixture(); const dir=mkdtempSync(join(tmpdir(),'explicit-files-')); const outside=mkdtempSync(join(tmpdir(),'outside-'));
   try {
     for (const name of ['a.png','b.png']) writeFileSync(join(dir,name),'image');
-    writeFileSync(join(outside,'secret.png'),'image');
+    mkdirSync(join(outside,'.secrets'));writeFileSync(join(outside,'.secrets','secret.png'),'image');
     f.sdk.environments.get=async()=>({path:dir});
     await f.bridge.handle(f.input('bind')); await f.bridge.flush(); f.sent.length=0;
     f.bridge.sendExplicit({threadId:'thr_one',topicId:100,files:[join(dir,'a.png'),join(dir,'b.png')],deliveryId:'explicit_files_001'});
@@ -2537,11 +2539,11 @@ test("explicit files[] alone form an album; unsafe or unknown paths are refused 
     assert.throws(()=>f.bridge.sendExplicit({threadId:'thr_one',topicId:100,files:['relative.png'],deliveryId:'explicit_files_003'}),/invalid/);
     // Any file type goes as a document; the workspace and size checks decide at delivery.
     assert.doesNotThrow(()=>f.bridge.sendExplicit({threadId:'thr_one',topicId:100,files:[join(dir,'run.sh')],deliveryId:'explicit_files_004'}));
-    f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:'Вот',files:[join(outside,'secret.png')],deliveryId:'explicit_files_005'});
-    f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:'И это ![](../'+outside.split('/').pop()+'/secret.png)',deliveryId:'explicit_files_006'});
+    f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:'Вот',files:[join(outside,'.secrets','secret.png')],deliveryId:'explicit_files_005'});
+    f.bridge.sendExplicit({threadId:'thr_one',topicId:100,text:'И это ![](../'+outside.split('/').pop()+'/.secrets/secret.png)',deliveryId:'explicit_files_006'});
     await f.bridge.flush();
     assert.equal(f.sent.filter(x=>x.method==='sendPhoto').length,0);
-    assert.ok(f.sent.some(x=>x.method==='sendMessage' && x.text.includes('secret.png — не удалось отправить файл')));
+    assert.ok(f.sent.some(x=>x.method==='sendMessage' && x.text.includes('secret.png') && !x.text.includes('не удалось')),'only the name; a secret place is never attached');
   } finally {f.cleanup();rmSync(dir,{recursive:true,force:true});rmSync(outside,{recursive:true,force:true});}
 });
 
@@ -3343,7 +3345,8 @@ for (const kind of ["photo","document"] as const) test(`lost ${kind} receipt sta
     assert.deepEqual(Buffer.from(await files[0][kind].arrayBuffer()),bytes);
     assert.equal(f.store.list("chat:out:busy-exact:").length,0);
     assert.ok(f.store.list("chat:file:").some(row=>row.value==="uncertain"));
-    assert.equal(f.calls.filter(call=>call[0]==="send").length,1);
+    assert.equal(f.calls.filter(call=>call[0]==="send" && !/Файл не приложен/.test(call[1].input?.[0]?.text ?? "")).length,1);
+    assert.ok(f.calls.some(call=>call[0]==="send" && /доставка не подтверждена/.test(call[1].input?.[0]?.text ?? "")),"the agent learns the delivery is unconfirmed");
   } finally {f.cleanup();rmSync(root,{recursive:true,force:true});}
 });
 
@@ -3373,7 +3376,7 @@ test("a late album part stops saved busy text already queued in the shared outbo
     await f.bridge.flush();await f.restart().flush();
     assert.equal(f.sent.filter(row=>row.method==="sendMessage").length,0);
     assert.equal(f.store.get<{busyExact:string}>(exact[0].key)?.busyExact,"cancelled");
-    assert.equal(f.calls.filter(call=>call[0]==="send").length,1);
+    assert.equal(f.calls.filter(call=>call[0]==="send" && !/Файл не приложен/.test(call[1].input?.[0]?.text ?? "")).length,1);
   } finally {f.cleanup();}
 });
 

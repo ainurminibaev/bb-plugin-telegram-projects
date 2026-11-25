@@ -1,3 +1,4 @@
+import {ownerMayAttach} from "./attach-rules";
 import { uploadLimit } from "./telegram-files";
 import {voiceTranscripts} from "./archive";
 import {maxEncodedImages,readSavedImage,type ImageAttachment} from "./group-attachments";
@@ -3362,6 +3363,7 @@ export class ChatBridge {
     if (!found.length) return {text, lastMediaId};
     const binding = this.deliveryBinding(o.topicId, o.revision);
     const sourceThreadId = o.sourceThreadId ?? binding?.threadId;
+    const notAttached: string[] = [];
     const roots: string[] = [];
     if (sourceThreadId) {
       const threads = [await this.d.sdk.threads.get({threadId: sourceThreadId, signal: this.d.signal}),
@@ -3402,8 +3404,7 @@ export class ChatBridge {
     };
     const photoData = (link: typeof links[number]) => {
       const path = realpathSync(link.path);
-      if (!roots.some(root => path.startsWith(root + sep))) throw new Error("outside_workspace");
-      if (path.split(sep).some(x => x.startsWith("."))) throw new Error("private_path");
+      if (!ownerMayAttach(path).ok) throw new Error("private_path");
       if (!/\.(png|jpe?g|webp|gif)$/i.test(path)) throw new Error("unsupported_artifact");
       const stat = statSync(path);
       if (!stat.isFile() || stat.size > 10 * 1024 * 1024) throw new Error("photo_limit");
@@ -3419,8 +3420,7 @@ export class ChatBridge {
         let totalBytes=0;
         const files:AlbumMedia[]=distinct.map(link=>{
           const path=realpathSync(link.path);
-          if (!roots.some(root=>path.startsWith(root+sep)) || path.split(sep).some(part=>part.startsWith(".")) ||
-              !ARTIFACT_EXTENSIONS.test(path)) throw Error("invalid_album_artifact");
+          if (!ownerMayAttach(path).ok || !ARTIFACT_EXTENSIONS.test(path)) throw Error("invalid_album_artifact");
           const stat=statSync(path);
           totalBytes+=stat.size;
           if (!stat.isFile() || totalBytes>maxOutboundDocumentBytes) throw Error("file_limit");
@@ -3518,8 +3518,10 @@ export class ChatBridge {
       if (!state) {
         try {
           const path = realpathSync(link.path);
-          if (!roots.some(root => path.startsWith(root + sep))) throw new Error("outside_workspace");
-          if (path.split(sep).some(x => x.startsWith("."))) throw new Error("private_path");
+          // С84: the owner's conversation attaches any readable file outside places of secrets, also from another
+          // project on this machine; a conversation of a group or a person keeps its workspace limit.
+          const rule = ownerMayAttach(path);
+          if (!rule.ok) { notAttached.push(basename(link.path)+": "+rule.reason); throw new Error("not_attached"); }
           // Any file type, as in groups: the size limit and the workspace check decide.
           const stat = statSync(path);
           if (!stat.isFile() || stat.size > uploadLimit()) throw new Error("file_limit");
@@ -3556,9 +3558,18 @@ export class ChatBridge {
         lastMediaId=state;
         if (addressedFile && bodyCaption) return {text:"",lastMediaId};
       }
+      // No service words to the person: a file that did not go stays its name; the agent gets the reason.
+      if (typeof state !== "number" && !notAttached.some(n => n.startsWith(basename(link.path)+":")))
+        notAttached.push(basename(link.path)+(state === "uncertain" ? ": доставка не подтверждена Telegram, повтор не делался" : ": не удалось прочитать или отправить файл"));
       const label = typeof state === "number" ? (addressedFile || isImage || isVideo ? "" : basename(link.path) + " — файл отправлен выше") :
-        basename(link.path) + (state === "uncertain" ? " — не удалось подтвердить доставку файла" : " — не удалось отправить файл");
+        basename(link.path);
       text = text.split(link.markdown).join(label);
+    }
+    // The agent learns which files were not attached and why (once per answer).
+    if (notAttached.length && sourceThreadId && !this.s.get("chat:not-attached:"+key)) {
+      this.s.put("chat:not-attached:"+key, Date.now());
+      await this.d.sdk.threads.send({threadId: sourceThreadId, mode: "queue-if-active", input: [{type: "text", mentions: [],
+        text: "[Мост Telegram] Файл не приложен: " + notAttached.join("; ") + ". Человеку ушло только имя файла; если файл нужен — положи его копию в папку результатов и пришли ссылкой снова."}]}).catch(() => undefined);
     }
     return {text, lastMediaId};
   }
