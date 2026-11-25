@@ -740,4 +740,5 @@ test("0.9.75: two forwards and a comment of the owner in a place without mention
  assert.equal(inputs.length,1,"one turn");
  assert.match(inputs[0],/первая мысль[\s\S]*вторая мысль[\s\S]*Передай это Потапычу/);
  assert.match(inputs[0],/Автор оригинала: Пётр/);
+ assert.equal(inputs[0].split("вторая мысль").length,2,"a merged voice's transcript is there once");
 });

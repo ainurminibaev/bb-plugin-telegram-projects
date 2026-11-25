@@ -383,7 +383,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       if (chain.waiting) continue;                         // a window is still open or a voice is not yet transcribed
       for (const m of chain.members) {
         const mr=m.job.route;
-        r.text += "\n\n"+(mr.ownText ?? mr.text)+(mr.voiceText ? "\n"+mr.voiceText : "");
+        r.text += "\n\n"+(mr.ownText ?? mr.text)+(mr.ownText!==undefined && mr.voiceText ? "\n"+mr.voiceText : "");
         if (mr.examples?.length) r.examples=[...(r.examples ?? []),...mr.examples];
         store.put(m.key,{...m.job,state:"ready",answer:NO_REPLY,mergedInto:r.updateId});
       }

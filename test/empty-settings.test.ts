@@ -22,7 +22,9 @@ const policy = { chatId: CHAT, topicId: TOPIC, threadId: "thr", ownerOnly: false
 const msg = (from: number, text: string, extra: Record<string, unknown> = {}) =>
   ({ update_id: 5, message: { message_id: 9, message_thread_id: TOPIC, is_topic_message: true, chat: forum, from: { id: from }, text, ...extra } });
 
-test("empty settings: every message is routed exactly as before", () => {
+test("empty settings: every message is routed exactly as before", t => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);   // 0.9.75: a route carries arrivedAt
   const store = memoryStore();
   store.put(leadsByDefaultKey, "auto");   // what the bridge stores from an empty setting
   const withModes = withTopicMode(store as any, policy as any, []);
