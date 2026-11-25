@@ -1,3 +1,10 @@
+# 0.9.73
+
+- С103: the turn note of a group, a topic, a person's chat and the owner's chat says whether the agent has written there today and the local time («Сегодня ты в этом чате ещё не писал; сейчас 09:12 (Europe/Moscow)»). `send` answers with `firstToday` and `localTime`; the first message of the day into another chat waits once (`sent:false` with a hint) so the agent can greet in that chat's style; the same text again goes as it is. The day is the organization's: the `timeZone` setting, empty — Europe/Moscow. No word lists: whether to greet is the agent's choice.
+- С105: a message the bot already answered in its chat and topic — by `send` from any conversation of the install (a subthread too) or by a reply to it — is not given to the agent again (after a pause, a lost submission or a busy turn) and is never called lost. Another job's answer posted later does not count.
+- С105: `edit` and `delete` of the bot's own message take `--chat` from the owner's conversation and its subthreads; a group's or a person's conversation acts only in its own chat; someone else's message — as before.
+- С76: a conversation folder the bridge makes is trusted by Codex (`trust_level = "trusted"` in the account's config) and Claude (servers of its `.mcp.json`), so a group in its own folder gets the organization's connections. Own folders stay off by default.
+
 # 0.9.72
 
 - A group's or a person's conversation is made in the owner's project even when the owner's chat has no conversation yet (before, an employee whose owner had just started a new chat silently ignored mentions in groups).
