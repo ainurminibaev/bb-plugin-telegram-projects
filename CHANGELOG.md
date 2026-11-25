@@ -1,3 +1,9 @@
+# 0.9.71
+
+- Group and private conversations in their own folders (С76): a new group or person can get its own project and folder, an existing group can be moved and moved back (schedules follow both ways), with a guard at the account level. Off by default: with `conversationFoldersRoot` empty nothing changes.
+- Agents in chats: a topic is led by one agent or answered by mention; the owner's message without a mention goes only to the leader when another agent of the organization is in the chat; a colleague called once; the agent's curator is an addressee of a question (`send --person curator --ask`). Off by default: with `agentBots` empty nothing changes.
+- Files a group's or a person's conversation sends — with `send --file` or a link in its answer — are limited to files received in this very chat, results of its own tasks (outputs/<task number>/) and files made during this turn; the refusal names the folder to copy to, and an old file is copied there first. This prevents sending another conversation's file by mistake; it is not a leak barrier while group conversations share a folder with the owner's private chat — that boundary is the conversation's own folder with the account-level guard (С76). The owner's conversation is not limited.
+
 # 0.9.70
 
 - The final answer is hidden only by an exact repeat (words, without spacing, formatting or the answer marker) of a text the agent sent into the same chat and topic during this very turn; «Готово.» after «будет готово через минуту» is posted. A lost answer is worse than a double one.
