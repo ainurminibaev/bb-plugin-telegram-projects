@@ -1,6 +1,6 @@
 # 0.9.74
 
-- Fix: a deferred task in a group (a participant's «in N minutes send the result here», `telegram_group_followup`) runs again. In 0.9.73 the check «the bot already replied to this message» saw the confirmation «scheduled» on the same original message and closed the task silently, without a turn. The check now applies only to real Telegram messages, not to what the bridge gives itself (deferred tasks, subthread results).
+- Fix: a deferred task in a group (a participant's «in N minutes send the result here», `telegram_group_followup`) runs again. In 0.9.73 the check «the bot already replied to this message» saw the confirmation «scheduled» on the same original message and closed the task silently, without a turn. The same check closed the owner's answer to a group's question (it comes under the original message, which the bot had answered «asked the owner»). The check now applies only to real Telegram messages, not to what the bridge gives itself (deferred tasks, subthread results, the owner's answers).
 
 # 0.9.73
 

@@ -503,6 +503,11 @@ test("0.9.73 fix: a deferred task the bridge gives itself runs although the bot 
  await processGroupInputs(store,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal,
    undefined,undefined,undefined,false,undefined,undefined,undefined,undefined,undefined,()=>[{message:11,replyTo:10}]);
  assert.equal(sends,1,"the deferred task is given to the agent");
+ // The owner's answer to a group's question (queueAnswerTurn: updateId −Date.now()) under the same original message.
+ store.put("group:in:5:-1795600000000",{ownerId:7,state:"pending",route:{kind:"group",chatId:-1001,topicId:3,senderId:7,threadId:"t",messageId:10,updateId:-1795600000000,text:"Ответ владельца: да"}});
+ await processGroupInputs(store,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal,
+   undefined,undefined,undefined,false,undefined,undefined,undefined,undefined,undefined,()=>[{message:11,replyTo:10}]);
+ assert.equal(sends,2,"the owner's answer is given to the agent too");
 });
 
 test("С105: a message the bot already replied to is neither given again nor called lost; a later unrelated message does not count",async t=>{
