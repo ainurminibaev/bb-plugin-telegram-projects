@@ -15,7 +15,7 @@ import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} fro
 import {conversationOf,conversationOfThread,guardGroupMemory,movedConversationOf,movedConversationRefusal,readableChats} from "./archive-access";
 import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefusal,sendTargets,curatorTarget,conversationMayAttach} from "./send-command";
 import {sendFormattedText,sendOutboundMessage} from "./outbound-message";
-import {sameWords,sentByCommandKey,sentInTurnKey} from "./group-worker";
+import {sameWords,sentInTurnKey} from "./group-worker";
 import {maxAlbumItems,sendAlbum} from "./media-album";
 import {renderTelegramParts} from "./telegram-ux";
 import {acceptOwnerAskCallback,answerTurnText,askButtons,cleanQuestion,forwardOriginal,ownerQuestion,queueAnswerTurn,rememberAskMessage,turnMessageKey} from "./owner-ask";
@@ -35,7 +35,7 @@ import { transcribeWithVoiceRouter } from "./voice-router";
 import {MAX_INCOMING_BYTES, maxRoutedDocumentBytes, openInboxDirs, safeTelegramFilename, saveLocalTelegramFile, setUploadLimit, telegramApiRoot as checkedApiRoot, uploadLimit } from "./telegram-files";
 import { agencyIntegration, agencyDeliverySchema, agencyCapabilitySchema, agencyReceiptSchema } from "./agency-integration";
 import { translate } from "./locale";
-import { today, todayLine } from "./today";
+import { FIRST_TODAY_HINT, holdFirstToday, today, todayLine } from "./today";
 import {
   preferencesSchema,
   diagnosisSchema,
@@ -2591,6 +2591,7 @@ export default async function plugin(bb: BbPluginApi) {
         const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
         if (!caller) return {exitCode:1,stderr:"edit_only_from_a_telegram_conversation: править можно только в чате своего разговора"};
         const named=at("--chat")!==undefined ? (/^-?\d+$/.test(at("--chat")!) ? Number(at("--chat")) : findGroup(store,bot,at("--chat")!)) : undefined;
+        if (at("--chat")!==undefined && named===undefined) return {exitCode:1,stderr:"chat_not_found: такого чата у бота нет — укажи номер группы или точное название"};
         const chat=ownMessageChat(caller,owner,named);
         if (chat===undefined) return {exitCode:1,stderr:"edit_own_chat_only: в другом чате правит разговор владельца или разговор того чата"};
         const stored=archive?.message(bot,chat,message);
@@ -2649,6 +2650,7 @@ export default async function plugin(bb: BbPluginApi) {
         const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
         const c=argv.indexOf("--chat"); const rawChat=c>0 ? argv[c+1] : undefined;
         const named=rawChat!==undefined ? (/^-?\d+$/.test(rawChat) ? Number(rawChat) : findGroup(store,bot,rawChat)) : undefined;
+        if (rawChat!==undefined && named===undefined) return {exitCode:1,stderr:"chat_not_found: такого чата у бота нет — укажи номер группы или точное название"};
         if (rawChat!==undefined && caller && ownMessageChat(caller,owner,named)===undefined)
           return {exitCode:1,stderr:"delete_only_in_own_chat: в другом чате удаляет разговор владельца или разговор того чата"};
         const chat=ownMessageChat(caller,owner,named) ?? (caller?.kind==="group" ? caller.chat : caller?.kind==="person" ? caller.subject : owner);
@@ -2790,6 +2792,13 @@ export default async function plugin(bb: BbPluginApi) {
           const tg=telegram(botToken,lifetime.signal,60_000,()=>target.chat,apiRoot);
           // С56: a PDF as a reply to the scheme picture sent just before (its messageId from the first send).
           const replyTo=opt["reply-to"] && /^\d+$/.test(opt["reply-to"]) ? Number(opt["reply-to"]) : undefined;
+          // С103: whether the bot had written there today, taken before this message goes out. The first message of the day
+          // into another place waits once (before any question is recorded), so the agent can greet in that chat's style.
+          const day=archive ? today(archive.lastSent(bot,target.chat,target.topic),Date.now(),orgTimeZone || String((await settings.get()).timeZone ?? "")) : undefined;
+          const ownPlace=caller && (caller.kind==="owner" ? target.chat===owner :
+            caller.kind==="person" ? target.chat===caller.subject : target.chat===caller.chat && (caller.topic ?? 0)===target.topic);
+          if (day && !ownPlace && !opt.answer && text?.trim() && holdFirstToday(store,`${target.chat}:${target.topic}`,day))
+            return {exitCode:0,stdout:JSON.stringify({sent:false,firstToday:true,localTime:day.localTime,hint:FIRST_TODAY_HINT})};
           let remembered:string|undefined;
           if (ask && !caller && ownerAsk?.thread && !opt.answer) {
             const asked=rememberAsk(store,bot,owner,{chat:owner,topic:0},text ?? "");
@@ -2807,22 +2816,6 @@ export default async function plugin(bb: BbPluginApi) {
           // A person's own message goes to the owner as it is, before the question (С67).
           if (ownerAsk?.turn && ownerAsk.turn.chat>0) await forwardOriginal(chat=>telegram(botToken,lifetime.signal,60_000,()=>chat,apiRoot),owner,ownerAsk.turn);
           const buttons=ownerAsk && remembered ? askButtons(remembered) : undefined;
-          // С103: whether the bot had written there today, taken before this message goes out.
-          const day=archive ? today(archive.lastSent(bot,target.chat,target.topic),Date.now(),orgTimeZone || String((await settings.get()).timeZone ?? "")) : undefined;
-          // С103: the first message of the day into another chat waits once, so the agent can greet in that chat's style;
-          // the same text again (chat, topic and text, within two hours) goes as it is. No word lists: the agent decides.
-          const ownPlace=caller && (caller.kind==="owner" ? target.chat===owner :
-            caller.kind==="person" ? target.chat===caller.subject : target.chat===caller.chat && (caller.topic ?? 0)===target.topic);
-          if (day?.firstToday && !ownPlace && !opt.answer && text?.trim()) {
-            const holdKey="send:first-today:"+createHash("sha256").update(`${target.chat}:${target.topic}:${text}`).digest("hex").slice(0,32);
-            const held=store.get<number>(holdKey);
-            if (!held || Date.now()-held>2*3600_000) {
-              store.put(holdKey,Date.now());
-              return {exitCode:0,stdout:JSON.stringify({sent:false,firstToday:true,localTime:day.localTime,
-                hint:"сегодня ты здесь ещё не писал; если в тексте нет приветствия по времени суток в стиле этого чата — добавь и отправь; тот же текст повторно уйдёт как есть"})};
-            }
-            store.del(holdKey);
-          }
           let messageId:number|undefined;
           if (files.length>1) {
             if (ask) return {exitCode:2,stderr:"ask_with_one_file_only"};
@@ -2849,8 +2842,6 @@ export default async function plugin(bb: BbPluginApi) {
           } else messageId=file || !text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file,replyTo})
             : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text,...(buttons && {replyMarkup:buttons})})).at(-1);
           if (ownerAsk && remembered && messageId) rememberAskMessage(store,bot,messageId,remembered);
-          // С105: a message sent here by the command answers what came before it (a subthread's answer too).
-          if (messageId) store.put(sentByCommandKey(target.chat,target.topic,messageId),Math.floor(Date.now()/1000));
           if (opt.answer) closeAsk(store,bot,opt.answer);
           // A group conversation wrote into its own chat during the turn: the turn's final answer is not posted again.
           if (caller?.kind==="group" && caller.chat===target.chat && (caller.topic ?? 0)===target.topic && !ask && text?.trim()) {

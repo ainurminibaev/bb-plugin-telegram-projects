@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {today,todayLine} from "../today";
+import {holdFirstToday,today,todayLine} from "../today";
 
 test("С103: «today» is the organization's day; the line says whether the agent wrote here and the local time", () => {
   // 2026-11-25 06:10 UTC = 09:10 in Moscow.
@@ -16,4 +16,18 @@ test("С103: «today» is the organization's day; the line says whether the agen
   assert.equal(today(Date.UTC(2026, 10, 24, 20, 0) / 1000, now, "Europe/Moscow").firstToday, true);
   // An unknown zone falls back to Moscow.
   assert.equal(today(undefined, now, "Nowhere/City").timeZone, "Europe/Moscow");
+});
+
+test("С103: the first send of the day into another place waits once per place and day, whatever the text", () => {
+  const rows = new Map<string, unknown>();
+  const store = { get: <T>(k: string) => rows.get(k) as T, put: (k: string, v: unknown) => { rows.set(k, v); } };
+  const now = Date.UTC(2026, 10, 25, 6, 10);
+  const first = today(undefined, now, "Europe/Moscow");
+  assert.equal(holdFirstToday(store, "-1001:3", first), true, "the first one waits");
+  assert.equal(holdFirstToday(store, "-1001:3", first), false, "the corrected text (any text) goes at once");
+  assert.equal(holdFirstToday(store, "-1001:4", first), true, "another topic is another place");
+  const wrote = today(Date.UTC(2026, 10, 25, 5, 0) / 1000, now, "Europe/Moscow");
+  assert.equal(holdFirstToday(store, "-1002:0", wrote), false, "already wrote there today: no wait");
+  const tomorrow = today(Date.UTC(2026, 10, 25, 6, 10) / 1000, now + 24 * 3600_000, "Europe/Moscow");
+  assert.equal(holdFirstToday(store, "-1001:3", tomorrow), true, "a new day waits once again");
 });

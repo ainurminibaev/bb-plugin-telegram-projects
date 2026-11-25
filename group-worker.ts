@@ -53,8 +53,7 @@ export async function settled(key:string,start:()=>Promise<unknown>,keep=false):
 /** Quick work finishes within this grace and is used in the same pass, as before. */
 export let SLOW_WORK_GRACE_MS=1_500;
 export function setSlowWorkGrace(ms:number) { SLOW_WORK_GRACE_MS=ms; }
-/** С105: a message the bot sent by the send command (any conversation of this install). */
-export const sentByCommandKey=(chat:number,topic:number,message:number)=>`send:out:${chat}:${topic}:${message}`;
+
 /** "Typing" for a submitted message stops after this long. */
 export const TYPING_MAX_MS=10*60_000;
 
@@ -213,12 +212,12 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   todayOf?:(chatId:number,topicId:number)=>string,
   /** С105: the bot's own messages in this chat and topic after this message (number and what it replies to). */
   botMessagesAfter?:(chatId:number,topicId:number,messageId:number)=>{message:number;replyTo?:number}[]) {
-  // С105: answered — the bot wrote here after this message by the send command (from any conversation, a subthread too)
-  // or replied to this very message. Another job's final answer posted later does not answer this one.
+  // С105 (narrow, until the incoming ledger): answered — the bot replied to this very message. Any other later message
+  // of the bot proves nothing: several messages may wait, and an answer to one is not an answer to another.
   const answered=(r:{chatId:number;topicId:number;messageId:number})=>{
     try {
       if (!(r.messageId>0) || !botMessagesAfter) return false;
-      return botMessagesAfter(r.chatId,r.topicId,r.messageId).some(m=>m.replyTo===r.messageId || !!store.get(sentByCommandKey(r.chatId,r.topicId,m.message)));
+      return botMessagesAfter(r.chatId,r.topicId,r.messageId).some(m=>m.replyTo===r.messageId);
     } catch {return false;}
   };
   const routes=new ReplyRoutes(store);
@@ -457,8 +456,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         continue;
       }
     }
-    // С105: a message the bot has already answered here (a send from another conversation, a reply to it) — after
-    // a pause, a restart or a late delivery — is not given to the agent again.
+    // С105: a message the bot has already replied to — after a pause, a restart or a late delivery — is not given again.
     if (job.state==="pending" && answered(r)) {job.answer=NO_REPLY; job.state="ready";}
     if (job.state==="pending") {
       const thread = await sdk.threads.get({threadId:r.threadId,signal});
@@ -530,7 +528,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
             if (enclosed) {job.turnId=turn; job.answer=enclosed; job.state="ready";}
             else if (e.type==="turn/completed" && !routes.sameTask(routes.destination(r.threadId,turn),dest)) {
               // The turn ended without that answer: send the message again, in turn order — unless the bot has already
-              // written here after it (a send, a subthread's message): then it is answered and not given twice (С105).
+              // replied to it (С105): then it is answered and not given twice.
               if (answered(r)) {job.turnId=turn; job.answer=NO_REPLY; job.state="ready";}
               else {job.busyOnce=true; delete job.busyLabel; job.state="pending";}
             }
