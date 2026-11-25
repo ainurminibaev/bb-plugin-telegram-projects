@@ -488,6 +488,13 @@ export class ReplyRoutes {
   routeOf(threadId: string, requestId: string) {
     return this.store.get<ReplyRoute>(this.requestKey(threadId, requestId));
   }
+  /** The route of a turn whose request the owner cancelled with the stop button. */
+  stoppedRoute(threadId: string, turnId: string): ReplyRoute | undefined {
+    const turn = this.store.get<TurnRoutes>(this.turnKey(threadId, turnId));
+    if (!turn || turn.ambiguous || !turn.requestIds.length) return undefined;
+    const route = this.store.get<ReplyRoute>(this.requestKey(threadId, turn.requestIds[0]));
+    return this.cancelled(route) ? route : undefined;
+  }
   destination(threadId: string, turnId: string): ReplyRoute | undefined {
     const turn = this.store.get<TurnRoutes>(this.turnKey(threadId, turnId));
     if (!turn || turn.ambiguous || !turn.requestIds.length) return undefined;

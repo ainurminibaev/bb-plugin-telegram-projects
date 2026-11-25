@@ -3138,6 +3138,13 @@ export class ChatBridge {
           if (event.scope.kind !== "turn" || !this.canDeliver(b, event.scope.turnId)) {
             if (event.type === "turn/completed" && event.scope.kind === "turn" && event.data.status === "completed")
               this.recoverNativeBusy(b,event.scope.turnId,event.seq);
+            // The stop button cancels the request's route, so the run is no longer «ours» to answer;
+            // the owner who pressed it still hears that it stopped (С79).
+            if (event.type === "turn/completed" && event.scope.kind === "turn" && event.data.status === "interrupted") {
+              const stopped = this.routes.stoppedRoute(b.threadId, event.scope.turnId);
+              if (stopped?.kind === "telegram" && stopped.chatId === this.d.owner() && stopped.topicId === b.topicId)
+                this.enqueue(b.topicId, this.tr("Остановлено."), undefined, "end:" + b.revision + ":" + event.seq);
+            }
             b.cursor = event.seq;
             continue;
           }

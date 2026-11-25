@@ -1359,6 +1359,21 @@ test("stop before flush suppresses a queued result", async () => {
   } finally { f.cleanup(); }
 });
 
+test("a run stopped with the stop button still says «Остановлено.»", async () => {
+  const f = fixture();
+  try {
+    await f.bridge.handle(f.input("Research"));
+    f.acceptTelegramTurn("parent");
+    await f.bridge.handle(f.input("/stop"));
+    await f.press("stop");
+    f.setEvents([{seq:1,type:"turn/completed",scope:{kind:"turn",turnId:"parent"},data:{status:"interrupted"}}]);
+    f.thread.status = "idle";
+    await f.bridge.observe();
+    await f.bridge.flush();
+    assert.equal(f.sent.filter(row => row.text === "Остановлено.").length, 1);
+  } finally { f.cleanup(); }
+});
+
 test("delegated spawn uses native project/environment and keeps one worker on RPC replay", async () => {
   const f=fixture();
   try {
