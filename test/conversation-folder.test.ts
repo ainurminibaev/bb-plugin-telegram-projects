@@ -189,9 +189,37 @@ test("С76: a folder the bridge makes on a working installation is guarded befor
   const id=await ownFolderProject(d,{chatId:-100777,title:"Новая группа"});
   assert.equal(id,"proj_g1");
   const folder=made[0].source.path;
+  assert.match(await readFile(join(home,".codex","hooks.json"),"utf8"),/guest-thread-guard/);
+  const {readFile:rf}=await import("node:fs/promises");
+  const trustedCodex=await rf(join(home,".codex","config.toml"),"utf8").catch(()=>"");
+  assert.ok(trustedCodex.includes(`[projects.${JSON.stringify(folder)}]`),"trusted by Codex before its first turn");
   assert.deepEqual(JSON.parse(await readFile(join(folder,".vallis-conversation.json"),"utf8")),{installation:owner},
     "the platform takes the organization's rules and the role from the installation");
   assert.equal(made[0].name,"Группа: Новая группа");
   // own folders off: the conversation stays where it was
   assert.equal(await ownFolderProject({...d,root:""},{chatId:-1,title:"x"}),undefined);
+});
+
+test("С76: a conversation folder is trusted by Codex and Claude when the bridge makes it, so its connections apply", async()=>{
+  const {trustConversationFolder}=await import("../conversation-folder");
+  const {mkdir}=await import("node:fs/promises");
+  const home=await mkdtemp(join(tmpdir(),"c76-trust-"));
+  const folder=join(home,"conversations","group-1");
+  await mkdir(join(folder,".claude"),{recursive:true});
+  await mkdir(join(home,".codex"),{recursive:true});
+  await writeFile(join(home,".codex","config.toml"),'model = "gpt"\n\n[projects."/srv/other"]\ntrust_level = "trusted"\n');
+  await writeFile(join(folder,".claude","settings.json"),JSON.stringify({hooks:{PreToolUse:[]}}));
+  await trustConversationFolder(folder,home);
+  await trustConversationFolder(folder,home);   // twice: nothing is doubled
+  const config=await readFile(join(home,".codex","config.toml"),"utf8");
+  assert.match(config,/^model = "gpt"/,"the rest of the account's settings stays");
+  assert.match(config,/\[projects\."\/srv\/other"\]\ntrust_level = "trusted"/);
+  assert.equal(config.split(`[projects.${JSON.stringify(folder)}]\ntrust_level = "trusted"`).length,2,"one trust entry for the folder");
+  const claude=JSON.parse(await readFile(join(folder,".claude","settings.json"),"utf8"));
+  assert.equal(claude.enableAllProjectMcpServers,true,"Claude approves the servers of the folder's .mcp.json");
+  assert.deepEqual(claude.hooks,{PreToolUse:[]},"the folder's other settings stay");
+  // CODEX_HOME is where Codex reads its settings; a missing file is created
+  const codexHome=join(home,"codex-home");
+  await trustConversationFolder(folder,home,codexHome);
+  assert.match(await readFile(join(codexHome,"config.toml"),"utf8"),new RegExp(`^\\[projects\\.${JSON.stringify(folder).replace(/[.*+?^${}()|[\]\\/]/g,"\\$&")}\\]\\ntrust_level = "trusted"\\n$`));
 });

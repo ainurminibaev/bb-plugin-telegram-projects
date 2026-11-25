@@ -183,6 +183,35 @@ export async function restoreConversation(d:{store:Store;bind:(policy:Policy,pro
 }
 
 /**
+ * С76: the folder's own settings (MCP connections by link, the organization's skills) apply only in a trusted folder.
+ * Codex: the account's config.toml gets `[projects."<folder>"] trust_level = "trusted"` — the same key BB's project
+ * trust card writes; Claude Code: the folder's own .claude/settings.json approves the servers of its .mcp.json.
+ * Nothing else in either file changes; an existing trust is left as it is.
+ */
+export async function trustConversationFolder(path:string,home:string,codexHome?:string) {
+  const {readFile,writeFile,rename,mkdir:mk}=await import("node:fs/promises");
+  const codexDir=codexHome || join(home,".codex");
+  const config=join(codexDir,"config.toml");
+  const current=await readFile(config,"utf8").catch(()=>"");
+  const table=`[projects.${JSON.stringify(path)}]`;
+  if (!current.includes(table)) {
+    await mk(codexDir,{recursive:true,mode:0o700});
+    const next=(current && !current.endsWith("\n") ? current+"\n" : current)+(current ? "\n" : "")+table+"\ntrust_level = \"trusted\"\n";
+    const tmp=config+".vallis-"+process.pid;
+    await writeFile(tmp,next,{mode:0o600});
+    await rename(tmp,config);
+  }
+  const claudeDir=join(path,".claude");
+  await mk(claudeDir,{recursive:true,mode:0o700});
+  const settingsPath=join(claudeDir,"settings.json");
+  let settings:Record<string,unknown>={};
+  try { settings=JSON.parse(await readFile(settingsPath,"utf8")); } catch { settings={}; }
+  if (settings.enableAllProjectMcpServers!==true) {
+    await writeFile(settingsPath,JSON.stringify({...settings,enableAllProjectMcpServers:true},null,2)+"\n",{mode:0o600});
+  }
+}
+
+/**
  * The own folder and project of a new conversation (С76), or undefined when own folders are off. Nothing is made, and
  * the conversation is not bound, unless the guest guard already reaches the folder: a group never takes a turn in a
  * folder without it, also when the bridge makes the folder long after the installation.
@@ -196,5 +225,7 @@ export async function ownFolderProject(d:{root:string;rulesFile:string;home:stri
   if (!hostId) throw Error("conversation_host_unknown");
   const kind=c.privateChat ? "person" as const : "group" as const;
   const path=await ensureConversationFolder(d.root,kind,c.chatId,c.title,d.rulesFile,owner?.sources?.[0]?.path ?? "");
+  // Trusted before the project exists: the first turn already has the organization's connections.
+  await trustConversationFolder(path,d.home,d.codexHome);
   return ensureConversationProject(d.store,d.projects,hostId,path,(kind==="group" ? "Группа: " : "Личка: ")+c.title);
 }
