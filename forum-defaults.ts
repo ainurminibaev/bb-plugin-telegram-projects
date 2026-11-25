@@ -67,8 +67,14 @@ export function learnTopicName(store:Store,bot:number,update:any) {
   const name=m.forum_topic_edited?.name ?? m.forum_topic_created?.name ?? head?.forum_topic_edited?.name ?? head?.forum_topic_created?.name;
   // A creation message seen only through a reply is older than any rename this bridge recorded.
   const fromHead=!m.forum_topic_edited?.name && !m.forum_topic_created?.name;
-  if (fromHead && store.get(forumNameKey(bot,chat,topic))) return;
-  rememberForumName(store,bot,chat,topic,name,update.update_id);
+  const known=store.get<TopicMetadata>(forumNameKey(bot,chat,topic));
+  // A topic made by the bot itself (no update about it) or seen before its creation date was kept: the creation
+  // message under every topic message gives the date, so the group's defaults pick the topic up (С54).
+  if (fromHead && known && !known.creationDate && head?.forum_topic_created && Number.isSafeInteger(head.date))
+    store.put(forumNameKey(bot,chat,topic),{...known,created:true,creationDate:head.date} satisfies TopicMetadata);
+  if (fromHead && known) return;
+  rememberForumName(store,bot,chat,topic,name,update.update_id,
+    head?.forum_topic_created ? true : undefined,head?.forum_topic_created && Number.isSafeInteger(head.date) ? head.date : undefined);
 }
 
 export function forumName(store:Store,bot:number,chat:number,topic:number) {

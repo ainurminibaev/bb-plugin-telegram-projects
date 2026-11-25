@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {acceptGroupUpdate,type GroupTopicPolicy} from "../ingress";
 import {bindGroupTopic} from "../group-worker";
-import {describeForumTopic,forumDefaultsKey,forumName,inheritedForumPolicy,inheritableForumTopic} from "../forum-defaults";
+import {describeForumTopic,forumDefaultsKey,forumName,inheritedForumPolicy,inheritableForumTopic,learnTopicName} from "../forum-defaults";
 import {handleDelegatedForumCommand} from "../forum-delegation";
 import {groupExecutor} from "../isolated-client";
 import {ownerTopicTool} from "../owner-topic";
@@ -297,4 +297,21 @@ test("General: the pickup covers General (topic 0) too, also under explicit defa
   // Unbound on purpose: General stays unbound.
   store.put(`group:forum-opt-out:5:${chat}:0`,true);
   assert.equal(inheritableForumTopic(store,5,owner,describeForumTopic(store,5,owner,general())),undefined);
+});
+
+test("a topic the bot made itself is picked up by explicit defaults once a topic message shows its creation date", () => {
+  const rows=new Map<string,unknown>();
+  const store:Store={get:k=>structuredClone(rows.get(k)) as never,put:(k,v)=>{rows.set(k,structuredClone(v));},del:k=>{rows.delete(k);},
+    list:p=>[...rows].filter(([k])=>k.startsWith(p)).map(([key,value])=>({key,value:structuredClone(value) as never})),atomic:fn=>fn()};
+  const bot=5;
+  bindGroupTopic(store,{botId:bot,botUsername:"alpha_bot",ownerId:owner,chatId:chat,topicId:topic,threadId:"src",requireMention:true,
+    ownerOnly:true,isolated:false,includeTopicContext:true,allowedSenderIds:[],revision:"r"} as GroupTopicPolicy,"proj");
+  store.put(forumDefaultsKey(bot,chat),{sourceTopicId:topic,managers:[],closeManagers:[],since:now-100});
+  // An older bridge recorded only the name of a topic it made with «topic create».
+  store.put(`group:topic-name:${bot}:${chat}:176`,{name:"Проекты",updateId:1});
+  const msg={update_id:500,message:{message_id:600,message_thread_id:176,is_topic_message:true,date:now,chat:forum(chat),
+    from:{id:owner,first_name:"Владелец"},text:"привет",reply_to_message:{message_id:176,date:now-10,forum_topic_created:{name:"Проекты"}}}};
+  assert.equal(inheritableForumTopic(store,bot,owner,describeForumTopic(store,bot,owner,msg)),undefined,"no date yet");
+  learnTopicName(store,bot,msg);
+  assert.ok(inheritableForumTopic(store,bot,owner,describeForumTopic(store,bot,owner,msg)),"picked up with the head's date");
 });

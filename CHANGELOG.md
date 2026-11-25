@@ -2,8 +2,9 @@
 
 - A group's or a person's conversation is made in the owner's project even when the owner's chat has no conversation yet (before, an employee whose owner had just started a new chat silently ignored mentions in groups).
 - A mention by an agent of the organization (`agentBots`) starts a topic's conversation; other bots never do. The agents' reply guard keeps working.
-- `bindOwnerChat {projectId}` (RPC) and `bb telegram-projects bind-owner-chat --project <id>`: the owner's chat to a project, as /project does. `employeeProject`: an employee's install binds the owner's chat there after pairing and when the owner writes first.
+- `bindOwnerChat {projectId}` (RPC) and `bb telegram-projects bind-owner-chat --project <id>` (only from the owner's conversation or a local call by the installer): the owner's chat to a project, as /project does. `employeeProject`: an employee's install binds the owner's chat there after pairing and when the owner writes first.
 - С102: what the bridge itself writes to people is in the organization's words: an employee's pairing says «<name> подключён к организации «…»» (`organizationName`, `employeeName`), no BB, privacy mode or /project hints; where something must be set up, the person hears «I can't answer right now, I've told those who set me up» and the log gets the setup line. Inventory: docs/texts-to-people.md.
+- A topic the agent creates with `topic create` gets its conversation at once, as one the owner made (С54): the bot gets no update about its own topic, so such topics stayed silent. Topics made that way earlier come alive with their next message: the creation date is taken from the topic's head.
 - A participant's /model in a group gets a short refusal (С71).
 - «Остановлено.» comes after the stop button too (the cancelled request used to hide the end of the run).
 - С101: the turn rule says that after `send` into the same chat the turn ends with exactly NO_REPLY.
