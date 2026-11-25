@@ -1,3 +1,4 @@
+import {entitiesToMarkdown} from "./entities-markdown";
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import {z} from "zod";
 type Database=ReturnType<BbPluginApi["storage"]["database"]>;
@@ -12,7 +13,7 @@ export const voiceTranscripts:{observe?:(chat:number,message:number,transcript:s
 
 export type ArchiveRow={chat:number;topic:number;message:number;date:number;sender:number;senderName:string;
   chatType:string;chatTitle:string;replyTo:number|null;album:string|null;fileId:string|null;fileName:string|null;
-  fileKind:string|null;fileSize:number|null;text:string};
+  fileKind:string|null;fileSize:number|null;text:string;markdown?:string|null};
 
 const LAT="a b v g d e zh z i y k l m n o p r s t u f h c ch sh shch y e yu ya".split(" ");
 const CYR="а б в г д е ж з и й к л м н о п р с т у ф х ц ч ш щ ы э ю я".split(" ");
@@ -64,13 +65,14 @@ export function archiveRow(update:any):ArchiveRow|undefined {
   const file=fileOf(m);
   const text=String(m.text ?? m.caption ?? "");
   if (!text && !file) return;
+  const markdown=entitiesToMarkdown(text,m.entities ?? m.caption_entities) ?? null;
   // A voice message is archived at once; its transcript is added when the bridge has it.
   return {chat:m.chat.id,topic:m.is_topic_message ? (m.message_thread_id ?? 0) : 0,message:m.message_id,date:m.date,
     sender:Number.isSafeInteger(sender?.id) ? sender.id : 0,senderName:String(senderName).slice(0,128),
     chatType:String(m.chat.type ?? ""),chatTitle:String(m.chat.title ?? senderName ?? "").slice(0,128),
     replyTo:Number.isSafeInteger(m.reply_to_message?.message_id) && m.reply_to_message.message_id!==m.message_thread_id ? m.reply_to_message.message_id : null,
     album:typeof m.media_group_id==="string" ? m.media_group_id : null,
-    fileId:file?.fileId??null,fileName:file?.fileName??null,fileKind:file?.fileKind??null,fileSize:file?.fileSize??null,text};
+    fileId:file?.fileId??null,fileName:file?.fileName??null,fileKind:file?.fileKind??null,fileSize:file?.fileSize??null,text,markdown};
 }
 
 export const archiveQuery=z.object({
@@ -110,7 +112,9 @@ function toResult(r:any) {
         date:new Date(r.date*1000).toISOString(),author:r.sender_name,authorId:r.sender,replyTo:r.reply_to??undefined,
         album:r.album??undefined,file:r.file_id ? {kind:r.file_kind,name:r.file_name??undefined,size:r.file_size??undefined} :
           r.file_removed ? {kind:r.file_kind,name:r.file_name??undefined,removed:FILE_REMOVED} : undefined,
-        text:String(r.text).slice(0,2000),transcript:r.transcript ? String(r.transcript).slice(0,2000) : undefined,
+        text:String(r.text).slice(0,2000),
+        // The form with links and formatting, only where it differs from the text; the same length limit.
+        markdown:r.markdown && r.markdown!==r.text ? String(r.markdown).slice(0,2000) : undefined,transcript:r.transcript ? String(r.transcript).slice(0,2000) : undefined,
         link:String(r.chat).startsWith("-100") && r.message>0 ? `https://t.me/c/${String(r.chat).slice(4)}/${r.topic ? r.topic+"/" : ""}${r.message}` : undefined};
 }
 
@@ -125,6 +129,7 @@ export function openArchive(db:Database) {
   const columns=(db.prepare("PRAGMA table_info(archive)").all() as {name:string}[]).map(c=>c.name);
   if (!columns.includes("transcript")) db.exec("ALTER TABLE archive ADD COLUMN transcript TEXT");
   if (!columns.includes("file_removed")) db.exec("ALTER TABLE archive ADD COLUMN file_removed INTEGER");
+  if (!columns.includes("markdown")) db.exec("ALTER TABLE archive ADD COLUMN markdown TEXT");
   let fts=true;
   try {
     db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS archive_fts USING fts5(search, content='archive', content_rowid='rowid', tokenize='trigram');
@@ -132,15 +137,15 @@ export function openArchive(db:Database) {
       CREATE TRIGGER IF NOT EXISTS archive_ad AFTER DELETE ON archive BEGIN INSERT INTO archive_fts(archive_fts,rowid,search) VALUES('delete',OLD.rowid,OLD.search); END;
       CREATE TRIGGER IF NOT EXISTS archive_au AFTER UPDATE ON archive BEGIN INSERT INTO archive_fts(archive_fts,rowid,search) VALUES('delete',OLD.rowid,OLD.search); INSERT INTO archive_fts(rowid,search) VALUES(NEW.rowid,NEW.search); END;`);
   } catch { fts=false; }
-  const upsert=db.prepare(`INSERT INTO archive(bot,chat,topic,message,date,sender,sender_name,chat_type,chat_title,reply_to,album,file_id,file_name,file_kind,file_size,text,search)
-    VALUES(@bot,@chat,@topic,@message,@date,@sender,@senderName,@chatType,@chatTitle,@replyTo,@album,@fileId,@fileName,@fileKind,@fileSize,@text,@search)
-    ON CONFLICT(bot,chat,message) DO UPDATE SET text=excluded.text,search=excluded.search,file_id=COALESCE(excluded.file_id,archive.file_id),
+  const upsert=db.prepare(`INSERT INTO archive(bot,chat,topic,message,date,sender,sender_name,chat_type,chat_title,reply_to,album,file_id,file_name,file_kind,file_size,text,search,markdown)
+    VALUES(@bot,@chat,@topic,@message,@date,@sender,@senderName,@chatType,@chatTitle,@replyTo,@album,@fileId,@fileName,@fileKind,@fileSize,@text,@search,@markdown)
+    ON CONFLICT(bot,chat,message) DO UPDATE SET text=excluded.text,search=excluded.search,markdown=excluded.markdown,file_id=COALESCE(excluded.file_id,archive.file_id),
       file_name=COALESCE(excluded.file_name,archive.file_name),file_kind=COALESCE(excluded.file_kind,archive.file_kind)`);
   const moveChat=db.prepare("UPDATE OR IGNORE archive SET chat=? WHERE bot=? AND chat=?");
   return {
     record(bot:number,update:any) {
       const row=archiveRow(update);
-      if (row) upsert.run({bot,...row,search:searchText(row.text+" "+(row.fileName??""),row.senderName)});
+      if (row) upsert.run({bot,markdown:null,...row,search:searchText(row.text+" "+(row.fileName??""),row.senderName)});
       return row;
     },
     /** The bridge's transcript of a voice message: kept with the message and searchable. */

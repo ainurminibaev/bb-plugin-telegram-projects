@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {ReplyRoutes} from "../reply-routing";
+import {DISCLOSURE} from "../rights";
 import type {Store} from "../model";
 function fixture() {
   const data = new Map<string, unknown>();
@@ -308,4 +309,14 @@ test("0.9.66: a plugin's notice or a schedule steered into a Telegram task keeps
   routes.requested("bbthread",{requestId:"guard2",originPluginId:"limit-guard",initiator:"user",senderThreadId:null});
   routes.accept("bbthread","t2","guard2");
   assert.deepEqual(routes.destination("bbthread","t2"),{kind:"bb"});
+});
+
+test("0.9.76: a stale route marker says what to do and that it is not for the person; the rules say command errors are not retold", () => {
+  const rows = new Map<string, unknown>();
+  const store: any = {get: (k: string) => rows.get(k), put: (k: string, v: unknown) => { rows.set(k, v); }, del: (k: string) => { rows.delete(k); },
+    list: (p: string) => [...rows].filter(([k]) => k.startsWith(p)).map(([key, value]) => ({key, value})), atomic: (fn: () => void) => fn()};
+  const routes = new ReplyRoutes(store);
+  assert.throws(() => routes.assertCurrentDelegation("thr_parent", "stale-token", "req"),
+    /^Error: route_token_does_not_match_current_request: .*из последнего сообщения.*человеку не пиши/);
+  assert.match(DISCLOSURE, /ошибки и служебные ответы команд \(bb …, вызовов моста\) не пересказывай/);
 });

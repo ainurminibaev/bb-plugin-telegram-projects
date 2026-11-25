@@ -4,7 +4,7 @@ import { groupMemory } from "./archive-access";
 import { privacyKey } from "./group-visibility";
 import type { Store, Telegram } from "./model";
 import {
-  accessList, activeGroupSettings, installKind, defaultGroupSettings, groupSettings, hasAccess, openGroupLock, saveGroupSettings, setAccess,
+  accessList, activeGroupSettings, installKind, defaultGroupSettings, groupSettings, hasAccess, openGroupLock, saveGroupSettings, markOwnerMemoryChoice, setAccess,
   type GroupSettings, type MembersMode,
 } from "./rights";
 
@@ -381,6 +381,7 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
         }
       }
       saveGroupSettings(ctx.store, ctx.bot, chat, { memory: extra });
+      markOwnerMemoryChoice(ctx.store, ctx.bot, chat, extra);
     }
     else { await answer(); return true; }
     const saved = activeGroupSettings(ctx.store, ctx.bot, chat) ?? defaultGroupSettings();

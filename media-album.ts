@@ -1,3 +1,4 @@
+import {sameTelegramFilename} from "./send-outcome";
 import {createHash} from "node:crypto";
 import type {Store, Telegram} from "./model";
 import {maxCaption,outboundMessagePayload} from "./outbound-message";
@@ -126,7 +127,7 @@ export async function sendAlbum(tg:Telegram,target:Target,files:AlbumMedia[]) {
       const file=files[index];
       const document=row.document;
       if (!document?.file_id || (typeof file.data!=="string" &&
-          ((document.file_name!==undefined && document.file_name!==file.name) ||
+          ((document.file_name!==undefined && !sameTelegramFilename(file.name ?? "",document.file_name)) ||
            (document.file_size!==undefined && document.file_size!==file.data.size))))
         throw Error("unconfirmed_album");
     }

@@ -287,3 +287,9 @@ The turn note says whether you have written in this chat today and the local tim
 with `firstToday` and `localTime`; the first message of the day there waits once and comes back as
 `{"sent":false,"firstToday":true,"hint":…}`: add a greeting for the time of day in that chat's style if the text has
 none and send again — the next send there goes as it is.
+
+## Pinning (С108)
+
+Telegram gives bots no way to pin a topic itself (Bot API 10.5): `topic pin` says so — the owner pins it by hand. A
+message is pinned with `bb telegram-projects message pin --message N [--chat <group>]` (unpin — `message unpin`), by
+the same rights as topic actions; to point at a topic, pin in General a message with a link to it.

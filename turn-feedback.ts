@@ -117,6 +117,13 @@ export async function acknowledge(tg: Tg, chatId: number, messageId: number, tex
   chooser: ReactionChooser | undefined, options: ReactionOption[], serviceSet: () => boolean, earlier: string[] = [],
   signal?: AbortSignal) {
   await react(tg, chatId, messageId, SERVICE_REACTIONS.seen);
+  await reactByMeaning(tg, chatId, messageId, text, chooser, options, serviceSet, earlier, signal);
+}
+
+/** The reaction by meaning, chosen from the text (a voice — from its transcript, once it is ready); 👀 stays otherwise. */
+export async function reactByMeaning(tg: Tg, chatId: number, messageId: number, text: string,
+  chooser: ReactionChooser | undefined, options: ReactionOption[], serviceSet: () => boolean, earlier: string[] = [],
+  signal?: AbortSignal) {
   if (!chooser || !text.trim()) return;
   const emoji = await chooser(reactionPrompt(text, options, earlier), options, signal).catch(() => undefined);
   if (emoji && emoji !== SERVICE_REACTIONS.seen && !serviceSet() && !signal?.aborted) await react(tg, chatId, messageId, emoji);

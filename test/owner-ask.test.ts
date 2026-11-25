@@ -70,6 +70,11 @@ test("the answer comes to the asking conversation as the owner's own words; a pe
   const refuse = (chat: number) => (async (m: string, b: any) => { if (m === "forwardMessage") throw Error("protected"); sent.push([chat, m, b]); return {}; }) as any;
   assert.equal(await forwardOriginal(refuse, OWNER, {chat: VIKTOR, topic: 0, message: 12, sender: VIKTOR, senderName: "Виктор", text: "можно?"}), "quoted");
   assert.match(sent.at(-1)[2].text, /цитатой — переслать нельзя/);
+  // 0.9.76: a second question about the same request does not forward the same message again.
+  const n = sent.length;
+  assert.equal(await forwardOriginal(ok, OWNER, {chat: VIKTOR, topic: 0, message: 13, sender: VIKTOR, text: "а это?"}, s as never), "forwarded");
+  assert.equal(await forwardOriginal(ok, OWNER, {chat: VIKTOR, topic: 0, message: 13, sender: VIKTOR, text: "а это?"}, s as never), "already");
+  assert.equal(sent.length, n + 1);
 });
 
 test("the answer becomes a request of the asking conversation under the original message", () => {

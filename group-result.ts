@@ -281,7 +281,7 @@ export function startAgentFollowUp(store:Store,origin:GroupOrigin,taskId:string,
     "Если по этому поручению сообщать нечего (например, его условие не наступило), ответь ровно "+NO_REPLY+". Иначе ответь одной короткой репликой в тему."].join("\n");
   store.atomic(()=>{
     const updateId=syntheticUpdateId(store);
-    store.put(`group:in:${bot}:${updateId}`,{ownerId:owner,revision,state:"pending",taskId,
+    store.put(`group:in:${bot}:${updateId}`,{ownerId:owner,revision,state:"pending",taskId,followUp:true,
       route:{kind:"group",chatId,topicId,senderId:sender,threadId,messageId,updateId,text}});
   });
 }

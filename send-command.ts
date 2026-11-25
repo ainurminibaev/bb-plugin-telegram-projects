@@ -46,14 +46,20 @@ export function findPerson(store:Store,bot:number,who:string) {
 export function findGroup(store:Store,bot:number,what:string) {
   if (/^-\d+$/.test(what.trim())) return currentGroup(store,Number(what.trim()));
   const q=norm(what);
-  const hits=store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`).map(r=>r.value)
-    .filter(g=>norm(String(g.title??"")).includes(q));
+  const groups=store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`).map(r=>r.value);
+  let hits=groups.filter(g=>norm(String(g.title??"")).includes(q));
+  // Not found as a phrase: every word of the name is in the title (an agent may drop or reorder punctuation).
+  if (!hits.length && q) hits=groups.filter(g=>{const t=norm(String(g.title??"")).split(" "); return q.split(" ").every(w=>t.includes(w));});
+  // A group upgraded to a supergroup is one group under two numbers.
+  hits=[...new Map(hits.map(g=>[currentGroup(store,g.chat),g])).entries()].map(([chat,g])=>({...g,chat}));
   if (hits.length===1) return hits[0].chat;
   const known=store.list<{title?:string}>(`visibility:${bot}:group:`).map(r=>r.value.title).join(", ");
-  throw Error(hits.length ? "group_ambiguous: "+hits.map(g=>g.title).join(", ") : "group_unknown; known groups: "+known);
+  // Same titles are told apart by number: the agent repeats with --chat NUMBER.
+  throw Error(hits.length ? "group_ambiguous: "+hits.map(g=>`${g.title} (--chat ${g.chat})`).join(", ") : "group_unknown; known groups: "+known);
 }
 
-const norm=(v:string)=>v.toLowerCase().replaceAll("ё","е").replace(/[«»"'“”„]/g,"").replace(/\s+/g," ").trim();
+// Quotes, brackets, dashes and other punctuation do not matter in a name: «Стенд — прогоны (только боты)» = стенд прогоны только боты.
+const norm=(v:string)=>v.toLowerCase().replaceAll("ё","е").replace(/[«»"'“”„()\[\]{}<>.,:;!?·•|\/\\_\-–—]+/g," ").replace(/\s+/g," ").trim();
 const groupTitle=(store:Store,bot:number,chat:number)=>
   String(store.get<{title?:string}>(`visibility:${bot}:group:${chat}`)?.title ?? chat);
 

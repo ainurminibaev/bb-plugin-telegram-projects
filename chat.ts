@@ -6,9 +6,9 @@ import {albumCaption,albumKind,albumKey,albumChanged,albumChangedNotice,collectA
 import {claimBusyExact,exactOutboxPrefix,finishBusyExact,startBusyExact,type BusyExactEvidence} from "./busy-exact-outbox";
 import {sharedGroupThreads} from "./group-binding";
 import {NO_REPLY} from "./group-result";
-import {maxOutboundDocumentBytes,outboundMessagePayload} from "./outbound-message";
+import {maxOutboundDocumentBytes,outboundMessagePayload,plainFromHtml} from "./outbound-message";
 import {routedCaption} from "./routed-message";
-import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interactionOpen } from "./codex-async-question";
+import { codexAsyncAnswer, codexAsyncQuestions, codexAsyncQuestionTurn, interactionOpen, openQuestionsNote } from "./codex-async-question";
 import { splitChildResultClaims, stripTelegramMarkers, ReplyRoutes, type ReplyRoute } from "./reply-routing";
 import { voiceHeader, acknowledge, react, SERVICE_REACTIONS, THINKING, stepLabel, firstLine, progressText, DEFAULT_REACTION_OPTIONS, type ReactionChooser, type ReactionOption, type Stage } from "./turn-feedback";
 import { coordinatorHandoffNote, syncCoordinator } from "./handoff-coordinator";
@@ -147,13 +147,19 @@ type Action = {
 };
 type Inbox = {
   input: ChatInput;
-  state: "pending" | "claimed" | "done";
+  /** uncertain — handing the message to the agent failed or was not confirmed; it is checked, then given again once. */
+  state: "pending" | "claimed" | "done" | "uncertain";
+  attempts?: number;
+  checkAt?: number;
   parts?: ChatInput[];
   phase?: "attachment-download" | "preparing";
   attachmentThreadId?: string;
   at: number;
 };
 type PairedAlbumItem = ChatInput & {bindingRevision?:string};
+/** How long to wait before checking whether BB took a message whose hand-over was not confirmed. */
+const UNCERTAIN_CHECK_MS = 120_000;
+const dispatchKey = (updateId: number) => "chat:in-dispatch:" + updateId;
 type PairedAlbumSource = {messageIds:number[];files:AlbumMedia[];expires:number;albumKey:string};
 type QuestionDelivery = {
   threadId: string;
@@ -990,21 +996,45 @@ export class ChatBridge {
           this.s.put(key, { ...r, state: "pending" });
           continue;
         }
-        this.enqueue(
-          r.input.topicId,
-          this.tr(
-            "⚠️ BB был перезапущен во время обработки сообщения. Исход действия не подтверждён. Открой /chats и проверь чат перед повторной отправкой.",
-          ),
-          undefined,
-          "recovery:" + r.input.updateId,
-        );
-        this.s.put(key, {
-          ...r,
-          parts: undefined,
-          input: { ...r.input, text: undefined, replyExcerpt: undefined, voice: undefined, attachment: undefined },
-          state: "done",
-        });
+        // A restart during handling: whether BB took the message is checked, as after a failed call (0.9.74).
+        this.s.put(key, { ...r, state: "uncertain", attempts: (r.attempts ?? 0) + 1, checkAt: Date.now() + UNCERTAIN_CHECK_MS });
       }
+  }
+  /**
+   * A message whose hand-over was not confirmed: taken by BB after all (its request was seen, or it waits in the
+   * thread's queue) — done silently; not taken — given once more; failed twice — the person is told in plain words.
+   */
+  private async checkUncertain() {
+    for (const { key, value: r } of this.s.list<Inbox>("chat:in:")) {
+      if (r.state !== "uncertain" || (r.checkAt ?? 0) > Date.now()) continue;
+      const sent = this.s.get<{token: string; threadId: string}>(dispatchKey(r.input.updateId));
+      let taken = false;
+      if (sent) {
+        taken = !!this.s.get<{requestId?: string}>("reply:ingress:" + sent.token)?.requestId;
+        if (!taken) {
+          // The request may already be in the thread's history though the bridge has not read it yet.
+          const recent = await this.d.sdk.threads.events.list({threadId: sent.threadId, order: "desc", limit: "50",
+            types: ["client/turn/requested"], signal: this.d.signal}).catch(() => undefined);
+          taken = !!recent?.some(e => JSON.stringify(e.data ?? {}).includes(sent.token));
+        }
+        if (!taken) {
+          const queue = await this.d.sdk.threads.queuedMessages.list({threadId: sent.threadId}).catch(() => undefined);
+          if (!queue) { this.s.put(key, {...r, checkAt: Date.now() + UNCERTAIN_CHECK_MS}); continue; }   // BB still busy
+          taken = queue.some(q => JSON.stringify(q).includes(sent.token));
+        }
+      }
+      const wiped = {...r.input, text: undefined, replyExcerpt: undefined, voice: undefined, attachment: undefined};
+      if (taken) { this.s.put(key, {input: wiped, state: "done", at: Date.now()}); this.s.del(dispatchKey(r.input.updateId)); continue; }
+      if ((r.attempts ?? 1) < 2) {
+        this.s.del(dispatchKey(r.input.updateId));
+        this.s.put(key, {...r, state: "pending", checkAt: undefined});
+        continue;
+      }
+      this.enqueue(r.input.topicId, this.tr("Не получилось передать ваше сообщение — повторите его, пожалуйста."),
+        undefined, "error:" + r.input.updateId);
+      this.s.put(key, {input: wiped, state: "done", at: Date.now()});
+      this.s.del(dispatchKey(r.input.updateId));
+    }
   }
   async tick() {
     if (this.disposed || this.d.signal.aborted) return;
@@ -1045,6 +1075,7 @@ export class ChatBridge {
       });
       this.work.add(work);
     }
+    await this.checkUncertain().catch(() => undefined);
     const pending = this.s.list<Inbox>("chat:in:").filter(row => row.value.state === "pending")
       .sort((a, b) => a.value.input.updateId - b.value.input.updateId);
     const waiting = new Set<number>();
@@ -1102,19 +1133,16 @@ export class ChatBridge {
       const p = (parts.length === 1 ? this.handle(r.input) : this.handleInput(r.input, parts))
         .catch((e) => {
           this.setError(e instanceof Error ? e.name : "operation_failed", { topicId: r.input.topicId });
-          this.enqueue(
-            r.input.topicId,
-            this.tr(
-              "⚠️ Не удалось подтвердить действие. Проверь /status и /chats перед повтором; подробности доступны в BB.",
-            ),
-            undefined,
-            "error:" + r.input.updateId,
-          );
+          // A failed call is not a failed message: BB may have taken it (a slow server answers late). The message is
+          // kept and checked later; the person hears nothing unless it really could not be handed over (0.9.74).
+          this.s.put(key, { ...r, parts: parts.length > 1 || r.input.albumId ? parts : undefined, state: "uncertain",
+            attempts: (r.attempts ?? 0) + 1, checkAt: Date.now() + UNCERTAIN_CHECK_MS });
         })
         .finally(() => {
           const current = this.s.get<Inbox>(key);
-          // Only pre-dispatch file work is safe to replay after a shutdown.
-          if (!(this.d.signal.aborted && (current?.phase === "attachment-download" || current?.phase === "preparing"))) {
+          // Only pre-dispatch file work is safe to replay after a shutdown; an uncertain message waits for its check.
+          if (current?.state !== "uncertain" &&
+              !(this.d.signal.aborted && (current?.phase === "attachment-download" || current?.phase === "preparing"))) {
             this.s.put(key, {
               input: { ...r.input, text: undefined, replyExcerpt: undefined, voice: undefined, attachment: undefined },
               state: "done",
@@ -2136,6 +2164,7 @@ export class ChatBridge {
       return;
     }
     const albumImages:ImageAttachment[]|undefined=input.albumId ? [] : undefined;
+    const voiceSaid: string[] = [];   // a voice's transcript, for its reaction by meaning
     if (parts) {
       const prior = this.s.get<Inbox>("chat:in:" + input.updateId)?.attachmentThreadId;
       if (prior && prior !== b.threadId) throw Error("batch_binding_changed");
@@ -2143,6 +2172,7 @@ export class ChatBridge {
       for (const [index,part] of parts.entries()) {
         const prepared = await this.preparePart(part,b,part.text?.trim() ?? "",true,albumImages);
         if (prepared === undefined || this.d.signal.aborted) return;
+        voiceSaid[index] = prepared;
         const includesOriginal = parts.some(other => other.messageId === part.replyTo);
         const body=!includesOriginal ? this.withReplyContext(part,prepared) : prepared;
         texts.push(input.albumId ? `Элемент ${index+1} из ${parts.length} в порядке альбома Telegram:\n${body}` : body);
@@ -2195,16 +2225,14 @@ export class ChatBridge {
         threadId: b.threadId,
         signal: this.d.signal,
       });
-      if (pending.some(i => interactionOpen(i) && !codexAsyncQuestions(i))) {
-        this.enqueue(
-          input.topicId,
-          this.tr(
-            "В чате есть вопрос. Ответь через кнопку или ответом на его карточку. Если форма сложная — открой BB.",
-          ),
-          this.linkRows(b.threadId),
-        );
-        return;
-      }
+      // An open question never blocks the person's message (0.9.76). One open question: the words are its answer
+      // (a form question takes them as an answer; any other question is closed and the words go to the agent, who
+      // decides what to do with it). Several: the message goes with a note which questions are open. No service line.
+      const open = pending.filter(i => interactionOpen(i) && !codexAsyncQuestions(i));
+      // The person's own words (not a forward, no attachment) — only those may decide a permission request.
+      const ownWords = (parts ?? [input]).every(p => !p.forwarded && !p.attachment) ? (parts ?? [input]).map(p => p.text ?? "").join("\n").trim() : undefined;
+      if (open.length === 1 && await this.answerInWords(b.threadId, open[0], text, ownWords)) return;
+      if (open.length) text = text + "\n\n" + openQuestionsNote(open, open.length === 1 && (open[0] as any).payload?.kind !== "approval");
       const thread = await this.validThread(b, b.threadId);
       this.watchInput(b);
       const own = {kind: "telegram" as const, chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId};
@@ -2223,6 +2251,9 @@ export class ChatBridge {
           : `Правила обновлены (версия ${inForce.version}) и действуют с этого хода. Прежние формулировки правил в этом разговоре отменены — следуй этим:\n\n${inForce.text}`;
         rulesVersion = inForce.version;
       }
+      // The token of this submission: if the call fails, the bridge checks later whether BB took the message after all.
+      const dispatchToken = /\[bb-telegram-reply-route:([a-f0-9-]{36})\]/.exec(String((metadata[0] as {text?: string} | undefined)?.text ?? ""))?.[1];
+      if (dispatchToken) this.s.put(dispatchKey(input.updateId), {token: dispatchToken, threadId: b.threadId, at: Date.now()});
       const dispatched = await this.d.sdk.threads.send({
         threadId: b.threadId,
         mode: busy || followUp ? "steer-if-active" : "queue-if-active",
@@ -2283,7 +2314,8 @@ export class ChatBridge {
       this.watchInput(b);
     }
     // The reaction acknowledges input without adding a service receipt to the chat (С45: 👀, then the chosen one).
-    for (const part of parts ?? [input]) this.acknowledgeInput(part, b.threadId ?? "", part.text || "");
+    for (const [i, part] of (parts ?? [input]).entries())
+      this.acknowledgeInput(part, b.threadId ?? "", part.voice ? (parts ? voiceSaid[i] : text) ?? "" : part.text || "");
 
   }
   /** С45: 👀 at once, then the quick decision's reaction unless a service reaction came first. */
@@ -2663,6 +2695,46 @@ export class ChatBridge {
     } else throw Error("unsupported_question");
     this.enqueue(b.topicId, this.tr("Ответ принят."));
   }
+  /** A form question answered in words: an option named in words is chosen, otherwise the words are the answer.
+   * True when the question took them; otherwise the question is closed so that the words reach the agent. */
+  /**
+   * A permission request is a security boundary: it is decided only by its button or by the person's own words that
+   * are exactly a button's label (not a forward, not with an attachment). Nothing is inferred from free text — the
+   * agent's own description must never steer it. A broad permission grant is given only by the button.
+   */
+  private approvalInWords(payload: any, said: string): "allow_once" | "deny" | undefined {
+    const allowed = new Set<string>(payload.availableDecisions ?? ["allow_once", "deny"]);
+    if (payload.subject?.kind === "permission_grant") allowed.delete("allow_once");
+    const plain = said.trim().toLowerCase().replace(/[.!]+$/, "");
+    return ([["allow_once", this.tr("Разрешить один раз")], ["deny", this.tr("Отказать")]] as const)
+      .find(([value, label]) => allowed.has(value) && label.toLowerCase() === plain)?.[0];
+  }
+  private async answerInWords(threadId: string, interaction: PendingInteraction, text: string, own?: string) {
+    const i = interaction as any;
+    // A permission request: only the button, or the person's own words exactly equal to a button's label; any other
+    // text leaves it open (neither granted nor refused) and goes to the agent with a note.
+    if (i.payload?.kind === "approval") {
+      const decision = own === undefined ? undefined : this.approvalInWords(i.payload, own);
+      if (!decision) return false;
+      await this.d.sdk.threads.interactions.resolve({threadId, interactionId: i.id, resolution: decision === "deny" ? {decision: "deny"} :
+        {decision: "allow_once", grantedPermissions: i.payload.subject?.kind === "permission_grant" ? i.payload.subject.permissions : null}} as never);
+      return true;
+    }
+    // A form of one question takes the words; a form of several does not get the same words in each — it is closed.
+    if (i.payload?.kind === "user_question" && i.payload.questions?.length === 1) {
+      const said = text.trim().toLowerCase();
+      const answers = Object.fromEntries(i.payload.questions.map((qq: any) => {
+        const option = (qq.options ?? []).find((o: any) => [o.label, o.value].some(v => String(v ?? "").trim().toLowerCase() === said));
+        return [qq.id, option ? {selected: [option.value]} : {selected: [], freeText: text}];
+      }));
+      try {
+        await this.d.sdk.threads.interactions.resolve({threadId, interactionId: i.id, resolution: {kind: "user_answer", answers} as never});
+        return true;
+      } catch { /* a choice-only form refuses words: close it below */ }
+    }
+    try { await this.d.sdk.threads.interactions.cancel({threadId, interactionId: i.id} as never); } catch { /* already gone */ }
+    return false;
+  }
   private async answerText(
     b: Binding,
     q: QuestionDelivery,
@@ -2993,6 +3065,15 @@ export class ChatBridge {
     const prefix = busySourcePrefix + JSON.stringify([b.threadId,turnId]).slice(0,-1) + ",";
     return this.s.list<NativeBusySource>(prefix);
   }
+  /** A turn started by a subthread's notice (no person's message in it) in which the conversation already sent
+   * into this route's chat and topic by command. */
+  private noticeTurnSentHere(threadId: string, turnId: string, route: ReplyRoute) {
+    const since = this.s.get<number | true>("reply:notification-turn:" + threadId + ":" + turnId);
+    if (route.kind !== "telegram" || since === undefined || this.s.get("reply:person-in-turn:" + threadId + ":" + turnId)) return false;
+    const wrote = this.s.get<{chat: number; topic: number; sent?: {at: number}[]}>("group:sent-in-turn:" + threadId);   // group-worker sentInTurnKey
+    return !!wrote && wrote.chat === route.chatId && wrote.topic === (route.topicId ?? 0) &&
+      (wrote.sent ?? []).some(x => x.at >= (typeof since === "number" ? since : 0));
+  }
   private recoverNativeBusy(b: Binding, turnId: string, completedSeq: number) {
     if (!this.nativeBusyBinding(b)) return;
     for (const {key,value:source} of this.nativeBusySources(b,turnId)) {
@@ -3111,8 +3192,11 @@ export class ChatBridge {
           if (event.type === "turn/input/accepted" && event.scope.kind === "turn") {
             this.routes.accept(b.threadId, event.scope.turnId, event.data.clientRequestId);
             this.nativeBusyAccepted(b,event.data.clientRequestId,event.scope.turnId,event.seq);
-            if (this.s.get("reply:notification-request:" + b.threadId + ":" + event.data.clientRequestId))
-              this.s.put("reply:notification-turn:" + b.threadId + ":" + event.scope.turnId, true);
+            if (this.s.get("reply:notification-request:" + b.threadId + ":" + event.data.clientRequestId)) {
+              // When the notice was taken into the turn: a send by command after it belongs to this turn.
+              if (!this.s.get("reply:notification-turn:" + b.threadId + ":" + event.scope.turnId))
+                this.s.put("reply:notification-turn:" + b.threadId + ":" + event.scope.turnId, Date.now());
+            } else this.s.put("reply:person-in-turn:" + b.threadId + ":" + event.scope.turnId, true);
             this.s.put("reply:active-turn:" + b.threadId, event.scope.turnId);
             this.s.put(observingKey, event.scope.turnId);
             b.cursor = event.seq;
@@ -3246,7 +3330,14 @@ export class ChatBridge {
               const native = this.routes.nativeOutcomes(b.threadId, turnId);
               const id = "event:" + b.revision + ":turn-" + turnId;
               const outboxKey = "chat:out:" + id;
-              if (hasAssistantReply(body)) {
+              // A turn started by a subthread's completion, not by a person: if the conversation already wrote here by
+              // command in it, its final (a report about that send) does not go — the command's message is the delivery.
+              if (this.noticeTurnSentHere(b.threadId, turnId, route)) {
+                this.s.atomic(() => {
+                  this.routes.claimFinal(b.threadId!, turnId, [...claims, ...native], {route, outboxKey, native:true});
+                  this.routes.finalDelivered(outboxKey);
+                });
+              } else if (hasAssistantReply(body)) {
                 this.s.atomic(() => {
                   this.routes.claimFinal(b.threadId!, turnId, claims, {route, outboxKey, writtenAt});
                   this.routes.claimFinal(b.threadId!, turnId, native, {route, outboxKey, native:true});
@@ -3557,16 +3648,25 @@ export class ChatBridge {
           const field = photo ? "photo" : isVideo ? "video" : "document";
           const data = readFileSync(path);
           const blob=new Blob([new Uint8Array(data)], {type: ({".pdf":"application/pdf", ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".webp":"image/webp", ".gif":"image/gif", ".mp4":"video/mp4", ".mov":"video/quicktime"} as Record<string,string>)[extname(path).toLowerCase()] ?? "application/octet-stream"});
+          // The body as the caption is the agent's formatted text (Telegram HTML); a file name or label is plain.
+          const htmlCaption=addressedFile!==undefined && caption!==undefined && caption===bodyCaption;
+          const addressedPayload=(html:boolean)=>outboundMessagePayload({...addressedFile!,text:html || !htmlCaption ? caption : plainFromHtml(caption!),
+            html:html && htmlCaption,file:{kind:photo?"photo":"document",name:basename(path),data:blob}});
           const outgoing=addressedFile
-            ? outboundMessagePayload({...addressedFile,text:caption,
-                file:{kind:photo?"photo":"document",name:basename(path),data:blob}})
+            ? addressedPayload(true)
             : {method:photo?"sendPhoto":isVideo?"sendVideo":"sendDocument",body:{
                 message_thread_id:o.topicId||undefined,[field]:blob,[field+"_filename"]:basename(path),
                 ...(caption && {caption}),...(isVideo && {supports_streaming:true}),
               }};
           if (this.albumIsChanged(o)) return {text:"",lastMediaId:0};
           this.s.put(receipt, "uncertain");
-          const result=await this.d.tg(outgoing.method,outgoing.body);
+          const result=await this.d.tg(outgoing.method,outgoing.body).catch((error:unknown)=>{
+            // Telegram rejected the formatting: the same caption as plain words, without Markdown marks.
+            if (htmlCaption && error instanceof TelegramFailure && error.code==="telegram_400") {
+              const plain=addressedPayload(false); return this.d.tg(plain.method,plain.body);
+            }
+            throw error;
+          });
           if (addressedFile && (!Number.isSafeInteger(result?.message_id) || result.message_id<=0 ||
               (result.chat && result.chat.id!==addressedFile.chatId) ||
               (result.reply_to_message && result.reply_to_message.message_id!==addressedFile.replyTo)))

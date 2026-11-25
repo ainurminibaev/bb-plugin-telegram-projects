@@ -1,3 +1,4 @@
+import {sameTelegramFilename} from "./send-outcome";
 import {createHash} from "node:crypto";
 import {closeSync,constants,fstatSync,openSync,readSync,realpathSync} from "node:fs";
 import {basename,isAbsolute,relative,sep} from "node:path";
@@ -129,7 +130,8 @@ export function plainFromHtml(html:string) {
 
 export function outboundMessagePayload(args:MessagePayload):{method:string;body:Record<string,unknown>} {
   const {chatId,topicId,replyTo,text,file,html,replyMarkup}=args;
-  if (!checkOutboundContent({text,artifact:file})) throw Error("outbound_content_invalid");
+  // A formatted caption counts by its visible words, as Telegram counts it.
+  if (!checkOutboundContent({text:html && text!==undefined && file ? plainFromHtml(text) : text,artifact:file})) throw Error("outbound_content_invalid");
   const target={
     chat_id:chatId,
     ...(topicId>0 && {message_thread_id:topicId}),
@@ -138,7 +140,7 @@ export function outboundMessagePayload(args:MessagePayload):{method:string;body:
   if (!file)
     return {method:"sendMessage",body:{...target,text,...(html && {parse_mode:"HTML"}),...(replyMarkup && {reply_markup:replyMarkup}),link_preview_options:{is_disabled:true}}};
   return {method:file.kind==="photo" ? "sendPhoto" : "sendDocument",body:{
-    ...target,...(text!==undefined && {caption:text}),
+    ...target,...(text!==undefined && {caption:text,...(html && {parse_mode:"HTML"})}),
     [file.kind]:file.data,[file.kind+"_filename"]:file.name,
     ...(file.kind==="document" && {disable_content_type_detection:true}),
   }};
@@ -152,11 +154,73 @@ export async function sendOutboundMessage(tg:Telegram,args:Omit<MessagePayload,"
       replyTo!==undefined && sent?.reply_to_message && sent.reply_to_message.message_id!==replyTo)
     throw Error("outbound_receipt_missing");
   if (file?.kind==="document" && (sent?.document?.file_size!==file.bytes ||
-      (sent.document.file_name!==undefined && sent.document.file_name!==file.name)))
+      (sent.document.file_name!==undefined && !sameTelegramFilename(file.name,sent.document.file_name))))
     throw Error("outbound_receipt_missing");
   if (file?.kind==="photo" && (!Array.isArray(sent?.photo) || !sent.photo.some((item:any)=>typeof item?.file_id==="string")))
     throw Error("outbound_receipt_missing");
   return telegramMessageId(sent,chatId);
+}
+
+/**
+ * The agent's text as a file's caption, formatted as any message (bold, lists, links); undefined when it does not fit
+ * one caption — then it goes as its own message. Never raw Markdown: «**» in a caption is what people saw.
+ */
+export function formattedCaption(markdown:string) {
+  const parts=renderTelegramParts(cleanAssistantText(markdown).trim());
+  const visible=parts.length===1 ? plainFromHtml(parts[0]) : "";
+  return visible.trim() && visible.length<=maxCaption ? parts[0] : undefined;
+}
+
+/** A file with the agent's text: a formatted caption, or the formatted text and then the file when it is too long.
+ * If Telegram rejects the formatting, the caption goes as plain words — the marks taken off, links as «name (address)». */
+export async function sendFormattedFile(tg:Telegram,args:{chatId:number;topicId:number;replyTo?:number;markdown?:string;file:OutboundFile}) {
+  const {markdown,...target}=args;
+  if (!markdown?.trim()) return sendOutboundMessage(tg,target);
+  const caption=formattedCaption(markdown);
+  if (caption===undefined) {
+    await sendFormattedText(tg,{chatId:target.chatId,topicId:target.topicId,replyTo:target.replyTo,markdown});
+    // The text went: whatever becomes of the file, a repeat must not carry the text again.
+    return sendOutboundMessage(tg,target).catch(error=>{
+      if (error && typeof error==="object") Object.assign(error,{textSent:true});
+      throw error;
+    });
+  }
+  return sendOutboundMessage(tg,{...target,text:caption,html:true}).catch(error=>{
+    if (error instanceof TelegramFailure && error.code==="telegram_400") return sendOutboundMessage(tg,{...target,text:plainFromHtml(caption)});
+    throw error;
+  });
+}
+
+/**
+ * С82: an edit of the bot's own message with the same formatting as a new one: a text message by editMessageText,
+ * a file's caption by editMessageCaption (caption — from the archive; unknown — the text first, then the caption).
+ * A refused formatting is edited as plain words without marks. Returns what was edited.
+ */
+export async function editFormatted(tg:Telegram,args:{chatId:number;messageId:number;markdown:string;caption?:boolean}) {
+  const text=cleanAssistantText(args.markdown).trim();
+  const target={chat_id:args.chatId,message_id:args.messageId};
+  const plainOn400=(send:(html:boolean)=>Promise<unknown>)=>send(true).catch(error=>{
+    if (error instanceof TelegramFailure && error.code==="telegram_400") return send(false);
+    throw error;
+  });
+  const edit=async(caption:boolean)=>{
+    if (caption) {
+      const formatted=formattedCaption(text);
+      if (formatted===undefined) throw Error("edit_caption_too_long");
+      await plainOn400(html=>tg("editMessageCaption",{...target,caption:html ? formatted : plainFromHtml(formatted),...(html && {parse_mode:"HTML"})}));
+      return "caption" as const;
+    }
+    const parts=renderTelegramParts(text);
+    if (parts.length!==1) throw Error("edit_text_too_long");
+    await plainOn400(html=>tg("editMessageText",{...target,text:html ? parts[0] : plainFromHtml(parts[0]),...(html && {parse_mode:"HTML"}),
+      link_preview_options:{is_disabled:true}}));
+    return "text" as const;
+  };
+  if (args.caption!==undefined) return edit(args.caption);
+  return edit(false).catch(error=>{
+    if (error instanceof TelegramFailure && error.code==="telegram_400") return edit(true);
+    throw error;
+  });
 }
 
 /**

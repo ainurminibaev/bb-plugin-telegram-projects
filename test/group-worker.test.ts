@@ -3,6 +3,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {saveLocalTelegramFile} from "../telegram-files";
 import test from "node:test";
+import {ReplyRoutes} from "../reply-routing";
 import assert from "node:assert/strict";
 import {acceptGroupUpdate} from "../ingress";
 import {bindGroupTopic,groupCliRestricted,processGroupInputs,sameWords,sentInTurnKey} from "../group-worker";
@@ -635,6 +636,107 @@ test("0.9.66: the agent already wrote into this topic during the turn — the fi
  await tick(); await tick();
  assert.equal(rows.get("group:receipt:5:8")?.state,"done",wrote ? "wrote" : "silent");
  assert.equal(sent.filter(([m])=>m==="sendMessage").length,0,"nothing more is posted");
+ }
+});
+
+test("0.9.76: a turn the bridge started itself (deferred task) that already sent here by command posts no report; a person's turn and the owner's answer keep their final",async()=>{
+ for (const [synthetic,ownerAnswer] of [[true,false],[false,false],[false,true]]) {
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ const updateId=synthetic ? -10 : ownerAnswer ? -1795600000000 : 8;   // the owner's answer (queueAnswerTurn) is synthetic too
+ store.put(`group:in:5:${updateId}`,{ownerId:7,state:"pending",...(synthetic && {followUp:true}),route:{kind:"group",chatId:-1001,topicId:3,senderId:7,threadId:"t",messageId:10,updateId,text:"Q"}});
+ const events:any[]=[];
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+ send:async(q:any)=>{
+   const event=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"g"}});
+   event("client/turn/requested",{requestId:"g",originPluginId:"telegram-projects",input:q.input});
+   event("turn/input/accepted",{clientRequestId:"g"});
+   // After the owner's «да» the agent sends a file with a caption by command; its final explains it — that must go.
+   store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),sent:[{t:sameWords(ownerAnswer ? "Договор на подпись" : "Итог: всё перевёл."),at:Date.now()}]});
+   event("item/completed",{item:{type:"agentMessage",text:"Отправил итог в тему, жду решения."}});
+   event("turn/completed",{status:"completed"});
+ }}};
+ const sent:any[]=[];
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{if(_m==="setMessageReaction")return {} as T;sent.push([_m,p]);return {message_id:20} as T},new AbortController().signal);
+ await tick(); await tick(); await tick();
+ assert.equal(sent.filter(([m,p])=>m==="sendMessage" && /Отправил итог/.test(p.text)).length,synthetic ? 0 : 1,synthetic ? "deferred task" : "a person's message");
+ }
+});
+
+test("0.9.76: the owner's answer given to a person's conversation keeps that person as the author of the request for the next question",async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:false,allowedSenderIds:[42]});
+ store.put("group:turn-message:t",{chat:-1001,topic:3,message:10,sender:42,senderName:"Евгений",text:"дай доступ"});
+ store.put("group:in:5:-1795600000000",{ownerId:7,state:"pending",route:{kind:"group",chatId:-1001,topicId:3,senderId:7,threadId:"t",messageId:10,updateId:-1795600000000,text:"Ответ владельца: да"}});
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible",status:"idle"}),
+   events:{list:async()=>[]},send:async()=>{}}};
+ await processGroupInputs(store,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal);
+ assert.equal((store.get("group:turn-message:t") as any).sender,42,"still Евгений, not the owner");
+});
+
+test("0.9.76: a voice gets 👀 at once and its reaction by meaning from the transcript, not from empty text",async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ store.put("group:in:5:8",{ownerId:7,state:"pending",route:{kind:"group",chatId:-1001,topicId:3,senderId:7,threadId:"t",messageId:10,updateId:8,text:"",voice:{fileId:"v",mime:"audio/ogg",size:1,duration:3}}});
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible",status:"idle"}),
+   events:{list:async()=>[]},send:async()=>{}}};
+ const prompts:string[]=[]; const reactions:string[]=[];
+ const chooser=async(prompt:string)=>{prompts.push(prompt); return "🔥";};
+ const tg=()=>(async <T>(m:string,p:any)=>{if(m==="setMessageReaction") reactions.push(p.reaction[0]?.emoji); return {message_id:1} as T}) as any;
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,tg,new AbortController().signal,async()=>"Отличные новости, контракт подписан!",
+   undefined,undefined,false,undefined,()=>({chooser:chooser as any,options:[{emoji:"👀",meaning:"увидел"},{emoji:"🔥",meaning:"огонь"}]}));
+ await tick(); await tick(); await new Promise(r=>setTimeout(r,10));
+ assert.equal(reactions[0],"👀","seen at once");
+ assert.equal(prompts.length,1,"chosen once — from the transcript");
+ assert.match(prompts[0],/контракт подписан/);
+ assert.equal(reactions.at(-1),"🔥");
+});
+
+test("0.9.76: after a labelled answer to a person, the same turn's unlabelled final goes to that person — unless the turn has another addressee (another person's turn, someone's request joined); notices do not count",async()=>{
+ for (const [withNotice,requestedBefore,personTurn,fromBB,sentByCommand,plugin] of [[true,false,false,false,false,false],[true,true,false,false,false,false],[false,false,true,false,false,false],[false,false,false,false,false,false],[false,false,false,true,false,false],[true,false,false,false,true,false],[false,false,false,false,false,true]] as const) {
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ const route={kind:"group",chatId:-1001,topicId:3,senderId:7,threadId:"t",messageId:10,updateId:8,text:"посчитай файлы"};
+ // requestedBefore: the notice was requested before the labelled answer (seq 4), taken into the turn after it.
+ store.put("group:turn-watch:5:t:T1",{threadId:"t",turn:"T1",afterSeq:5,route,ownerId:7,at:Date.now()});
+ // personTurn: the turn is another person's request (its own route) — its final is that person's, not ours.
+ if (personTurn) { const routes=new ReplyRoutes(store as any); routes.record("t","other",{kind:"telegram",chatId:-1001,topicId:3,updateId:4,messageId:9} as any); routes.accept("t","T1","other"); }
+ const ev=(seq:number,type:string,data:any,turn?:string)=>({seq,type,data,scope:turn ? {kind:"turn",turnId:turn} : {kind:"thread"}});
+ const events=[
+   ...(withNotice ? [ev(requestedBefore ? 4 : 6,"client/turn/requested",{requestId:"n1",initiator:"system",systemMessageKind:"child-completed"}),
+     ev(7,"turn/input/accepted",{clientRequestId:"n1"},"T1")] : []),
+   ...(fromBB ? [ev(6,"client/turn/requested",{requestId:"from-bb",initiator:"user"}),ev(7,"turn/input/accepted",{clientRequestId:"from-bb"},"T1")] : []),
+   ...(plugin ? [ev(6,"client/turn/requested",{requestId:"watch",initiator:"user",originPluginId:"thread-watch"}),ev(7,"turn/input/accepted",{clientRequestId:"watch"},"T1")] : []),
+   ev(8,"item/completed",{item:{type:"agentMessage",text:"Нашёл 8 файлов .md.\n<!-- bb-telegram-child-result:thr_c:T9 -->"}},"T1"),
+   ev(9,"turn/completed",{status:"completed"},"T1")];
+ const sdk={threads:{get:async()=>({id:"t",projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0) && (!q.types || q.types.includes(e.type)))},send:async()=>{}}};
+ if (sentByCommand) store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),sent:[{t:"итог",at:Date.now()+1}]});
+ const sent:any[]=[];
+ await processGroupInputs(store,sdk as any,7,5,()=>async <T>(m:string,p:any)=>{if(m==="sendMessage") sent.push(p); return {message_id:1} as T},new AbortController().signal);
+ if (fromBB || sentByCommand || plugin) assert.equal(sent.length,0,fromBB ? "an input from BB joined: not ours" : plugin ? "a plugin's question joined: its answer is not for the person" : "already sent here by command");
+ else if (withNotice || !personTurn) {
+   assert.equal(sent.length,1,"the result is posted");
+   assert.match(String(sent[0].text),/Нашёл 8 файлов/);
+   assert.doesNotMatch(String(sent[0].text),/bb-telegram-child-result/);
+   assert.equal(sent[0].reply_parameters?.message_id,10,"as a reply to the same message");
+ } else assert.equal(sent.length,0,"another person's turn: its final is not ours");
+ assert.equal(rows.has("group:turn-watch:5:t:T1"),false,"the watch ends with the turn");
  }
 });
 

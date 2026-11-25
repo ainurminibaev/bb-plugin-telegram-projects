@@ -53,9 +53,13 @@ export function askOfMessage(store: Store, bot: number, messageId: number | unde
 }
 
 /** The person's own message goes to the owner as it is; if Telegram does not forward it, a marked quote. */
-export async function forwardOriginal(tg: (chat: number) => Telegram, owner: number, turn: TurnMessage) {
+export async function forwardOriginal(tg: (chat: number) => Telegram, owner: number, turn: TurnMessage, store?: Store) {
+  // Once per original message: a second question about the same request does not bring the same message again.
+  const key = `send:ask-forwarded:${turn.chat}:${turn.message}`;
+  if (store?.get(key)) return "already";
   try {
     await tg(owner)("forwardMessage", {chat_id: owner, from_chat_id: turn.chat, message_id: turn.message});
+    store?.put(key, Date.now());   // marked only once it went: a failed forward is tried again next time
     return "forwarded";
   } catch {
     if (!turn.text?.trim()) return "none";

@@ -1,11 +1,39 @@
 import { stripTelegramMarkers } from "./reply-routing";
 
+const THREAD_REF = String.raw`@thread:thr_[a-zA-Z0-9]+(?:#msg=\d+)?|\bthr_[a-zA-Z0-9]+\b`;
+const STATE_VERBS = String.raw`лежит|лежат|находится|находятся|описан[оаы]?|записан[оаы]?|сохранён[оаы]?|сохранен[оаы]?|собран[оаы]?`;
+const LINK_WORDS = /^(?:(?:см|тред|треды|треде|треда|подтред|подтреды|подтреде|подтреда|сессия|ссылка|ссылки|thread|threads|подробности|детали|итог|в|во|и)\s*)*$/i;
+
+/**
+ * С102: a person in Telegram needs no links to BB threads. A line of nothing but such links (with a label like «Тред:»)
+ * goes away; a link inside a sentence becomes words that keep it readable («в рабочем треде»), no dangling words.
+ */
+export function dropThreadLinks(text: string): string {
+  const any = new RegExp(THREAD_REF);
+  const lines = text.split("\n").flatMap((line) => {
+    if (!any.test(line)) return [line];
+    const rest = line.replace(new RegExp(THREAD_REF, "g"), " ").replace(/[\s,;·•*_()\[\]./#>|:—–-]+/g, " ").trim();
+    if (LINK_WORDS.test(rest)) return [];
+    const r = (body: string, flags = "gi") => new RegExp(body, flags);
+    return [line
+      .replace(r(String.raw`\[([^\]]+)\]\((?:${THREAD_REF})\)`), "$1")
+      .replace(r(String.raw`\s*\((?:см\.?\s*)?(?:${THREAD_REF})(?:\s*[,;]\s*(?:${THREAD_REF}))*\)`), "")
+      .replace(r(String.raw`\s*[,—–:-]?\s*см\.?\s+(?:${THREAD_REF})(?:\s*[,;]\s*(?:${THREAD_REF}))*`), "")
+      // Words only where the case is certain: a state verb + «в» («лежит в рабочем треде»); otherwise the
+      // preposition goes away with the link — shorter rather than wrong («передал задачу, итог ниже»).
+      .replace(r(String.raw`(${STATE_VERBS})\s+в\s+(?:(?:под)?тред[еа]?\s+)?(?:${THREAD_REF})`), "$1 в рабочем треде")
+      .replace(r(String.raw`\s*(?:(?<=^|[\s(«"])(?:во?|из|про|на|к|по)\s+)?(?:(?:под)?тред[аеуы]?\s+)?(?:${THREAD_REF})`), "")
+      .replace(/[ \t]{2,}/g, " ").replace(/\s+([,.;:!?])/g, "$1").replace(/[\s:—–-]+$/u, "").replace(/\(\s*\)/g, "")
+      // A link at the start of the line took its words with it: no dash or colon left hanging in front.
+      .replace(/^(\s*(?:[-*•]\s+)?)[—–:-]\s*/u, (all, lead: string) => new RegExp(`^\\s*(?:[-*•]\\s+)?(?:${THREAD_REF})`).test(line) ? lead.replace(/^\s+/, "") : all)];
+  });
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "");
+}
+
 /** Only public assistant text enters this formatter; never feed reasoning items. */
 export function cleanAssistantText(text: string): string {
-  return stripTelegramMarkers(text)
-    .replace(/\[([^\]]+)\]\((?:\/|file:\/\/)[^)]+\)/g, "$1")
-    .replace(/@thread:thr_[a-zA-Z0-9]+(?:#msg=\d+)?/g, "рабочая сессия")
-    .replace(/\bthr_[a-zA-Z0-9]+\b/g, "рабочая сессия")
+  return dropThreadLinks(stripTelegramMarkers(text)
+    .replace(/\[([^\]]+)\]\((?:\/|file:\/\/)[^)]+\)/g, "$1"))
     .replace(/(?:\/srv\/projects\/|\/root\/|\/Users\/)[^\s<>`"')\]]+/g, (path) => path.split("/").filter(Boolean).pop() || "файл проекта");
 }
 

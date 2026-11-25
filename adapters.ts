@@ -118,8 +118,10 @@ export function telegram(
         body: multipart ? form : JSON.stringify(payload),
         signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
       });
-    } catch {
-      throw new TelegramFailure("telegram_network", 30, true);
+    } catch (error) {
+      // No connection was made: the request did not leave, so it is not «possibly delivered».
+      const cause = String((error as any)?.cause?.code ?? "");
+      throw new TelegramFailure("telegram_network", 30, true, undefined, ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(cause));
     }
     let data: any;
     try {
@@ -206,7 +208,9 @@ export async function runBb(
       signal,
     });
     return JSON.parse(r.stdout);
-  } catch {
+  } catch (e) {
+    // No Tasks command on this BB at all (the plugin is not installed) is a state, not a failure.
+    if (/unknown command '?tasks'?/i.test(String((e as {stderr?: unknown})?.stderr ?? ""))) throw new Error("tasks_not_installed");
     throw new Error("tasks_cli_unavailable");
   }
 }

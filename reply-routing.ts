@@ -9,6 +9,9 @@ const ownerResultInstructions = "\nIf your final answer includes the completed r
   "one Markdown comment on its own line for each such result: <!-- bb-telegram-child-result:CHILD_THREAD_ID:CHILD_TURN_ID -->. " +
   "Use the exact turn ID from the child's BB event log. Omit this comment for launch acknowledgements, " +
   "progress updates, or results you did not include. The bridge removes the comment from Telegram." +
+  "\nEvery message you write goes to Telegram: never restate errors or service replies of commands (bb …, bridge calls), " +
+  "and do not post notes to yourself as separate messages. If you promised to come back with a result, write the result " +
+  "for the same request too, with the same answer label if you answered with one." +
   "\nEarlier Telegram messages and files: run `bb telegram-projects search-history [words] [--author A] [--from D] [--to D] [--last N] [--files] [--file CHAT:MESSAGE]` instead of asking to resend." +
   "\nTo write to a group topic or a person with access: `bb telegram-projects send ([--chat GROUP] [--topic TOPIC] | --person PERSON) --text … [--ask]`; names may be partial, the group may be omitted for a topic. " +
   "`bb telegram-projects send --targets` lists the groups, topics and people you may write to; ask only when a name stays ambiguous. With --ask their answer comes back to the owner." +
@@ -155,7 +158,9 @@ export class ReplyRoutes {
     const parent = this.store.get<{threadId: string; route: ReplyRoute}>("reply:ingress:" + token);
     const current = this.store.get<ReplyRoute>(this.requestKey(parentThreadId,currentRequestId));
     if (!parent || parent.threadId !== parentThreadId || !this.sameTask(parent.route,current))
-      throw Error("route_token_does_not_match_current_request");
+      // Said so the agent acts, not narrates: the code stays first (callers and tests match it).
+      throw Error("route_token_does_not_match_current_request: маркер маршрута от прежнего сообщения — возьми маркер "+
+        "[bb-telegram-reply-route:…] из последнего сообщения этого разговора и повтори вызов. Это служебное: человеку не пиши.");
   }
   /** A Codex question of this turn went to the owner; its answer arrives as the next turn. */
   questionAsked(threadId: string, turnId: string) {

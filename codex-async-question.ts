@@ -71,3 +71,14 @@ export async function codexAsyncQuestionTurn(threads: Threads, threadId: string,
   }
   return undefined;
 }
+
+/** The note to the agent about questions still open (or just closed) when the person wrote in words. */
+export function openQuestionsNote(open: readonly Interaction[], closedOne: boolean) {
+  const title = (i: any) => String(i.payload?.questions?.[0]?.question ?? i.payload?.questions?.[0]?.title ??
+    i.payload?.title ?? i.payload?.reason ?? i.payload?.description ?? i.payload?.kind ?? "вопрос").replace(/\s+/g, " ").slice(0, 120);
+  if (!closedOne && open.length === 1 && (open[0] as any).payload?.kind === "approval")
+    return `[Служебно: открыт твой запрос разрешения «${title(open[0])}» — человек ответил словами, а не кнопкой; его слова выше. Словами разрешение не выдаётся и не отклоняется — запрос остаётся открытым. Человеку не пересказывай служебное.]`;
+  return closedOne
+    ? `[Служебно: твой вопрос «${title(open[0])}» закрыт — человек ответил словами, а не кнопкой; его слова выше. Реши сам, нужен ли вопрос снова. Человеку об этом не пиши.]`
+    : `[Служебно: открыты твои вопросы: ${open.map(i => "«" + title(i) + "»").join(", ")}. Человек написал словами, а не кнопкой; его слова выше — пойми, к какому вопросу они, или ответь по сути.]`;
+}

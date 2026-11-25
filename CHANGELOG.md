@@ -1,3 +1,18 @@
+# 0.9.76
+
+- Topic window (off by default, `topicWindowSinceLast`): a group turn carries only the topic lines its thread has not seen, newest first within a character budget; the agent searches older ones itself.
+- A message handed to BB is never lost: an uncertain hand-over is checked after two minutes and given once more; the person is told only if it really failed.
+- Memory keeps a message's links and formatting; an edit (`edit`) gives the link and before → after, the answer goes as a reply to the edited message (С106); a file's caption is edited too (editMessageCaption).
+- Formatting: a file's or picture's caption is formatted like any message (no raw `**`); a caption too long goes as a formatted text, then the file; refused formatting goes as plain words without marks.
+- Sending files: Telegram's own spelling of a name is a confirmed receipt; an unknown outcome (no answer) is said as «possibly delivered — do not repeat»; the same files to the same place within 15 minutes are not sent again without `--again`; an upload waits 120 s.
+- Groups: a group that became a supergroup is one group by name; same titles are told apart by number; `--chat=N` works. «Tasks не установлен» is a status, not an error.
+- С108: a topic cannot be pinned by a bot — said honestly; `message pin|unpin`.
+- An open question never blocks the owner's message: a form question takes the words; a permission request is decided only by its button or the owner's own words equal to a button's label; otherwise the words go to the agent with a note. No service line to the person.
+- Guest group memory: only a person nobody approved makes a group guest; the owner gets a notice with «Одобрить <имя>» / «Оставить так»; shared memory comes back only when nobody unknown is left; the owner's own choice of separate memory is kept.
+- Answers: a turn not started by a person that already sent here by command posts no report; after a labelled answer the same turn's unlabelled final goes to that person unless another request joined the turn; a follow-up question to the owner names the person who asked and forwards the original once; a voice's reaction is chosen from its transcript; thread links are dropped from texts to people; command errors are not retold (rule line).
+
+Not checked live (covered by tests): a subthread's question as buttons (the stand's guest guard blocks the subthread there); a double final after a subthread in the owner's topics group (no such group on the stand); a task with a reminder to a third person (the stand has no third person).
+
 # 0.9.75
 
 - Forwards in groups reach the agent. In the owner's topics group every forwarded message (text, voice, file) was dropped at the door with channel posts and «via bot» messages; now a message a person forwarded is an ordinary incoming one, labelled with who wrote the original (С73). Where the agent leads a topic without mentions, a participant's forward is taken too; channel posts, automatic forwards from a channel and «via bot» messages are still dropped.

@@ -200,6 +200,8 @@ export class TelegramFailure extends Error {
     public ambiguous = false,
     /** A basic group upgraded to a supergroup answers with its new chat ID. */
     public migrateTo?: number,
+    /** The request never left (no connection, no such host): certainly not delivered, though retried like a network error. */
+    public notSent = false,
   ) {
     super(code);
   }

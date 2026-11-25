@@ -93,3 +93,12 @@ test("an album without a reply in a forum topic is confirmed though Telegram mar
   const r=await sendAlbum(tg,{chatId:-7,topicId:3,replyTo:0},files);
   assert.deepEqual(r.messageIds,[40,41]);
 });
+
+test("Telegram's own spelling of a file name (spaces → «_») is a confirmed album, not an unconfirmed one",async()=>{
+  const files=[{kind:"document" as const,data:new Blob(["a"]),name:"сопроводительное План _ Клиент.md"},
+    {kind:"document" as const,data:new Blob(["bb"]),name:"записка.md"}];
+  const stored=["сопроводительное_План_Клиент.md","записка.md"];
+  const tg=(async <T>()=>files.map((f,i)=>({chat:{id:-7},message_thread_id:3,message_id:50+i,media_group_id:"g",
+    document:{file_id:"f"+i,file_name:stored[i],file_size:(f.data as Blob).size},reply_to_message:{message_id:3}})) as T) as Telegram;
+  assert.deepEqual((await sendAlbum(tg,{chatId:-7,topicId:3,replyTo:0},files)).messageIds,[50,51]);
+});

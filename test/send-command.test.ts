@@ -186,3 +186,31 @@ test("a group's or person's conversation attaches only its chat's received files
   assert.equal(conversationMayAttach("/dm/outputs/753a0807x/a.txt",where),false,"a lookalike folder");
   assert.equal(conversationMayAttach("/etc/hostname",where),false);
 });
+
+test("0.9.74: a group named with brackets and dashes is found by its name as an agent writes it", () => {
+  const rows = new Map<string, unknown>();
+  const s: any = {get: (k: string) => rows.get(k), put: (k: string, v: unknown) => { rows.set(k, v); }, del: (k: string) => { rows.delete(k); },
+    list: (p: string) => [...rows].filter(([k]) => k.startsWith(p)).map(([key, value]) => ({key, value})), atomic: (fn: () => void) => fn()};
+  s.put("visibility:5:group:-1009000000101", {chat: -1009000000101, title: "Стенд — прогоны (только тестовые боты)"});
+  s.put("visibility:5:group:-1009000000102", {chat: -1009000000102, title: "Отдел — пилот (тестовая группа)"});
+  for (const name of ["Стенд — прогоны (только тестовые боты)", "«Стенд — прогоны (только тестовые боты)»",
+    "Стенд - прогоны (только тестовые боты)", "стенд прогоны только тестовые боты", "прогоны (только тестовые"])
+    assert.equal(findGroup(s, 5, name), -1009000000101, name);
+  assert.throws(() => findGroup(s, 5, "склад"), /group_unknown/);
+});
+
+test("0.9.74: several groups fit a name — a refusal naming them, never the first one", () => {
+  const rows = new Map<string, unknown>();
+  const s: any = {get: (k: string) => rows.get(k), put: (k: string, v: unknown) => { rows.set(k, v); }, del: (k: string) => { rows.delete(k); },
+    list: (p: string) => [...rows].filter(([k]) => k.startsWith(p)).map(([key, value]) => ({key, value})), atomic: (fn: () => void) => fn()};
+  s.put("visibility:5:group:-1001", {chat: -1001, title: "Стенд — прогоны (только тестовые боты)"});
+  s.put("visibility:5:group:-1002", {chat: -1002, title: "Стенд — прогоны (старый)"});
+  assert.throws(() => findGroup(s, 5, "стенд прогоны"), /group_ambiguous: Стенд — прогоны \(только тестовые боты\) \(--chat -1001\), Стенд — прогоны \(старый\) \(--chat -1002\)/);
+  assert.throws(() => findGroup(s, 5, "прогоны стенд"), /group_ambiguous/, "the words fallback refuses too");
+  assert.equal(findGroup(s, 5, "прогоны (старый)"), -1002);
+  // Two groups under one title are told apart by number; a group upgraded to a supergroup is one group.
+  s.put("visibility:5:group:-1003", {chat: -1003, title: "Стенд — прогоны (старый)"});
+  assert.throws(() => findGroup(s, 5, "прогоны (старый)"), /\(--chat -1002\).*\(--chat -1003\)/);
+  s.put("group:moved:-1003", -1002);
+  assert.equal(findGroup(s, 5, "прогоны (старый)"), -1002);
+});
