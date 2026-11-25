@@ -142,7 +142,8 @@ test("the owner-only tool rejects all other authors and source contexts before w
   const foreign=await fixture(undefined,9);
   await assert.rejects(foreign.makeTool()(explicit,scope),/current_owner_group_request_required/);
   const forwarded=await fixture(undefined,owner,{forward_origin:{type:"user"}});
-  await assert.rejects(forwarded.makeTool()(explicit,scope),/explicit_owner_title_required/);
+  // 0.9.75: a forward reaches the queue now, but it is not the owner's own words — still refused, nothing written.
+  await assert.rejects(forwarded.makeTool()(explicit,scope),/explicit_owner_title_required|current_owner_group_request_required/);
   const completed=await fixture();
   completed.record("turn/completed",{status:"completed"});
   await assert.rejects(completed.makeTool()(explicit,scope),/current_owner_group_request_required/);

@@ -7,6 +7,17 @@ import type { Store } from "./model";
 import {isSharedOwnerPolicy} from "./group-binding";
 import { agentBots, effectiveGroupPolicy } from "./rights";
 import type { ChatInput } from "./chat";
+import {forwardLabel} from "./forward-label";
+
+/** Groups: how long a forward from someone the agent answers without a mention waits for what follows (as in the
+ * owner's chat, 10 s), so several forwards and a comment become one turn (0.9.75). */
+export const GROUP_FORWARD_COLLECT_MS = 10_000;
+
+/** A person's own message or one they forwarded — not a channel's, an automatic forward from a channel or via a bot. */
+function personForwardOrOwn(message:any) {
+  return Number.isSafeInteger(message?.from?.id) && message.from.id>0 && !message.from.is_bot &&
+    !message.sender_chat && !message.is_automatic_forward && !message.via_bot;
+}
 import {maxImageBytes} from "./group-attachments";
 import {MAX_INCOMING_BYTES} from "./telegram-files";
 
@@ -169,7 +180,7 @@ export function messageTopic(m: any): number {
 }
 
 export type Ingress =
-  | {kind: "group"; ownerTopicText?: string; ownerUnaddressed?: true; leaderUnaddressed?: true; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; ownText?: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string}
+  | {kind: "group"; ownerTopicText?: string; ownerUnaddressed?: true; leaderUnaddressed?: true; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; ownText?: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; collectUntil?:number; arrivedAt?:number; voiceText?:string; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
   | { kind: "tasks"; topicId: number }
   | { kind: "pair"; userId: number }
@@ -195,7 +206,8 @@ export function routeUpdate(
         !group.threadId || !Number.isSafeInteger(from?.id) || from.id <= 0 ||
         (from.is_bot && !group.agentBots?.includes(from.id)) || m.sender_chat || !canInvokeGroup(group, owner, from.id))
       return {kind: "ignore"};
-    if (group.ownerSharedProject && ((m.is_topic_message===true)!==(topicId>0) || !originalPerson(m))) return {kind:"ignore"};
+    // The owner's topics group: a message the owner wrote or forwarded himself (0.9.75: forwards were dropped).
+    if (group.ownerSharedProject && ((m.is_topic_message===true)!==(topicId>0) || !personForwardOrOwn(m))) return {kind:"ignore"};
     const text = m.text ?? m.caption ?? "";
     const v = m.voice;
     const voice = v?.file_id ? {fileId:v.file_id, mime:v.mime_type ?? "audio/ogg", size:v.file_size ?? 0, duration:v.duration ?? 0} : undefined;
@@ -222,7 +234,7 @@ export function routeUpdate(
     const ownerUnaddressed=group.requireMention && !addressed && from.id===owner && group.leadMode!=="mention" &&
       group.ownerWithoutMention!==false && !toSomeoneElse && !repliesToDifferentBot && !group.ownerSharedProject;
     const leaderUnaddressed=group.requireMention && !addressed && !ownerUnaddressed && group.leadMode==="lead" &&
-      group.leadExplicit===true && !from.is_bot && originalPerson(m) && !toSomeoneElse && !repliesToDifferentBot &&
+      group.leadExplicit===true && !from.is_bot && personForwardOrOwn(m) && !toSomeoneElse && !repliesToDifferentBot &&
       !group.ownerSharedProject;
     if (group.requireMention && !ownerUnaddressed && !leaderUnaddressed && (!addressed || repliesToDifferentBot)) return {kind: "ignore"};
     const reply = m.reply_to_message;
@@ -237,13 +249,21 @@ export function routeUpdate(
       (group.acceptAfterSecond===undefined || (Number.isSafeInteger(reply.date) && reply.date>group.acceptAfterSecond));
     const examples=[groupExample(m), canUseReply ? groupExample(reply) : undefined]
       .filter((file):file is GroupExample=>!!file);
+    const forwarded = !!(m.forward_origin || m.forward_date);
+    // С73: a forwarded message says whose words it carries.
+    const said = forwarded ? forwardLabel(forwardOriginOf(m.forward_origin), group.botId) + text : text;
     const prompt = target ? "Ответ на сообщение № " + target.messageId + " (чат " + target.chat + ", тема " + target.topic + (target.fileName ? ", файл " + target.fileName : "") +
-      "; текст: bb telegram-projects search-history --message " + target.messageId + ")\n" + text : text;
+      "; текст: bb telegram-projects search-history --message " + target.messageId + ")\n" + said : said;
+    // Where the agent answers without a mention: a forward waits for what follows (more forwards, a comment);
+    // any message of the same person may join an open window.
+    const unmentioned = !group.requireMention || ownerUnaddressed || leaderUnaddressed;
+    const collect = unmentioned && !group.isolated ? {arrivedAt: Date.now(),
+      ...(forwarded && {collectUntil: Date.now() + GROUP_FORWARD_COLLECT_MS})} : {};
     const senderName = [from.first_name, from.last_name].filter(Boolean).join(" ").slice(0, 64) || undefined;
     const ownerTopicText = from.id===owner && m.chat.type==="supergroup" && typeof m.text==="string" &&
       !m.forward_origin && !m.forward_date && !m.is_automatic_forward && !m.via_bot ? m.text : undefined;
     return {kind: "group", ...(ownerTopicText && {ownerTopicText}), ...(ownerUnaddressed && {ownerUnaddressed:true as const}), ...(leaderUnaddressed && {leaderUnaddressed:true as const}), chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
-      threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice}), ...(examples.length && {examples})};
+      threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice}), ...(examples.length && {examples}), ...collect};
   }
   if (!m || m.chat?.type !== "private" || from?.id !== m.chat?.id)
     return { kind: "ignore", callbackId };

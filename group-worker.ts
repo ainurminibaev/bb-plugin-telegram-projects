@@ -54,6 +54,28 @@ export async function settled(key:string,start:()=>Promise<unknown>,keep=false):
 export let SLOW_WORK_GRACE_MS=1_500;
 export function setSlowWorkGrace(ms:number) { SLOW_WORK_GRACE_MS=ms; }
 
+/**
+ * 0.9.75: the messages one person sent in a row in a topic, each within the window of the previous one. The earliest
+ * pending one is the anchor; the chain waits while a window is open or a voice is still being transcribed.
+ */
+export function collectChain(store:Store,botId:number,job:Job) {
+  const r=job.route;
+  const same=store.list<Job>(`group:in:${botId}:`).filter(({value:j})=>j.state==="pending" && j.ownerId===job.ownerId &&
+    j.revision===job.revision && j.route.chatId===r.chatId && j.route.topicId===r.topicId && j.route.threadId===r.threadId &&
+    j.route.senderId===r.senderId && j.route.arrivedAt!==undefined && j.route.updateId>0)
+    .sort((a,b)=>a.value.route.updateId-b.value.route.updateId);
+  const anchor=same[0];
+  const members:{key:string;job:Job}[]=[];
+  let until=anchor?.value.route.collectUntil ?? 0, waiting=Date.now()<until;
+  for (const s of same.slice(1)) {
+    if ((s.value.route.arrivedAt ?? Infinity)>until) break;
+    members.push({key:s.key,job:s.value});
+    until=Math.max(until,s.value.route.collectUntil ?? 0);
+    if (Date.now()<until || s.value.route.voice) waiting=true;
+  }
+  return {anchorKey:anchor?.key,members,waiting};
+}
+
 /** "Typing" for a submitted message stops after this long. */
 export const TYPING_MAX_MS=10*60_000;
 
@@ -61,6 +83,8 @@ type Job = {
   route: GroupInput; ownerId:number; revision?:string;
   state:"pending"|"submitted"|"ready"|"sending"|"done"|"revoked";
   taskId?:string; progressId?:number|null;
+  /** 0.9.75: this message went into the turn of an earlier one of the same person. */
+  mergedInto?:number;
   /** When the message was given to the thread; a submitted message without a turn does not live forever. */
   submittedAt?:number; resubmitted?:boolean; started?:boolean; refusedNotified?:boolean;
   executionToken?:string; executorRetryAt?:number;
@@ -340,6 +364,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           r.text=topicPassages(matches,r.chatId)+r.text;
         }
         r.text += "\n" + voiceHeader(r.voice.duration,"Голосовое обращение") + transcript;
+        r.voiceText = voiceHeader(r.voice.duration,"Голосовое обращение") + transcript;
         voiceTranscripts.observe?.(r.chatId, r.messageId, transcript);
         delete r.voice;
       } catch {
@@ -349,6 +374,20 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       }
       store.put(key,job);
       if (!allowed()) {finish("revoked");continue;}
+    }
+    // 0.9.75: several messages of one person in a row (forwards and a comment) where the agent answers without a
+    // mention are one turn. The earliest waits for its window; a later one waits for the earliest to take it.
+    if (job.state==="pending" && r.arrivedAt!==undefined) {
+      const chain=collectChain(store,botId,job);
+      if (chain.anchorKey!==key) continue;                 // an earlier message of the same person takes this one
+      if (chain.waiting) continue;                         // a window is still open or a voice is not yet transcribed
+      for (const m of chain.members) {
+        const mr=m.job.route;
+        r.text += "\n\n"+(mr.ownText ?? mr.text)+(mr.voiceText ? "\n"+mr.voiceText : "");
+        if (mr.examples?.length) r.examples=[...(r.examples ?? []),...mr.examples];
+        store.put(m.key,{...m.job,state:"ready",answer:NO_REPLY,mergedInto:r.updateId});
+      }
+      if (chain.members.length || r.collectUntil!==undefined) {delete r.collectUntil; delete r.arrivedAt; store.put(key,job);}
     }
     if (job.state==="pending" && r.ambiguousMedia) {
       job.answer="В этой теме несколько подходящих сообщений с вложениями. Ответьте на нужное фото или файл и отметьте бота.";

@@ -1,3 +1,8 @@
+# 0.9.75
+
+- Forwards in groups reach the agent. In the owner's topics group every forwarded message (text, voice, file) was dropped at the door with channel posts and «via bot» messages; now a message a person forwarded is an ordinary incoming one, labelled with who wrote the original (С73). Where the agent leads a topic without mentions, a participant's forward is taken too; channel posts, automatic forwards from a channel and «via bot» messages are still dropped.
+- Several forwards and a comment are one turn in a group where the agent answers without a mention: a forward waits 10 s for what follows (as in the owner's chat); every message of the same person that comes within the window joins the same turn, voices transcribed.
+
 # 0.9.74
 
 - Fix: a deferred task in a group (a participant's «in N minutes send the result here», `telegram_group_followup`) runs again. In 0.9.73 the check «the bot already replied to this message» saw the confirmation «scheduled» on the same original message and closed the task silently, without a turn. The same check closed the owner's answer to a group's question (it comes under the original message, which the bot had answered «asked the owner»). The check now applies only to real Telegram messages, not to what the bridge gives itself (deferred tasks, subthread results, the owner's answers).

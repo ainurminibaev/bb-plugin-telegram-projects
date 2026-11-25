@@ -713,3 +713,31 @@ test("0.9.70: on the employee's pause a waiting message shows no «thinking» li
  assert.equal(out.filter(([m])=>m==="sendMessage").length,paused ? 0 : 1,paused ? "paused" : "running");
  }
 });
+
+test("0.9.75: two forwards and a comment of the owner in a place without mentions are one turn", async t => {
+ let now=Date.now();
+ t.mock.method(Date,"now",()=>now);
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:0");
+ store.put("group:policy:-1001:0",{chatId:-1001,topicId:0,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ const job=(u:number,text:string,extra:any={})=>store.put(`group:in:5:${u}`,{ownerId:7,state:"pending",
+   route:{kind:"group",chatId:-1001,topicId:0,senderId:7,threadId:"t",messageId:u+100,updateId:u,text,arrivedAt:now,...extra}});
+ job(1,"[Пересланное сообщение. Автор оригинала: Пётр (человек).]\n",{collectUntil:now+10_000,voice:{fileId:"a",mime:"audio/ogg",size:1,duration:3}});
+ job(2,"[Пересланное сообщение. Автор оригинала: Пётр (человек).]\n",{collectUntil:now+10_000,voice:{fileId:"b",mime:"audio/ogg",size:1,duration:4}});
+ job(3,"Передай это Потапычу");
+ const inputs:string[]=[];
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible",status:"idle"}),
+   events:{list:async()=>[]},send:async(q:any)=>{inputs.push(q.input.map((x:any)=>x.text ?? "").join("\n"));}}};
+ const transcribe=async(v:any)=>v.fileId==="a" ? "первая мысль" : "вторая мысль";
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal,transcribe as any);
+ for (let i=0;i<4;i++) await tick();
+ assert.equal(inputs.length,0,"the forward's window is still open");
+ now+=11_000;
+ for (let i=0;i<4;i++) await tick();
+ assert.equal(inputs.length,1,"one turn");
+ assert.match(inputs[0],/первая мысль[\s\S]*вторая мысль[\s\S]*Передай это Потапычу/);
+ assert.match(inputs[0],/Автор оригинала: Пётр/);
+});

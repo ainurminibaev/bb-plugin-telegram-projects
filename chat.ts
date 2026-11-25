@@ -104,21 +104,8 @@ const FORWARD_PREFIX = "[Пересланное сообщение]\n";
 function collectionWindow(input: ChatInput, normalMs: number) {
   return input.forwarded && normalMs ? Math.max(normalMs, FORWARD_COMMENT_MS) : normalMs;
 }
-/**
- * С73: a forwarded message says whose words it carries. The agent never takes the original's words for the words
- * or the decision of whoever forwarded it; its own earlier message is named as its own.
- */
-export function forwardLabel(origin: ChatInput["forwardOrigin"], botId: number | undefined) {
-  const when = origin?.date ? ", " + new Date(origin.date * 1000).toLocaleString("ru-RU", {timeZone: "Europe/Moscow",
-    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) + " МСК" : "";
-  if (!origin) return FORWARD_PREFIX;
-  if (origin.type === "user" && botId !== undefined && origin.id === botId)
-    return `[Пересланное сообщение: это твоё собственное сообщение${when}. Его слова — твои, а не того, кто переслал.]\n`;
-  const who = origin.type === "user" ? `${origin.name} (${origin.isBot ? "бот" : "человек"})`
-    : origin.type === "hidden_user" ? `${origin.name} (автор скрыл профиль)`
-    : origin.type === "channel" ? `канал «${origin.name}»` : `чат «${origin.name}»`;
-  return `[Пересланное сообщение. Автор оригинала: ${who}${when}. Это слова автора оригинала, а не того, кто переслал.]\n`;
-}
+import {forwardLabel} from "./forward-label";
+export {forwardLabel};
 function forwardedWithQuestion(parts: ChatInput[], texts: string[]) {
   const forwarded = texts.filter((_, i) => parts[i].forwarded)
     .map(t => t.startsWith(FORWARD_PREFIX) ? t.slice(FORWARD_PREFIX.length) : t);

@@ -166,7 +166,12 @@ test("group policy binds a specific chat and topic and keeps the real sender", (
         const result=route({update_id:9,message:msg},10,undefined,{...policy,ownerOnly,requireMention});
         const accept=chat===policy.chatId && topic===policy.topicId && (!ownerOnly || sender===10) &&
           (!requireMention || ["mention","reply","command"].includes(kind));
-        if (accept) assert.deepEqual(result,{kind:"group",...(sender===10 && {ownerTopicText:text}),chatId:chat,topicId:topic,threadId:"group-worker",senderId:sender,messageId:8,updateId:9,text});
+        // 0.9.75: a message the agent answers without a mention carries its arrival time (it may join a forward's window).
+        const {arrivedAt,...rest}=result as any;
+        if (accept) {
+          assert.deepEqual(rest,{kind:"group",...(sender===10 && {ownerTopicText:text}),chatId:chat,topicId:topic,threadId:"group-worker",senderId:sender,messageId:8,updateId:9,text});
+          assert.equal(arrivedAt!==undefined,!requireMention);
+        }
         else assert.equal(result.kind,"ignore");
       }
 });
