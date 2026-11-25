@@ -30,6 +30,16 @@ test("a topic of a group the employee is in is bound on its first mention and th
   assert.equal(unboundAddressedGroupMessage(store as any,msg(3,"@acmebot ещё"),BOT,"acmebot"),undefined,"bound once");
 });
 
+test("a colleague agent of the organization starts a topic's conversation by a mention; another bot does not",()=>{
+  const store=memoryStore();
+  store.put("rights:install-kind","employee");
+  store.put(`visibility:${BOT}:group:${CHAT}`,{chat:CHAT,title:"Склад",administrator:true,event:1});
+  store.put("rights:agent-bots",[77]);
+  const fromBot=(id:number,bot:number)=>msg(id,"@acmebot привет",{from:{id:bot,is_bot:true,first_name:"Коллега"}});
+  assert.deepEqual(unboundAddressedGroupMessage(store as any,fromBot(1,77),BOT,"acmebot"),{chatId:CHAT,topicId:9,date:2_000_000_000,title:"Склад"});
+  assert.equal(unboundAddressedGroupMessage(store as any,fromBot(2,78),BOT,"acmebot"),undefined,"a bot outside the organization");
+});
+
 test("a group the bot is not in is never bound",()=>{
   const store=memoryStore();
   assert.equal(unboundAddressedGroupMessage(store as any,msg(1,"@acmebot привет"),BOT,"acmebot"),undefined);

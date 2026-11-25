@@ -1193,6 +1193,16 @@ export class ChatBridge {
     this.disposed = true;
     await Promise.allSettled([...this.work]);
   }
+  /** The owner's chat (topic 0) to a project, like /project: the owner's first message there starts the conversation. */
+  async bindOwnerChat(projectId: string) {
+    const project = await this.d.sdk.projects.get({ projectId, signal: this.d.signal });
+    if (!project?.id) throw Error("project_not_found");
+    const b = this.binding(0);
+    if (b?.projectId === projectId) return { changed: false, projectId, threadId: b.threadId };
+    if (b?.threadId) throw Error("owner_chat_bound_to_another_project");
+    this.save({ topicId: 0, projectId, threadId: null, ready: true, revision: fresh(), cursor: 0 });
+    return { changed: true, projectId, threadId: null };
+  }
   async projects(topicId: number) {
     const projects = (
       await this.d.sdk.projects.list({ signal: this.d.signal })

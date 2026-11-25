@@ -1340,6 +1340,16 @@ test("confirmed stop suppresses a delayed child result only for the stopped Tele
   } finally { f.cleanup(); }
 });
 
+test("the owner's chat is bound to a project without a conversation, like /project", async () => {
+  const f = fixture();
+  try {
+    f.store.del("chat:binding:0");
+    assert.deepEqual(await f.bridge.bindOwnerChat("proj_one"), {changed:true, projectId:"proj_one", threadId:null});
+    assert.equal(f.store.get<any>("chat:binding:0").threadId, null);
+    assert.equal((await f.bridge.bindOwnerChat("proj_one")).changed, false, "a repeated call changes nothing");
+  } finally { f.cleanup(); }
+});
+
 test("stop before flush suppresses a queued result", async () => {
   const f = fixture();
   try {

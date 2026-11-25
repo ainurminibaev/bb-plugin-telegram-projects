@@ -214,6 +214,11 @@ export const rpcContract = defineRpcContract({
   // С76: an existing group (all its topics) or a person's chat moves from the owner's folder into its own one; the
   // previous threads keep their history and files and are told whom to hand open work to. restore — the way back.
   // For other plugins (case cards, С65): which Telegram chat and topic a thread (or its subthread) talks to; read only.
+  // The owner's chat (topic 0) to a project, as /project does: the owner's first message starts the conversation (С102).
+  bindOwnerChat:{
+    input:z.object({projectId:z.string().min(1).max(160)}).strict(),
+    output:z.object({changed:z.boolean(),projectId:z.string(),threadId:z.string().nullable()}),
+  },
   conversationOf:{
     input:z.object({threadId:z.string().min(1).max(160)}).strict(),
     output:z.object({kind:z.enum(["owner","group","person"]),chatId:z.number(),topicId:z.number()}).nullable(),
@@ -469,6 +474,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     telegramInboxRoot: {
       type: "string", label: "Private received-file directory", default: "",
+    },
+    employeeProject: {
+      type: "string", label: "Проект сотрудника: к нему личка владельца привязывается сама, когда владелец привязывает бота (пусто — выбор через /project)", default: "",
     },
     conversationFoldersRoot: {
       type: "string", label: "Own folder for each group and person's chat (С76; empty: they share the owner's folder)", default: "",
@@ -1197,22 +1205,26 @@ export default async function plugin(bb: BbPluginApi) {
   const ownerBinding=()=>{
     const own=store.get<{projectId?:string;threadId?:string}>("chat:binding:0");
     if (own?.threadId && own.projectId) return own as {projectId:string;threadId:string};
-    return store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId);
+    // The owner's chat may be bound to the project with no conversation yet (a new chat, or bound by the installer):
+    // conversations of groups and people still go to that project.
+    return store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId) ??
+      (own?.projectId ? {projectId:own.projectId} as {projectId:string;threadId?:string} : undefined);
   };
   async function bindConversation(owner:number,bot:number,c:{chatId:number;topicId:number;title:string;
     privateChat?:boolean;allowedSenderIds?:number[];acceptAfterSecond?:number},signal:AbortSignal) {
     if (store.get(`group:policy:${c.chatId}:${c.topicId}`)) return true;
     const dm=ownerBinding();
     const botUsername=store.get<string>("bot:username");
-    if (!dm?.threadId || !botUsername) return false;
+    if (!dm?.projectId || !botUsername) return false;
     const reserve="employee:conversation:thread:"+bot+":"+c.chatId+":"+c.topicId;
     const prior=store.get<{at:number;threadId?:string}>(reserve);
     let threadId=prior?.threadId;
     if (!threadId) {
       // An unconfirmed spawn is not repeated for ten minutes, so one conversation never gets two threads.
       if (prior && Date.now()-prior.at<10*60_000) return false;
-      const source=await bb.sdk.threads.get({threadId:dm.threadId,signal});
-      if (!source?.environmentId || source.projectId!==dm.projectId) return false;
+      // Next to the owner's conversation when there is one; otherwise in the project's own environment.
+      const source=dm.threadId ? await bb.sdk.threads.get({threadId:dm.threadId,signal}) : undefined;
+      if (dm.threadId && (!source?.environmentId || source.projectId!==dm.projectId)) return false;
       store.put(reserve,{at:Date.now()});
       // A folder that cannot be made keeps the conversation unbound (retried in ten minutes), never in the owner's folder.
       const own=await ownConversationProject(dm.projectId,c).catch(error=>{
@@ -1225,8 +1237,8 @@ export default async function plugin(bb: BbPluginApi) {
         visibility:"visible",permissionMode:"accept-edits",
         input:[{type:"text",visibility:"agent-only",mentions:[],
           text:"This thread is the Telegram conversation «"+c.title+"». Wait for a request. Reply with NO_REPLY, without using tools."}],
-        environment:own ? {type:"project-default"} : {type:"reuse",environmentId:source.environmentId},
-        ...(source.providerId && {providerId:source.providerId})});
+        environment:own || !source ? {type:"project-default"} : {type:"reuse",environmentId:source.environmentId!},
+        ...(source?.providerId && {providerId:source.providerId})});
       if (!thread.id || thread.projectId!==projectId) return false;
       threadId=thread.id;
       store.put(reserve,{at:Date.now(),threadId,...(own && {projectId:own})});
@@ -2127,6 +2139,11 @@ export default async function plugin(bb: BbPluginApi) {
         deleteManagers:[...new Set(deleteManagers)],since:Math.floor(Date.now()/1000)} satisfies ForumDefaults);
       return {enabled:true};
     },
+    bindOwnerChat: async ({projectId})=>{
+      if (stateTransferBusy) throw Error("state_transfer_in_progress");
+      if (!bridge) throw Error("chat_not_enabled");
+      return bridge.bindOwnerChat(projectId);
+    },
     conversationOf: async ({threadId})=>{
       const owner=ownerId();
       const found=await conversationOf(store,bb.sdk.threads,threadId).catch(()=>undefined);
@@ -2470,6 +2487,11 @@ export default async function plugin(bb: BbPluginApi) {
         name: "sync",
         summary: "Sync now",
         usage: "bb telegram-projects sync --json",
+      },
+      {
+        name: "bind-owner-chat",
+        summary: "Bind the owner's chat to a project, as /project does",
+        usage: "bb telegram-projects bind-owner-chat --project <project-id>",
       },
       {
         name: "bind",
@@ -2874,6 +2896,14 @@ export default async function plugin(bb: BbPluginApi) {
             error: lastError,
           }),
         };
+      }
+      if (cmd === "bind-owner-chat") {
+        const i = argv.indexOf("--project");
+        const projectId = i >= 0 ? argv[i + 1] : undefined;
+        if (!projectId) return { exitCode: 2, stderr: "usage: bind-owner-chat --project <project-id>" };
+        if (!bridge) return { exitCode: 1, stderr: "chat_not_enabled" };
+        try { return { exitCode: 0, stdout: JSON.stringify(await bridge.bindOwnerChat(projectId)) }; }
+        catch (error) { return { exitCode: 1, stderr: String((error as Error)?.message ?? error) }; }
       }
       if (cmd === "bind") {
         if (flight) return { exitCode: 1, stderr: "sync_busy" };
@@ -3377,6 +3407,10 @@ export default async function plugin(bb: BbPluginApi) {
               if (profilePath!==undefined && route.userId!==readEmployeeProfile(profilePath).owner) {store.put("ingress:offset",u.update_id+1);continue;}
               store.put("owner:id", route.userId);
               store.del("pair:code");
+              // An employee's install names its project: the owner's chat goes there at once (С102).
+              const employeeProject=String(cfg.employeeProject ?? "").trim();
+              if (employeeProject && bridge) await bridge.bindOwnerChat(employeeProject)
+                .catch(error=>bb.log.warn("Telegram owner chat binding: "+String(error?.message ?? error)));
               await tg("sendMessage", {
                 text: translate(
                   cfg.language as "ru" | "en",

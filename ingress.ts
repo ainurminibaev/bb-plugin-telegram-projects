@@ -666,7 +666,9 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
 export function unboundAddressedGroupMessage(store: Store, update: any, botId: number, botUsername: string) {
   const m = update?.message;
   if (!m || !["group", "supergroup"].includes(m.chat?.type) || !Number.isSafeInteger(m.chat?.id) || m.chat.id >= 0) return;
-  if (!Number.isSafeInteger(m.from?.id) || m.from.is_bot || m.sender_chat) return;
+  if (!Number.isSafeInteger(m.from?.id) || m.sender_chat) return;
+  // A colleague agent of the organization starts the conversation too (agents-in-chats); other bots never.
+  if (m.from.is_bot && !agentBots(store).includes(m.from.id)) return;
   const topicId = m.is_topic_message ? (m.message_thread_id ?? 0) : 0;
   if (store.get(`group:policy:${m.chat.id}:${topicId}`)) return;
   const member = store.get<{title?: string}>(`visibility:${botId}:group:${m.chat.id}`);
