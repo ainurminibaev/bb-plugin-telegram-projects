@@ -50,7 +50,9 @@ export function rememberForumName(store:Store,bot:number,chat:number,topic:numbe
   if (!clean) return;
   const key=forumNameKey(bot,chat,topic);
   const prior=store.get<TopicMetadata>(key);
-  if (prior && prior.updateId>updateId) return;
+  // Telegram's update numbers are ~10⁹; older bridges stamped their own renames with milliseconds (~10¹²),
+  // which would block every later rename by people — such a stamp never outranks a real update.
+  if (prior && prior.updateId>updateId && prior.updateId<1e11) return;
   store.put(key,{name:clean,updateId,created:created??prior?.created,creationDate:creationDate??prior?.creationDate} satisfies TopicMetadata);
 }
 

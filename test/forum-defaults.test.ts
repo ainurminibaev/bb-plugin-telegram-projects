@@ -315,3 +315,13 @@ test("a topic the bot made itself is picked up by explicit defaults once a topic
   learnTopicName(store,bot,msg);
   assert.ok(inheritableForumTopic(store,bot,owner,describeForumTopic(store,bot,owner,msg)),"picked up with the head's date");
 });
+
+test("a rename by people is remembered after an older bridge stamped a topic with milliseconds", () => {
+  const rows=new Map<string,unknown>();
+  const store:Store={get:k=>structuredClone(rows.get(k)) as never,put:(k,v)=>{rows.set(k,structuredClone(v));},del:k=>{rows.delete(k);},
+    list:p=>[...rows].filter(([k])=>k.startsWith(p)).map(([key,value])=>({key,value:structuredClone(value) as never})),atomic:fn=>fn()};
+  store.put(`group:topic-name:5:${chat}:176`,{name:"Старое",updateId:1795583021640});
+  learnTopicName(store,5,{update_id:243965300,message:{message_id:700,message_thread_id:176,is_topic_message:true,chat:forum(chat),
+    forum_topic_edited:{name:"Новое"}}});
+  assert.equal(forumName(store,5,chat,176),"Новое");
+});

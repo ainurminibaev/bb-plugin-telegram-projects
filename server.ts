@@ -2540,13 +2540,13 @@ export default async function plugin(bb: BbPluginApi) {
             if (action==="create") {
               const made=await tg<{message_thread_id:number}>("createForumTopic",{chat_id:target.chat,name});
               const topicId=made.message_thread_id, now=Math.floor(Date.now()/1000);
-              rememberForumName(store,bot,target.chat,topicId,name,Date.now(),true,now);
+              rememberForumName(store,bot,target.chat,topicId,name,store.get<number>("ingress:offset") ?? 0,true,now);
               // The bot gets no update about its own topic: the topic gets its conversation here, as one the owner made (С54).
               const owner=ownerId();
               let conversation=false;
               if (owner) {
                 try {
-                  await inheritForumTopic(owner,bot,lifetime.signal,{update_id:Date.now(),message:{message_id:topicId,
+                  await inheritForumTopic(owner,bot,lifetime.signal,{update_id:store.get<number>("ingress:offset") ?? 0,message:{message_id:topicId,
                     message_thread_id:topicId,is_topic_message:true,date:now,from:{id:bot,is_bot:true},
                     chat:{id:target.chat,type:"supergroup",is_forum:true},forum_topic_created:{name}}});
                   if (!store.get(`group:policy:${target.chat}:${topicId}`) && (await settings.get()).installKind==="employee") {
@@ -2560,7 +2560,7 @@ export default async function plugin(bb: BbPluginApi) {
               return {exitCode:0,stdout:JSON.stringify({created:true,topic:topicId,name,conversation})};
             }
             if (await tg("editForumTopic",{chat_id:target.chat,message_thread_id:target.topic,name})!==true) throw Error("rename_unconfirmed");
-            rememberForumName(store,bot,target.chat,target.topic,name,Date.now());
+            rememberForumName(store,bot,target.chat,target.topic,name,store.get<number>("ingress:offset") ?? 0);
             return {exitCode:0,stdout:JSON.stringify({renamed:true,topic:target.topic,name})};
           }
           const result=await applyForumTopicChange(store,bot,target.chat,target.topic,action,tg);
