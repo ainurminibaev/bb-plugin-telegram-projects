@@ -50,8 +50,12 @@ export async function groupModelCommand(o: { store: Store; sdk: ModelSdk; owner:
   if (!policy?.threadId || policy.botId !== o.bot) return false;
   const args = parseModelCommand(m.text, policy.botUsername);
   if (!args) return false;
-  // Only the owner, writing himself: anyone else's /model is swallowed silently (no agent turn, no answer).
-  if (m.from?.id !== o.owner || m.from?.is_bot || m.sender_chat || m.forward_origin || m.forward_date) return true;
+  // Only the owner, writing himself. A person hears a short refusal (С71); bots, channels and forwards — nothing.
+  if (m.from?.id !== o.owner || m.from?.is_bot || m.sender_chat || m.forward_origin || m.forward_date) {
+    if (!m.from?.is_bot && !m.sender_chat && !m.forward_origin && !m.forward_date)
+      await o.send(m.chat.id, topic)("Модель этого разговора меняет только владелец.").catch(() => {});
+    return true;
+  }
   const send = o.send(m.chat.id, topic);
   try {
     const thread = await o.sdk.threads.get({ threadId: policy.threadId });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {CODEX_LOCK,groupScreen,handleSetupUpdate,notifyGroupsAdded,welcomeScreen} from "../setup-screens";
+import {CODEX_LOCK,groupScreen,handleSetupUpdate,notifyGroupsAdded,welcomeScreen,connectedLine} from "../setup-screens";
 import {accessList,defaultGroupSettings,groupSettings,setAccess} from "../rights";
 
 const OWNER=7, BOT=5, CHAT=-1004297046755, LENA=11, STRANGER=99;
@@ -118,7 +118,7 @@ test("the owner is told once, in plain words, what happens if nothing is changed
   assert.equal(notes[0].chat_id,OWNER,"the inviter cannot give tasks, so the owner is told");
   assert.match(notes[0].text,/^Меня добавили в «Склад»\. Если ничего не менять: отвечаю всем участникам, когда меня отметят или ответят мне; память только этой группы\./);
   assert.match(notes[0].text,/сделайте меня администратором группы/);
-  assert.deepEqual(notes[0].reply_markup.inline_keyboard[0].map((b:any)=>b.text),["Настроить: 3 шага","Оставить как есть"]);
+  assert.deepEqual(notes[0].reply_markup.inline_keyboard[0].map((b:any)=>b.text),["Изменить (3 вопроса)","Оставить так"]);
 });
 
 test("the welcome tells the owner what to do next",()=>{
@@ -175,4 +175,12 @@ test("shared memory is refused while other people are in the group",async()=>{
   await h.tap(OWNER,`rs:a3:${CHAT}:shared`);
   assert.equal(h.last("answerCallbackQuery").text,"В группе есть другие люди: общая память недоступна.");
   assert.notEqual(groupSettings(h.store as any,BOT,CHAT)?.memory,"shared");
+});
+
+test("С102: an employee's welcome names the organization and has no setup details", () => {
+  const w = welcomeScreen({ role: "", botUsername: "acmebot", privacy: true, employee: true, organization: "Свой ERP", name: "Ковальский" });
+  assert.match(w.text, /^Ковальский подключён к организации «Свой ERP»\./);
+  assert.doesNotMatch(w.text, /BB|приватност|BotFather|мост|тред/);
+  assert.equal(connectedLine(undefined, undefined), "Готово, я подключён.");
+  assert.equal(connectedLine("Ковальский", undefined), "Ковальский подключён.");
 });

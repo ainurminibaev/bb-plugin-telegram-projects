@@ -3444,3 +3444,15 @@ test("#5: a free answer to a form question reaches the agent; an option named in
     f.cleanup();
   }
 });
+
+test("С102: an employee's owner chat with no project hears a plain line; with the employee's project it goes to the agent", async () => {
+  const f = fixture();
+  try {
+    f.store.put("rights:install-kind", "employee");
+    f.store.del("chat:binding:0");
+    await f.bridge.handle(f.input("Привет", 0));
+    await f.bridge.flush();
+    assert.ok(f.sent.some(m => m.text === "Сейчас не могу ответить: меня ещё не до конца настроили. Я уже сообщил тем, кто меня настраивает."));
+    assert.ok(!f.sent.some(m => /project|BB/.test(m.text ?? "")));
+  } finally { f.cleanup(); }
+});

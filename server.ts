@@ -475,6 +475,12 @@ export default async function plugin(bb: BbPluginApi) {
     telegramInboxRoot: {
       type: "string", label: "Private received-file directory", default: "",
     },
+    organizationName: {
+      type: "string", label: "Название организации — так сотрудник называет её людям (С102; пусто — без названия)", default: "",
+    },
+    employeeName: {
+      type: "string", label: "Имя сотрудника — так он называет себя людям (С102; пусто — без имени)", default: "",
+    },
     employeeProject: {
       type: "string", label: "Проект сотрудника: к нему личка владельца привязывается сама, когда владелец привязывает бота (пусто — выбор через /project)", default: "",
     },
@@ -3011,6 +3017,7 @@ export default async function plugin(bb: BbPluginApi) {
       let rich = true;
       let currentUrl = "";
       let language: "ru" | "en" = "ru";
+      let employeeProjectSetting = "";
       let bbMentions: BbMentionsSetting = "auto";
       let typing:(()=>Promise<void>)|undefined;
       let activeAbort: AbortController | undefined;
@@ -3056,6 +3063,7 @@ export default async function plugin(bb: BbPluginApi) {
             language = cfg.language as "ru" | "en";
             try { setUploadLimit(cfg.telegramApiRoot); } catch { /* invalid setting: cloud limit stays */ }
             bbMentions = cfg.bbMentions as BbMentionsSetting;
+            employeeProjectSetting = String(cfg.employeeProject ?? "").trim();
             if (!bridge) {
               if (spool) await mkdir(spool, { recursive: true, mode: 0o700 });
               activeAbort = new AbortController();
@@ -3079,6 +3087,8 @@ export default async function plugin(bb: BbPluginApi) {
                 rich: () => rich,
                 language: () => language,
                 bbMentions: () => bbMentionsOn(store, bbMentions),
+                employeeProject: () => employeeProjectSetting || undefined,
+                setupNote: (text) => bb.log.warn("Telegram setup: " + text),
                 wake: wakeChat,
                 reactions: () => currentReactions,
                 transcribe: async (v) => {
@@ -3415,7 +3425,10 @@ export default async function plugin(bb: BbPluginApi) {
               store.del("pair:code");
               // An employee's install names its project: the owner's chat goes there once the chat bridge runs (С102).
               if (String(cfg.employeeProject ?? "").trim()) store.put("owner-chat:bind-employee-project",true);
-              await tg("sendMessage", {
+              // С102: an employee's owner hears the organization and the employee's name, not the setup's details.
+              const employeeInstall=cfg.installKind==="employee";
+              if (employeeInstall) bb.log.info("Telegram setup: "+privacySummary(store, botId()!));
+              else await tg("sendMessage", {
                 text: translate(
                   cfg.language as "ru" | "en",
                   "✅ Бот привязан к BB. Темы проектов появятся в этом чате в течение минуты.",
@@ -3427,7 +3440,9 @@ export default async function plugin(bb: BbPluginApi) {
                   await tg("sendMessage",employeeHome(store,p));
               } else if (!legacyOperations && botId()) {
                 const setup=await setupContext(signal);
-                if (setup.role) await tg("sendMessage",{chat_id:route.userId,...welcomeScreen({...setup,privacy:store.get<boolean>(privacyKey(botId()!))})});
+                if (setup.role || employeeInstall) await tg("sendMessage",{chat_id:route.userId,...welcomeScreen({...setup,
+                  privacy:store.get<boolean>(privacyKey(botId()!)),employee:employeeInstall,
+                  organization:String(cfg.organizationName ?? "").trim(),name:String(cfg.employeeName ?? "").trim()})});
               }
               wake?.();
             } else if (route.kind === "chat" && cfg.chatEnabled && bridge) {

@@ -81,6 +81,8 @@ export const english: Record<string, string> = {
   "Меню отправлено в тему «": "Menu sent to topic “",
   "». Для отдельного разговора создай тему Telegram и выбери в ней /project.":
     "”. For a separate conversation, create a Telegram topic and use /project there.",
+  "Сейчас не могу ответить: меня ещё не до конца настроили. Я уже сообщил тем, кто меня настраивает.":
+    "I can't answer right now: my setup isn't finished yet. I've already told the people who set me up.",
   "Сначала привяжи эту тему командой /project. В теме SMS сообщения не отправляются агенту.":
     "First bind this topic using /project. Messages in the SMS topic are not sent to an agent.",
   "Неизвестная команда. /menu — управление, /say /команда — отправить команду как текст агенту.":

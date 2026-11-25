@@ -118,7 +118,7 @@ export async function readIsolatedGroup(sdk:BbPluginApi["sdk"],store:Store,proje
     if (e.type==="item/completed" && e.data.item.type==="agentMessage" && !e.data.item.parentToolCallId)
       row.answer=e.data.item.text.slice(0,256*1024);
     if (e.type==="turn/completed") {
-      if (e.data.status!=="completed" || !row.answer?.trim()) row.answer="Исполнитель завершил задачу без результата.";
+      if (e.data.status!=="completed" || !row.answer?.trim()) row.answer="Задача завершилась без результата.";
       row.finished=true; break;
     }
   }

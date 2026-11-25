@@ -62,10 +62,12 @@ test("С71: another provider moves this topic to a new thread of it; other topic
   assert.equal(store.get<any>(`group:policy:${chat}:4`).threadId,"new-thread");
   assert.equal(store.get<any>(`group:policy:${chat}:9`).threadId,"t9");
   assert.match(sent.at(-1)!,/новый разговор/);
-  // Not the owner: swallowed, nothing changes, no answer.
+  // Not the owner: nothing changes, a person hears a short refusal; a bot hears nothing.
   const before=sent.length;
   assert.equal(await run(msg("/model gpt-6.2-sol",{from:{id:42}})),true);
-  assert.equal(sent.length,before);
+  assert.deepEqual(sent.slice(before),["Модель этого разговора меняет только владелец."]);
+  assert.equal(await run(msg("/model gpt-6.2-sol",{from:{id:43,is_bot:true}})),true);
+  assert.equal(sent.length,before+1);
   // Not a bound topic or not the command: the message goes on as usual.
   assert.equal(await run(msg("/model",{message_thread_id:77})),false);
   assert.equal(await run(msg("привет")),false);

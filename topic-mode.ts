@@ -194,6 +194,6 @@ export function leadRefusal(organization:number[]) {
 
 /** Told once to the owner when two agents have no word from the passport: nobody leads shared chats by default. */
 export const noLeaderToldKey="rights:no-leader-told";
-export const NO_LEADER_LINE="В общих чатах никто из агентов не ведёт по умолчанию: задайте в паспорте сотрудника «ведёт общие чаты» или назначьте командой («веди этот чат»). До этого на ваши сообщения без отметки агенты не отвечают — отмечайте нужного.";
+export const NO_LEADER_LINE="В общих чатах, где нас несколько, я отвечаю, когда меня отметят. Чтобы я отвечал в каком-то чате и без отметки, напишите мне там: «веди этот чат».";
 /** The honest answer of naming a leader until a stand confirms that a bot sees a bot's message. */
 export const LEAD_NOTE="Назначил. Прежний ведущий уступит, когда его мост увидит строку в чате; если ответят оба — скажите владельцу.";

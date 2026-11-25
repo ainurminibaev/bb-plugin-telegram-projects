@@ -329,6 +329,10 @@ export class ChatBridge {
       wake?: () => void;
       language?: () => Language;
       bbMentions?: () => boolean;
+      /** С102: an employee's project; the owner's chat with no binding goes there by itself. */
+      employeeProject?: () => string | undefined;
+      /** С102: what only those who set the installation up must see (a journal line). */
+      setupNote?: (text: string) => void;
       rich: () => boolean;
       transcribe?: (v: NonNullable<ChatInput["voice"]>) => Promise<string>;
       receiveAttachment?: (input: ChatInput, threadId: string) => Promise<{
@@ -2031,6 +2035,21 @@ export class ChatBridge {
     let text = input.text?.trim() ?? "";
     const [raw, ...args] = text.split(/\s+/);
     const cmd = input.forwarded || input.albumId ? "" : raw?.split("@")[0].toLowerCase();
+    // С102: an employee's owner never sets anything up; the chat goes to the employee's project by itself.
+    const employee = this.s.get("rights:install-kind") === "employee";
+    if (!b && employee) {
+      const project = input.topicId === 0 ? this.d.employeeProject?.() : undefined;
+      if (project) {
+        await this.bindOwnerChat(project).catch(() => undefined);
+        b = this.binding(0);
+      }
+      if (!b) {
+        this.d.setupNote?.("the owner's chat (topic " + input.topicId + ") has no project: set employeeProject or call bindOwnerChat");
+        this.enqueue(input.topicId, this.tr("Сейчас не могу ответить: меня ещё не до конца настроили. Я уже сообщил тем, кто меня настраивает."));
+        return;
+      }
+      if (cmd === "/start") return;
+    }
     if (["/start", "/help", "/menu", "/status"].includes(cmd)) {
       if (b) await this.menu(b);
       else await this.projects(input.topicId);

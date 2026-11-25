@@ -54,15 +54,24 @@ export function shortState(s: GroupSettings, locked = false) {
   return !locked && s.who === "all" && s.members !== "silent" ? "отвечаю всем" : "отвечаю только своим";
 }
 
-export function welcomeScreen(ctx: Pick<SetupContext, "role" | "botUsername"> & { privacy?: boolean }) {
+/** «Ковальский подключён к организации „…“» — from the install's settings; without them a neutral line (С102). */
+export function connectedLine(name?: string, organization?: string) {
+  const who = name ? name + " подключён" : "Я подключён";
+  return organization ? `${who} к организации «${organization}».` : (name ? who + "." : "Готово, я подключён.");
+}
+
+export function welcomeScreen(ctx: Pick<SetupContext, "role" | "botUsername"> & { privacy?: boolean; employee?: boolean;
+  organization?: string; name?: string }) {
   return {
-    text: ["Готово, я подключён." + (ctx.role ? " " + ctx.role : ""),
+    text: [(ctx.employee ? connectedLine(ctx.name, ctx.organization) : "Готово, я подключён.") + (ctx.role ? " " + ctx.role : ""),
       "Сейчас поручения мне можете давать только вы.",
-      "Дальше: добавьте меня в рабочую группу — я сразу пришлю, как её настроить.",
-      "",
+      ctx.employee ? "Напишите, чем помочь, — или добавьте меня в рабочую группу." :
+        "Дальше: добавьте меня в рабочую группу — я сразу пришлю, как её настроить.",
+      // An employee's privacy mode is the installer's business, not the owner's (С102).
+      ...(ctx.employee ? [] : ["",
       ctx.privacy === false
         ? "Режим приватности у меня выключен: в группах я вижу всю переписку, а что из неё обрабатывать, решают настройки группы."
-        : "Режим приватности у меня включён: в группах я вижу только ответы на мои сообщения и команды. Выключите его в @BotFather → /setprivacy → Disable, затем добавьте меня в группы заново — тогда меня можно отмечать и я вижу переписку, а что обрабатывать, решают настройки группы.",
+        : "Режим приватности у меня включён: в группах я вижу только ответы на мои сообщения и команды. Выключите его в @BotFather → /setprivacy → Disable, затем добавьте меня в группы заново — тогда меня можно отмечать и я вижу переписку, а что обрабатывать, решают настройки группы."]),
     ].join("\n"),
     reply_markup: { inline_keyboard: [
       [{ text: "➕ Добавить в группу", url: addToGroupUrl(ctx.botUsername) }],
@@ -167,8 +176,8 @@ export async function notifyGroupsAdded(ctx: SetupContext) {
       lines.push("Чтобы я видел обсуждение, а не только обращения ко мне, сделайте меня администратором группы.");
     try {
       await ctx.tg(recipient)("sendMessage", { chat_id: recipient, text: lines.join("\n"), reply_markup: { inline_keyboard: [[
-        { text: "Настроить: 3 шага", callback_data: "rs:s1:" + g.chat },
-        { text: "Оставить как есть", callback_data: "rs:k" },
+        { text: "Изменить (3 вопроса)", callback_data: "rs:s1:" + g.chat },
+        { text: "Оставить так", callback_data: "rs:k" },
       ]] } });
       ctx.store.put(key, signature);
     } catch { continue; /* retried on the next pass */ }
