@@ -1212,9 +1212,9 @@ export default async function plugin(bb: BbPluginApi) {
     const own=store.get<{projectId?:string;threadId?:string}>("chat:binding:0");
     if (own?.threadId && own.projectId) return own as {projectId:string;threadId:string};
     // The owner's chat may be bound to the project with no conversation yet (a new chat, or bound by the installer):
-    // conversations of groups and people still go to that project.
-    return store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId) ??
-      (own?.projectId ? {projectId:own.projectId} as {projectId:string;threadId?:string} : undefined);
+    // conversations of groups and people still go to that very project, never to another topic's.
+    if (own?.projectId) return {projectId:own.projectId} as {projectId:string;threadId?:string};
+    return store.list<{projectId:string;threadId?:string}>("chat:binding:").map(row=>row.value).find(v=>v.threadId && v.projectId);
   };
   async function bindConversation(owner:number,bot:number,c:{chatId:number;topicId:number;title:string;
     privateChat?:boolean;allowedSenderIds?:number[];acceptAfterSecond?:number},signal:AbortSignal) {
@@ -2904,6 +2904,9 @@ export default async function plugin(bb: BbPluginApi) {
         };
       }
       if (cmd === "bind-owner-chat") {
+        // Only the owner's own conversation or a local call without a thread (the installer).
+        if (ctx.threadId && !store.list<{threadId?:string|null}>("chat:binding:").some(row => row.value.threadId === ctx.threadId))
+          return { exitCode: 1, stderr: "bind_owner_chat_only_from_the_owners_conversation_or_the_installer" };
         const i = argv.indexOf("--project");
         const projectId = i >= 0 ? argv[i + 1] : undefined;
         if (!projectId) return { exitCode: 2, stderr: "usage: bind-owner-chat --project <project-id>" };
