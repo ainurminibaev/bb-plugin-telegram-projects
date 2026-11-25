@@ -12,7 +12,9 @@ export function deleteRefusal(args:{caller:Conversation|undefined;owner:number;b
   const {caller,owner,bot,chat,sender,author}=args;
   if (!caller) return "delete_only_from_a_telegram_conversation: удалять можно только в чате своего разговора";
   const own=caller.kind==="group" ? caller.chat : caller.kind==="person" ? caller.subject : owner;
-  if (chat!==own) return "delete_only_in_own_chat: удалять можно только в чате этого разговора; там, где сообщение, удаляет тамошний разговор";
+  // С105: the owner's conversation (and its subthreads) removes the bot's own message in any chat of this install.
+  if (chat!==own && !(caller.kind==="owner" && sender===bot))
+    return "delete_only_in_own_chat: удалять можно только в чате этого разговора; там, где сообщение, удаляет тамошний разговор";
   if (sender===bot) return;
   if (author!==owner)
     return "delete_others_only_by_owner: чужое сообщение удаляется только по слову владельца — спроси его: "+
@@ -31,4 +33,15 @@ export function deleteLog(store:Store,bot:number,entry:{thread:string;chat:numbe
 export function authorOfTurn(store:Store,threadId:string,turnId:string|undefined,ownerChatOwner?:number) {
   if (!turnId || new ReplyRoutes(store).destination(threadId,turnId)?.kind!=="telegram") return undefined;
   return store.get<number>("group:turn-author:"+threadId) ?? ownerChatOwner;
+}
+
+/**
+ * С105: the chat a bot's own message is edited or removed in. The owner's conversation may name any chat (--chat);
+ * a group's or a person's conversation acts only in its own chat, as before.
+ */
+export function ownMessageChat(caller:Conversation|undefined,owner:number,named:number|undefined):number|undefined {
+  if (!caller) return undefined;
+  if (caller.kind==="owner") return named ?? owner;
+  const own=caller.kind==="group" ? caller.chat : caller.subject;
+  return named===undefined || named===own ? own : undefined;
 }

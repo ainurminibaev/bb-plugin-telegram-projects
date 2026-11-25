@@ -272,3 +272,19 @@ the owner. Do not attempt another create/post by name or through other tools.
 The bridge keeps the operation receipt across reloads. The title and any explicit
 first message must come from a direct text request. Isolated group executors
 cannot use the tool until the server can verify their current group task.
+
+## The bot's own message elsewhere (С105)
+
+From the owner's conversation (and its subthreads) the bot's own message in any chat of this install is fixed with
+`bb telegram-projects edit --message N --chat <group id or name> --text …` and removed with
+`bb telegram-projects delete --message N --chat <group id or name>`. A group's or a person's conversation acts only in
+its own chat. Someone else's message is removed only on the owner's word, as before. Before you say a message is
+«unanswered», check the place's history (`search-history`): a message sent there by any conversation of this install
+answers it.
+
+## First message of the day (С103)
+
+The turn note says whether you have written in this chat today and the local time. `send` into another chat answers
+with `firstToday` and `localTime`; the first message of the day there waits once and comes back as
+`{"sent":false,"firstToday":true,"hint":…}`: add a greeting for the time of day in that chat's style if the text has
+none and send again — the same text again goes as it is.

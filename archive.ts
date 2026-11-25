@@ -203,6 +203,11 @@ export function openArchive(db:Database) {
         : db.prepare("SELECT max(date) AS d FROM archive WHERE bot=? AND chat=? AND topic=? AND sender=?").get(bot,chat,topic,bot)) as {d:number|null}|undefined;
       return row?.d ?? undefined;
     },
+    /** С105: the bot itself wrote in this chat and topic after message N (a final, send, reply or a subthread's message). */
+    wroteAfter(bot:number,chat:number,topic:number,message:number) {
+      return (db.prepare("SELECT message,reply_to FROM archive WHERE bot=? AND chat=? AND topic=? AND sender=? AND message>? ORDER BY message LIMIT 50")
+        .all(bot,chat,topic,bot,message) as {message:number;reply_to:number|null}[]).map(r=>({message:r.message,replyTo:r.reply_to ?? undefined}));
+    },
     /** Who sent a message, for С80 (own or someone else's). */
     sender(bot:number,chat:number,message:number) {
       return (db.prepare("SELECT sender FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as {sender:number}|undefined)?.sender;

@@ -53,6 +53,8 @@ export async function settled(key:string,start:()=>Promise<unknown>,keep=false):
 /** Quick work finishes within this grace and is used in the same pass, as before. */
 export let SLOW_WORK_GRACE_MS=1_500;
 export function setSlowWorkGrace(ms:number) { SLOW_WORK_GRACE_MS=ms; }
+/** С105: a message the bot sent by the send command (any conversation of this install). */
+export const sentByCommandKey=(chat:number,topic:number,message:number)=>`send:out:${chat}:${topic}:${message}`;
 /** "Typing" for a submitted message stops after this long. */
 export const TYPING_MAX_MS=10*60_000;
 
@@ -208,7 +210,17 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   /** A group's or a person's conversation attaches only its own files (see server insideConversationFolder). */
   mayAttach?:(threadId:string,route:{chatId:number;topicId:number;privateChat:boolean},path:string)=>Promise<boolean>,
   /** С103: one line — whether the agent has written in this chat and topic today, and the local time. */
-  todayOf?:(chatId:number,topicId:number)=>string) {
+  todayOf?:(chatId:number,topicId:number)=>string,
+  /** С105: the bot's own messages in this chat and topic after this message (number and what it replies to). */
+  botMessagesAfter?:(chatId:number,topicId:number,messageId:number)=>{message:number;replyTo?:number}[]) {
+  // С105: answered — the bot wrote here after this message by the send command (from any conversation, a subthread too)
+  // or replied to this very message. Another job's final answer posted later does not answer this one.
+  const answered=(r:{chatId:number;topicId:number;messageId:number})=>{
+    try {
+      if (!(r.messageId>0) || !botMessagesAfter) return false;
+      return botMessagesAfter(r.chatId,r.topicId,r.messageId).some(m=>m.replyTo===r.messageId || !!store.get(sentByCommandKey(r.chatId,r.topicId,m.message)));
+    } catch {return false;}
+  };
   const routes=new ReplyRoutes(store);
   let pausedNow:boolean|undefined;
   const isPaused=async()=>pausedNow??=(paused ? await paused().catch(()=>false) : false);
@@ -445,6 +457,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         continue;
       }
     }
+    // С105: a message the bot has already answered here (a send from another conversation, a reply to it) — after
+    // a pause, a restart or a late delivery — is not given to the agent again.
+    if (job.state==="pending" && answered(r)) {job.answer=NO_REPLY; job.state="ready";}
     if (job.state==="pending") {
       const thread = await sdk.threads.get({threadId:r.threadId,signal});
       if (!belongsToGroup(thread)) {finish("revoked");continue;}
@@ -514,8 +529,10 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
               busyAnswerText(e.data.item.text,label) : undefined;
             if (enclosed) {job.turnId=turn; job.answer=enclosed; job.state="ready";}
             else if (e.type==="turn/completed" && !routes.sameTask(routes.destination(r.threadId,turn),dest)) {
-              // The turn ended without that answer: send the message again, in turn order.
-              job.busyOnce=true; delete job.busyLabel; job.state="pending";
+              // The turn ended without that answer: send the message again, in turn order — unless the bot has already
+              // written here after it (a send, a subthread's message): then it is answered and not given twice (С105).
+              if (answered(r)) {job.turnId=turn; job.answer=NO_REPLY; job.state="ready";}
+              else {job.busyOnce=true; delete job.busyLabel; job.state="pending";}
             }
           }
           if (job.state==="submitted" && routes.sameTask(routes.destination(r.threadId,turn),dest)) {
@@ -552,7 +569,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       if (job.state==="submitted" && !job.turnId && Date.now()-(job.submittedAt ?? 0)>LOST_SUBMIT_MS) {
         const t=await sdk.threads.get({threadId:r.threadId,signal}).catch(()=>undefined);
         if (t && (t as {status?:string}).status!=="active") {
-          if (!job.resubmitted) {job.resubmitted=true; job.busyOnce=true; delete job.busyLabel; delete job.submittedAt; job.state="pending";}
+          if (answered(r)) {job.answer=NO_REPLY; job.state="ready";}
+          else if (!job.resubmitted) {job.resubmitted=true; job.busyOnce=true; delete job.busyLabel; delete job.submittedAt; job.state="pending";}
           else {job.answer="Это сообщение у меня потерялось и осталось без ответа — повторите его, пожалуйста."; job.stage="failed"; job.state="ready";}
         }
       }
