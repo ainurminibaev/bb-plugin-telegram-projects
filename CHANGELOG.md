@@ -1,3 +1,7 @@
+# 0.9.74
+
+- Fix: a deferred task in a group (a participant's «in N minutes send the result here», `telegram_group_followup`) runs again. In 0.9.73 the check «the bot already replied to this message» saw the confirmation «scheduled» on the same original message and closed the task silently, without a turn. The check now applies only to real Telegram messages, not to what the bridge gives itself (deferred tasks, subthread results).
+
 # 0.9.73
 
 - С103: the turn note of a group, a topic, a person's chat and the owner's chat says whether the agent has written there today and the local time («Сегодня ты в этом чате ещё не писал; сейчас 09:12 (Europe/Moscow)»). `send` answers with `firstToday` and `localTime`; the first message of the day into another place waits once (`sent:false` with a hint) so the agent can greet in that chat's style — one wait per place and day, whatever the text, before any question is recorded and before a group's report to the owner is counted; the owner's chat waits too — the first message of the day to him greets him. The day is the organization's: the `timeZone` setting, empty — Europe/Moscow. No word lists: whether to greet is the agent's choice.

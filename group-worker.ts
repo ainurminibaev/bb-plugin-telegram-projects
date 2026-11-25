@@ -214,9 +214,11 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   botMessagesAfter?:(chatId:number,topicId:number,messageId:number)=>{message:number;replyTo?:number}[]) {
   // С105 (narrow, until the incoming ledger): answered — the bot replied to this very message. Any other later message
   // of the bot proves nothing: several messages may wait, and an answer to one is not an answer to another.
-  const answered=(r:{chatId:number;topicId:number;messageId:number})=>{
+  const answered=(r:{chatId:number;topicId:number;messageId:number;updateId:number})=>{
     try {
-      if (!(r.messageId>0) || !botMessagesAfter) return false;
+      // Only a real Telegram message can be answered already: what the bridge itself gives (a deferred task, a
+      // subthread's result — a synthetic update) carries the original message's number and must still run.
+      if (!(r.updateId>0) || !(r.messageId>0) || !botMessagesAfter) return false;
       return botMessagesAfter(r.chatId,r.topicId,r.messageId).some(m=>m.replyTo===r.messageId);
     } catch {return false;}
   };

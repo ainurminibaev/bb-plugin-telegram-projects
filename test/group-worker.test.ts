@@ -487,6 +487,24 @@ test("a group message that arrives while the thread works joins the running turn
  assert.deepEqual(sent.sort(),["быстрый ответ","долгий ответ"],"each message gets its own answer; the enclosed one is not the long answer");
 });
 
+test("0.9.73 fix: a deferred task the bridge gives itself runs although the bot replied to its original message",async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ // The follow-up as startAgentFollowUp puts it: a synthetic update, the original request's message number.
+ store.put("group:in:5:-10",{ownerId:7,state:"pending",taskId:"task",route:{kind:"group",chatId:-1001,topicId:3,senderId:7,threadId:"t",messageId:10,updateId:-10,text:"Плановая проверка"}});
+ let sends=0;
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible",status:"idle"}),
+   events:{list:async()=>[]},send:async()=>{sends++;}}};
+ // The bot already replied to message 10 («Поставил отправку…»).
+ await processGroupInputs(store,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal,
+   undefined,undefined,undefined,false,undefined,undefined,undefined,undefined,undefined,()=>[{message:11,replyTo:10}]);
+ assert.equal(sends,1,"the deferred task is given to the agent");
+});
+
 test("С105: a message the bot already replied to is neither given again nor called lost; a later unrelated message does not count",async t=>{
  let now=Date.now();
  t.mock.method(Date,"now",()=>now);
