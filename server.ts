@@ -2737,6 +2737,14 @@ export default async function plugin(bb: BbPluginApi) {
             const from=asked?.type==="client/turn/requested" && asked.data.senderThreadId ? await conversationOf(store,bb.sdk.threads,asked.data.senderThreadId,lifetime.signal) : undefined;
             if (from?.kind==="group") { handedBy={chat:from.chat,topic:from.topic ?? 0}; target={chat:from.chat,topic:from.topic ?? 0}; }
           }
+          // С103: whether the bot had written there today, taken before this message goes out. The first message of the day
+          // into another place waits once (before any question is recorded and before the owner-report pace is counted), so the agent can greet in that chat's style.
+          const day=archive ? today(archive.lastSent(bot,target.chat,target.topic),Date.now(),orgTimeZone || String((await settings.get()).timeZone ?? "")) : undefined;
+          const ownPlace=caller && (caller.kind==="owner" ? target.chat===owner :
+            caller.kind==="person" ? target.chat===caller.subject : target.chat===caller.chat && (caller.topic ?? 0)===target.topic);
+          const plain=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8").catch(()=>"") : opt.text ?? "";
+          if (day && !ownPlace && !opt.answer && plain.trim() && holdFirstToday(store,`${target.chat}:${target.topic}`,day))
+            return {exitCode:0,stdout:JSON.stringify({sent:false,firstToday:true,localTime:day.localTime,hint:FIRST_TODAY_HINT})};
           // П28: an ordinary thread of this BB writes to the owner: who it is, the text as sent, cut at 3500 characters.
           if (!caller && (target.chat===owner || handedBy) && !opt.answer && (opt.text || opt["text-file"])) {
             const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
@@ -2792,14 +2800,6 @@ export default async function plugin(bb: BbPluginApi) {
           const tg=telegram(botToken,lifetime.signal,60_000,()=>target.chat,apiRoot);
           // С56: a PDF as a reply to the scheme picture sent just before (its messageId from the first send).
           const replyTo=opt["reply-to"] && /^\d+$/.test(opt["reply-to"]) ? Number(opt["reply-to"]) : undefined;
-          // С103: whether the bot had written there today, taken before this message goes out. The first message of the day
-          // into another place waits once (before any question is recorded), so the agent can greet in that chat's style.
-          const day=archive ? today(archive.lastSent(bot,target.chat,target.topic),Date.now(),orgTimeZone || String((await settings.get()).timeZone ?? "")) : undefined;
-          const ownPlace=caller && (caller.kind==="owner" ? target.chat===owner :
-            caller.kind==="person" ? target.chat===caller.subject : target.chat===caller.chat && (caller.topic ?? 0)===target.topic);
-          // The owner's own chat never waits: reports to him go there every day, and a greeting there is noise.
-          if (day && !ownPlace && target.chat!==owner && !opt.answer && text?.trim() && holdFirstToday(store,`${target.chat}:${target.topic}`,day))
-            return {exitCode:0,stdout:JSON.stringify({sent:false,firstToday:true,localTime:day.localTime,hint:FIRST_TODAY_HINT})};
           let remembered:string|undefined;
           if (ask && !caller && ownerAsk?.thread && !opt.answer) {
             const asked=rememberAsk(store,bot,owner,{chat:owner,topic:0},text ?? "");

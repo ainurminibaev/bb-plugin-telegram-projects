@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {holdFirstToday,today,todayLine} from "../today";
+import {ownerReport} from "../send-command";
 
 test("С103: «today» is the organization's day; the line says whether the agent wrote here and the local time", () => {
   // 2026-11-25 06:10 UTC = 09:10 in Moscow.
@@ -30,4 +31,16 @@ test("С103: the first send of the day into another place waits once per place a
   assert.equal(holdFirstToday(store, "-1002:0", wrote), false, "already wrote there today: no wait");
   const tomorrow = today(Date.UTC(2026, 10, 25, 6, 10) / 1000, now + 24 * 3600_000, "Europe/Moscow");
   assert.equal(holdFirstToday(store, "-1001:3", tomorrow), true, "a new day waits once again");
+});
+
+test("С103: a group's first report of the day to the owner waits once and the greeted retry goes at once, not held by the report pace", () => {
+  const rows = new Map<string, unknown>();
+  const store = { get: <T>(k: string) => rows.get(k) as T, put: (k: string, v: unknown) => { rows.set(k, v); },
+    del: (k: string) => { rows.delete(k); }, list: () => [], atomic: (fn: () => void) => fn() } as any;
+  const now = Date.UTC(2026, 10, 25, 6, 10);
+  const day = today(undefined, now, "Europe/Moscow");
+  const send = (text: string) => holdFirstToday(store, "105:0", day) ? "waits" :
+    ("error" in ownerReport(store, 5, {kind: "group", chat: -1001, topic: 0}, text, false, now) ? "too_soon" : "sent");
+  assert.equal(send("Создать учётку"), "waits", "the first one of the day waits; the report pace is not counted");
+  assert.equal(send("Доброе утро! Создать учётку"), "sent", "the greeted retry goes at once");
 });
