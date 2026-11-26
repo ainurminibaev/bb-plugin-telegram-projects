@@ -1,3 +1,7 @@
+# 0.9.83
+
+- Unaddressed group messages via quick decision service (agents-in-chats.md): when `unaddressedFastDecide` is enabled (default `false`), an unaddressed human message in a shared group/topic does not start the main model directly — the bridge asks the server's quick decision service (`vallis-decide`) with chat, topic, message, author, mentions, short topic window, leader info, and the agent's role/zones. A leader joins on `relevant` or `my_zone_only`; a non-leader joins only on `my_zone_only` after waiting a few seconds and verifying no agent has replied yet. Direct mentions skip the quick decision service; service failure or timeout falls back safely to the existing mode table.
+
 # 0.9.82
 
 - С119: people's reactions to the bot's own messages (`message_reaction`) are recorded next to the message in the archive without starting a turn or model call; `bb telegram-projects reactions [--chat] [--topic] [--since 24h|7d|date]` reads reactions from people allowed to write in the place.

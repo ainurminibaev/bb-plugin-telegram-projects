@@ -1,4 +1,5 @@
 import {noteAgentInChat,noteColleagueLead,withTopicMode} from "./topic-mode";
+import {fastDecideEnabled,noteBotMessageInTopic,type FastDecideMeta} from "./fast-decide";
 import {albumHasPosition,albumKey,albumKnown,collectAlbum,mediaGroupId,queueAlbumWarning,releaseAlbums} from "./media-album";
 import {forumName} from "./forum-defaults";
 import {isTopicPaused} from "./topic-lifecycle";
@@ -33,6 +34,8 @@ export type GroupTopicPolicy = {
   /** Agents in chats: this agent leads the topic or is called by a mention (topic-mode.ts; set per message). */
   leadMode?: "lead" | "mention";
   leadExplicit?: boolean;
+  /** 0.9.83: ask the quick decision service on unaddressed group messages (off by default). */
+  fastDecideEnabled?: boolean;
   deliverySources?: string[];
   projectId?: string; // Older bindings used project and thread markers only.
   chatId: number;
@@ -181,7 +184,7 @@ export function messageTopic(m: any): number {
 }
 
 export type Ingress =
-  | {kind: "group"; forwarded?: true; typedComment?: true; quietAck?: true; ownerTopicText?: string; ownerUnaddressed?: true; leaderUnaddressed?: true; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; ownText?: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; collectUntil?:number; arrivedAt?:number; voiceText?:string; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string; windowUpTo?:number}
+  | {kind: "group"; forwarded?: true; typedComment?: true; quietAck?: true; ownerTopicText?: string; ownerUnaddressed?: true; leaderUnaddressed?: true; fastDecide?: FastDecideMeta; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; ownText?: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; collectUntil?:number; arrivedAt?:number; voiceText?:string; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string; windowUpTo?:number}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
   | { kind: "tasks"; topicId: number }
   | { kind: "pair"; userId: number }
@@ -241,7 +244,16 @@ export function routeUpdate(
     const leaderUnaddressed=group.requireMention && !addressed && !ownerUnaddressed && group.leadMode==="lead" &&
       group.leadExplicit===true && !from.is_bot && personForwardOrOwn(m) && !toSomeoneElse && !repliesToDifferentBot &&
       !group.ownerSharedProject;
-    if (group.requireMention && !ownerUnaddressed && !leaderUnaddressed && (!addressed || repliesToDifferentBot)) return {kind: "ignore"};
+    // 0.9.83: unaddressed human message in a shared group with fast-decision enabled → ask quick decision service before starting a turn.
+    const useFastDecide=group.fastDecideEnabled===true && !group.privateChat && !group.ownerTopic &&
+      !group.ownerSharedProject && !group.isolated && !addressed && !toSomeoneElse && !repliesToDifferentBot &&
+      !from.is_bot && personForwardOrOwn(m);
+    const fastDecide:FastDecideMeta|undefined=useFastDecide ? {
+      isLeader:group.leadMode==="lead",
+      fallbackPass:!group.requireMention || ownerUnaddressed || leaderUnaddressed,
+      mentions:[],
+    } : undefined;
+    if (!useFastDecide && group.requireMention && !ownerUnaddressed && !leaderUnaddressed && (!addressed || repliesToDifferentBot)) return {kind: "ignore"};
     const reply = m.reply_to_message;
     const sameTopic = reply?.chat?.id === group.chatId && (reply.message_thread_id ?? 0) === topicId;
     const repliedToMessage = sameTopic && reply.message_id !== topicId;
@@ -270,8 +282,8 @@ export function routeUpdate(
     // «Отвечаю сам» (no mention needed): a message nobody addressed to the agent gets no «seen» sign at intake — the
     // agent may not answer it at all (0.9.77; people saw 👀 on talk between themselves).
     // People with access talk between themselves too: only the owner's own message keeps the sign.
-    const quietAck = !group.requireMention && !addressed && from.id !== owner;
-    return {kind: "group", ...(forwarded ? {forwarded:true as const} : text.trim() ? {typedComment:true as const} : {}), ...(quietAck && {quietAck:true as const}), ...(ownerTopicText && {ownerTopicText}), ...(ownerUnaddressed && {ownerUnaddressed:true as const}), ...(leaderUnaddressed && {leaderUnaddressed:true as const}), chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
+    const quietAck = (!group.requireMention && !addressed && from.id !== owner) || !!fastDecide;
+    return {kind: "group", ...(forwarded ? {forwarded:true as const} : text.trim() ? {typedComment:true as const} : {}), ...(quietAck && {quietAck:true as const}), ...(ownerTopicText && {ownerTopicText}), ...(ownerUnaddressed && {ownerUnaddressed:true as const}), ...(leaderUnaddressed && {leaderUnaddressed:true as const}), ...(fastDecide && {fastDecide}), chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
       threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice}), ...(examples.length && {examples}), ...collect};
   }
   if (!m || m.chat?.type !== "private" || from?.id !== m.chat?.id)
@@ -450,8 +462,11 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
       if (who?.is_bot) noteAgentInChat(store, botId, chatId, who.id, agentBots(store),
         who.username ? "@"+who.username : who.first_name);
     // One leader per topic and chat: a colleague announcing it leads here makes this agent step back.
-    if (message.from?.is_bot) noteColleagueLead(store, botId, chatId, topicId, message.from.id, String(message.text ?? ""), agentBots(store),
-      Number.isSafeInteger(message.date) ? message.date : undefined);
+    if (message.from?.is_bot) {
+      noteBotMessageInTopic(store, botId, chatId, topicId, message.message_id);
+      noteColleagueLead(store, botId, chatId, topicId, message.from.id, String(message.text ?? ""), agentBots(store),
+        Number.isSafeInteger(message.date) ? message.date : undefined);
+    }
   }
   store.atomic(() => {
     if (isTopicPaused(store,botId,chatId,topicId)) return;
@@ -462,7 +477,9 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
     if (bound.ownerSharedProject && (!isSharedOwnerPolicy(bound) || guest || (message.is_topic_message===true)!==(topicId>0) ||
         !originalPerson(message) || message.from.id!==owner)) return;
     // Who may call the bot here follows the access list and the group settings.
-    const policy = withTopicMode(store, effectiveGroupPolicy(store, bound, owner), agentBots(store));
+    const basePolicy = withTopicMode(store, effectiveGroupPolicy(store, bound, owner), agentBots(store));
+    const policy = !basePolicy.privateChat && !basePolicy.ownerTopic && !basePolicy.ownerSharedProject && !basePolicy.isolated && fastDecideEnabled(store)
+      ? {...basePolicy, fastDecideEnabled: true} : basePolicy;
     // Telegram dates have second precision. The binding second is ambiguous.
     if (policy.acceptAfterSecond !== undefined && (!Number.isSafeInteger(message.date) ||
         message.date <= policy.acceptAfterSecond)) return;

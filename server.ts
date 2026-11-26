@@ -83,6 +83,7 @@ import {
 import {WaitingMarks,type WaitingConfig} from "./waiting-mark";
 import {acceptActionButtonCallback,buildActionKeyboard,newActionButtonToken,parseActionButtons,rememberActionButtons} from "./action-buttons";
 import {PROMISE_NOTE_MARKER,formatRecentLabelsNote,promiseWatchKey,recentPromiseLabels,type PromiseWatch} from "./promise-labels";
+import {fastDecideEnabledKey} from "./fast-decide";
 import {interactionOpen,codexAsyncQuestions} from "./codex-async-question";
 import { makeChatControlPublisher, writeJsonAtomic } from "./json-file";
 import { chmod, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
@@ -390,6 +391,7 @@ export default async function plugin(bb: BbPluginApi) {
     topicWindowSinceLast:{type:"boolean",label:"Реплики темы в ходе — только новые после прошлого хода (иначе последние 24 каждый раз)",default:false},
     topicWindowChars:{type:"number",label:"Бюджет знаков на реплики темы в ходе (когда включено «только новые»)",default:6000},
     leadsChatsByDefault:{type:"string",label:"Ведёт общие чаты по умолчанию (из паспорта сотрудника): yes — отвечает владельцу без отметки во всех темах без своего ведущего; no — по отметке; auto — yes, пока в списке нет других ботов организации",default:"auto"},
+    unaddressedFastDecide:{type:"boolean",label:"Без отметки спрашивать службу быстрых решений, включаться ли агенту (по умолчанию выключено)",default:false},
     curators:{type:"string",label:"Кураторы этого агента (Telegram ID через запятую): вместе с владельцем назначают его ведущим темы",default:""},
     isolatedFileHost:{type:"string",label:"Машина с рабочими файлами группового исполнителя",default:""},
     agencyEnabled: {type:"boolean",label:"Уведомления из Агентства",default:false},
@@ -3510,7 +3512,15 @@ export default async function plugin(bb: BbPluginApi) {
                   (file,r)=>receiveGroupFile(file,r,signal,bot),true,verifyOwnerForum,()=>currentReactions,turnRulesOf,pausedOf,
                   (threadId,route,path)=>insideConversationFolder(threadId,path,route.privateChat ? {kind:"person",subject:route.chatId} : {kind:"group",chat:route.chatId,topic:route.topicId}),
                   (chatId,topicId)=>{ orgTimeZone=String(cfg.timeZone ?? "").trim(); return todayOf(chatId,topicId); },
-                  (chatId,topicId,messageId)=>archive && botId() ? archive.wroteAfter(botId()!,chatId,topicId,messageId) : []);
+                  (chatId,topicId,messageId)=>archive && botId() ? archive.wroteAfter(botId()!,chatId,topicId,messageId) : [],
+                  {
+                    choose:decideChoice(cfg.decideCommand || "vallis-decide", 5000),
+                    agentName:String(cfg.employeeName ?? "").trim() || store.get<string>("bot:username") || "",
+                    agentRole:String(cfg.employeeRole ?? "").trim().slice(0,300),
+                    agentZones:String(cfg.knowledgeZones ?? "").split(/\n|,/).map((z:string)=>z.trim()).filter(Boolean).slice(0,20),
+                    recentTopicText:(chatId,topicId,before)=>archive && botId() ? archive.recentTopicText(botId()!,chatId,topicId,before,6) : [],
+                    anyAgentWroteAfter:(chatId,topicId,messageId)=>archive && botId() ? archive.anySenderWroteAfter(botId()!,chatId,topicId,messageId,[botId()!,...agentBots(store)]) : false,
+                  });
                 const scheduleFull=!feedUp || Date.now()-lastScheduleFull>=60_000;
                 if (store.waiting && (scheduleFull || scheduleDirty.size)) void observeWaiting(signal).catch(()=>{});
                 if (scheduleFull) lastScheduleFull=Date.now();
@@ -3636,6 +3646,7 @@ export default async function plugin(bb: BbPluginApi) {
         store.put(windowSinceLastKey, cfg.topicWindowSinceLast===true);
         store.put(windowCharsKey, windowChars(cfg.topicWindowChars));
         store.put(leadsByDefaultKey, ["yes","no"].includes(String(cfg.leadsChatsByDefault)) ? String(cfg.leadsChatsByDefault) : "auto");
+        store.put(fastDecideEnabledKey, cfg.unaddressedFastDecide===true);
         // Two agents without the passport's word: nobody answers the owner without a mention — told once in his chat.
         {
           const me=botId(), owner=ownerId();

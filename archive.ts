@@ -249,10 +249,19 @@ export function openArchive(db:Database) {
       const r=db.prepare("SELECT * FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as any;
       return r ? toResult(r,true) : undefined;
     },
-    recentTopicText(bot:number,chat:number,topic:number,before:number) {
-      const rows=db.prepare("SELECT text FROM archive WHERE bot=? AND chat=? AND topic=? AND message<? ORDER BY message DESC LIMIT 3")
-        .all(bot,chat,topic,before) as {text:string}[];
+    recentTopicText(bot:number,chat:number,topic:number,before:number,limit=3) {
+      const n=Math.max(1,Math.min(20,Math.floor(limit)));
+      const rows=db.prepare("SELECT text FROM archive WHERE bot=? AND chat=? AND topic=? AND message<? ORDER BY message DESC LIMIT ?")
+        .all(bot,chat,topic,before,n) as {text:string}[];
       return rows.reverse().map(row=>row.text);
+    },
+    /** 0.9.83: true if any of the given sender IDs (this bot or colleague agent bots) wrote in this topic after message N. */
+    anySenderWroteAfter(bot:number,chat:number,topic:number,message:number,senders:number[]) {
+      const ids=[...new Set(senders.filter(id=>Number.isSafeInteger(id) && id>0))];
+      if (!ids.length) return false;
+      const placeholders=ids.map(()=>"?").join(",");
+      return !!db.prepare(`SELECT 1 FROM archive WHERE bot=? AND chat=? AND topic=? AND message>? AND sender IN (${placeholders}) LIMIT 1`)
+        .get(bot,chat,topic,message,...ids);
     },
     /** С103: when the bot itself last wrote in this chat (and topic, when given), in Telegram seconds. */
     lastSent(bot:number,chat:number,topic?:number) {

@@ -26,6 +26,8 @@ import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
 import {DISCLOSURE,accessModeKey,agentBots,hasAccess,authorStatus,activeGroupSettings,groupSettingsLog,peopleNote,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
+import {forumName} from "./forum-defaults";
+import {NON_LEADER_WAIT_MS,anyBotRepliedAfter,decideUnaddressed,type FastDecideChooser} from "./fast-decide";
 import {voiceHeader,acknowledge,reactByMeaning,react,SERVICE_REACTIONS,stepLabel,firstLine,progressText,DEFAULT_REACTION_OPTIONS,type ReactionChooser,type ReactionOption,type Stage} from "./turn-feedback";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
@@ -126,6 +128,7 @@ type Job = {
   /** When the message was given to the thread; a submitted message without a turn does not live forever. */
   submittedAt?:number; resubmitted?:boolean; started?:boolean; refusedNotified?:boolean;
   executionToken?:string; executorRetryAt?:number; verifyRetryAt?:number; verifyFailures?:number; verifyFirstAt?:number;
+  fastDecideState?:"waiting"|"pass"|"drop"; fastDecideWaitUntil?:number;
   pdfIndex?:number; failedPdfs?:string[];
   albumSent?:number[];
   imageIndex?:number; failedImages?:string[];
@@ -250,6 +253,7 @@ export function groupTyping(store:Store, owner:()=>number|undefined, bot:()=>num
       if (job.state==="submitted" && Date.now()-(job.submittedAt ?? 0)>TYPING_MAX_MS) continue;
       const r=job.route;
       if (r.waitUntil && !r.voice && Date.now()<r.waitUntil) continue;
+      if (r.fastDecide && job.fastDecideState!=="pass") continue;
       const key=`group:policy:${r.chatId}:${r.topicId}`;
       const policy=store.get<GroupTopicPolicy>(key);
       if (policy?.botId===botId && job.ownerId===ownerId && (policy.ownerId===undefined || policy.ownerId===ownerId) &&
@@ -289,7 +293,17 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   /** С103: one line — whether the agent has written in this chat and topic today, and the local time. */
   todayOf?:(chatId:number,topicId:number)=>string,
   /** С105: the bot's own messages in this chat and topic after this message (number and what it replies to). */
-  botMessagesAfter?:(chatId:number,topicId:number,messageId:number)=>{message:number;replyTo?:number}[]) {
+  botMessagesAfter?:(chatId:number,topicId:number,messageId:number)=>{message:number;replyTo?:number}[],
+  /** 0.9.83: quick decision runtime for unaddressed group messages. */
+  fastDecide?:{
+    choose?:FastDecideChooser;
+    agentName?:string;
+    agentRole?:string;
+    agentZones?:string[];
+    recentTopicText?:(chatId:number,topicId:number,before:number)=>string[];
+    anyAgentWroteAfter?:(chatId:number,topicId:number,messageId:number)=>boolean;
+    nonLeaderWaitMs?:number;
+  }) {
   // С105 (narrow, until the incoming ledger): answered — the bot replied to this very message. Any other later message
   // of the bot proves nothing: several messages may wait, and an answer to one is not an answer to another.
   const answered=(r:{chatId:number;topicId:number;messageId:number;updateId:number})=>{
@@ -588,6 +602,61 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         !!binding && (!binding.ownerSharedProject || !thread.parentThreadId) &&
         groupThreadMatches(store,binding,thread.projectId);
     };
+    // 0.9.83: unaddressed message in a group with fast-decision enabled — decide via quick decision service before ack or model turn.
+    if (job.state==="pending" && r.fastDecide && job.fastDecideState!=="pass") {
+      if (job.fastDecideState==="waiting") {
+        if (anyBotRepliedAfter(store,botId,r.chatId,r.topicId,r.messageId,fastDecide?.anyAgentWroteAfter)) {
+          job.fastDecideState="drop";
+          finish("done");
+          continue;
+        }
+        if (Date.now()<(job.fastDecideWaitUntil ?? 0)) continue;
+        job.fastDecideState="pass";
+        delete job.fastDecideWaitUntil;
+        store.put(key,job);
+      } else {
+        const recent=fastDecide?.recentTopicText?.(r.chatId,r.topicId,r.messageId) ??
+          (store.get<{id:number;text:string}[]>(`group:context:${r.chatId}:${r.topicId}`) ?? [])
+            .filter(line=>line.id<r.messageId).slice(-6).map(line=>line.text);
+        const chatTitle=store.get<string>(`group:title:${r.chatId}`) ?? String(r.chatId);
+        const topicTitle=forumName(store,botId,r.chatId,r.topicId) ?? (r.topicId ? `тема ${r.topicId}` : "General");
+        const verdict=await decideUnaddressed({
+          chatTitle,
+          chatId:r.chatId,
+          topicTitle,
+          topicId:r.topicId,
+          messageText:String(r.ownText ?? r.text ?? ""),
+          senderName:r.senderName ?? (r.senderId===owner ? "Владелец" : String(r.senderId)),
+          senderKind:r.senderId===owner ? "владелец" : "участник",
+          mentions:r.fastDecide.mentions ?? [],
+          recentMessages:recent,
+          isLeader:r.fastDecide.isLeader,
+          agentName:fastDecide?.agentName || policy.botUsername,
+          agentRole:fastDecide?.agentRole ?? "",
+          agentZones:fastDecide?.agentZones ?? [],
+        }, fastDecide?.choose, r.fastDecide.fallbackPass, signal);
+        if (signal.aborted) return;
+        if (!allowed()) {finish("revoked");continue;}
+        if (verdict==="drop") {
+          job.fastDecideState="drop";
+          finish("done");
+          continue;
+        }
+        if (verdict==="wait") {
+          if (anyBotRepliedAfter(store,botId,r.chatId,r.topicId,r.messageId,fastDecide?.anyAgentWroteAfter)) {
+            job.fastDecideState="drop";
+            finish("done");
+            continue;
+          }
+          job.fastDecideState="waiting";
+          job.fastDecideWaitUntil=Date.now()+(fastDecide?.nonLeaderWaitMs ?? NON_LEADER_WAIT_MS);
+          store.put(key,job);
+          continue;
+        }
+        job.fastDecideState="pass";
+        store.put(key,job);
+      }
+    }
     const dest=destinationOf(r);
     const reactionKey=`group:reaction:${botId}:${r.updateId}`;
     // Lazy: a transport that cannot be built must not break the job (the reaction is best effort).
