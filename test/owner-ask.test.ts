@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {acceptOwnerAskCallback, answerTurnText, queueAnswerTurn, askButtons, cleanQuestion, forwardOriginal, messageLink, ownerQuestion, rememberAskMessage} from "../owner-ask";
+import {takeChatLines, acceptOwnerAskCallback, answerTurnText, queueAnswerTurn, askButtons, cleanQuestion, forwardOriginal, messageLink, ownerQuestion, rememberAskMessage} from "../owner-ask";
 import {ownerAskNotes, rememberAsk} from "../send-command";
 import {setAccess} from "../rights";
 
@@ -46,14 +46,17 @@ test("«Да» and «Нет» are buttons; a press reaches the asking conversati
   assert.equal(await press(OWNER, `oa:n:${ask.id}`), true);
   assert.deepEqual(delivered, [`${ask.id}:да`], "a closed question is not answered twice");
   assert.equal(await press(OWNER, "ep:allow:x"), false, "other buttons are not this kind");
+  // 0.9.77, case 35: the card and its button answer reach this chat's own conversation once, as a line of the chat.
+  assert.match(takeChatLines(s as never, OWNER), /Создать тестовую задачу\? — владелец ответил кнопкой: «да»/);
+  assert.equal(takeChatLines(s as never, OWNER), "", "taken once");
 });
 
-test("several open questions are never guessed; a reply to the question message names it", () => {
+test("0.9.77: open questions of other conversations are never glued to the owner's text; a reply to the question message names it", () => {
   const s = memory();
   const a = rememberAsk(s as never, BOT, OWNER, {chat: -1001, topic: 68}, "Создать задачу?");
   const b = rememberAsk(s as never, BOT, OWNER, {chat: -1001, topic: 68}, "Создать репозиторий?");
   rememberAskMessage(s as never, BOT, 840, b.id);
-  assert.match(ownerAskNotes(s as never, OWNER), /не угадывай/);
+  assert.equal(ownerAskNotes(s as never, OWNER), "", "a text without a reply to a card is this chat's own message");
   const replied = ownerAskNotes(s as never, OWNER, Date.now(), 840);
   assert.match(replied, new RegExp(`--answer ${b.id}`));
   assert.doesNotMatch(replied, new RegExp(a.id));

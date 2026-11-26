@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { telegram } from "../adapters";
 import { TelegramFailure } from "../model";
-import { authorOfTurn, deleteRefusal } from "../delete-command";
+import { authorOfTurn, deleteRefusal, turnAuthorKey, turnMixedKey, turnStartedByMessage } from "../delete-command";
 import { ReplyRoutes } from "../reply-routing";
 import { missingRightRefusal } from "../forum-commands";
 
@@ -50,8 +50,26 @@ test("С80: the owner's word lives only in a turn his Telegram message started",
   routes.accept("t", "turn1", "tg");
   routes.record("t", "task", { kind: "bb" });
   routes.accept("t", "turn2", "task");
-  store.put("group:turn-author:t", OWNER);
+  store.put(turnAuthorKey("t", 1), OWNER);
   assert.equal(authorOfTurn(store, "t", "turn1"), OWNER);
   assert.equal(authorOfTurn(store, "t", "turn2"), undefined, "a task from BB after the owner's message does not inherit his word");
   assert.equal(authorOfTurn(store, "t", undefined), undefined);
+  // 0.9.77 review: a guest's turn runs, the owner writes in the same chat and his message joins it — the turn stays the guest's.
+  routes.record("t", "guest", { kind: "telegram", chatId: TEAM, topicId: 0, updateId: 2 });
+  routes.accept("t", "turn3", "guest");
+  store.put(turnAuthorKey("t", 2), 555);
+  routes.record("t", "owner-busy", { kind: "telegram", chatId: TEAM, topicId: 0, updateId: 3 });
+  store.put(turnAuthorKey("t", 3), OWNER);
+  routes.accept("t", "turn3", "owner-busy");
+  assert.notEqual(authorOfTurn(store, "t", "turn3"), OWNER, "the owner's message joining a guest's turn lends it no word");
+  // The mirror case: the owner's turn, a guest's message joins it — the turn is the guest's in rights.
+  assert.equal(authorOfTurn(store, "t", "turn1"), OWNER);
+  store.put(turnMixedKey("t", "turn1"), 555);
+  assert.equal(authorOfTurn(store, "t", "turn1"), 555, "a guest's message joining the owner's turn takes the owner's word away");
+  // The owner's answer to a group's question is a turn the bridge gives (negative update): not his own message.
+  routes.record("t", "answer", { kind: "telegram", chatId: TEAM, topicId: 0, updateId: -4, messageId: 10 } as any);
+  routes.accept("t", "turn4", "answer");
+  assert.equal(turnStartedByMessage(store, "t", "turn4"), false);
+  assert.equal(turnStartedByMessage(store, "t", "turn1"), true);
+  assert.equal(turnStartedByMessage(store, "t", "turn2"), false, "a turn from BB");
 });

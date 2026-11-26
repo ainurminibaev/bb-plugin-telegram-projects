@@ -285,3 +285,28 @@ export function startAgentFollowUp(store:Store,origin:GroupOrigin,taskId:string,
       route:{kind:"group",chatId,topicId,senderId:sender,threadId,messageId,updateId,text}});
   });
 }
+
+/**
+ * С113: the bot was just added to a group by the owner or a person with access — the agent introduces itself there in one
+ * message (who it is, what it helps with, how to reach it here, its curator). A turn the bridge gives, like a deferred
+ * task: no message to reply to, and a send of its own here counts as the introduction.
+ */
+export function startAddedIntroduction(store:Store,a:{chatId:number;threadId:string;bot:number;owner:number;revision?:string;
+  title:string;inviterName:string;botUsername?:string;reply:"mention"|"auto";seesAll:boolean}) {
+  const key=`group:introduced:${a.bot}:${a.chatId}`;
+  if (store.get(key)) return false;
+  const name=a.botUsername ? "@"+a.botUsername : "бот";
+  const how=!a.seesAll
+    ? `ты видишь здесь только ответы на свои сообщения и команды /ask@${a.botUsername ?? "бот"} — простую отметку и обращение по имени ты не видишь; скажи людям отвечать на твоё сообщение`
+    : a.reply==="mention" ? `отметить ${name} или ответить на твоё сообщение` : "просто написать в группу по делу";
+  const text=[`[Мост Telegram] Тебя добавили в группу «${a.title}»; добавил: ${a.inviterName}.`,
+    `Представься здесь одним коротким сообщением: кто ты, чем помогаешь, как к тебе обращаться (${how}), кто твой куратор, если он у тебя есть.`,
+    "Без вопросов к людям и без инструментов; ответ этого хода и есть сообщение в группу."].join("\n");
+  store.atomic(()=>{
+    const updateId=syntheticUpdateId(store);
+    store.put(key,Date.now());
+    store.put(`group:in:${a.bot}:${updateId}`,{ownerId:a.owner,revision:a.revision,state:"pending",followUp:true,
+      route:{kind:"group",chatId:a.chatId,topicId:0,senderId:a.owner,senderName:a.inviterName,threadId:a.threadId,messageId:0,updateId,text}});
+  });
+  return true;
+}

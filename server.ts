@@ -8,7 +8,7 @@ import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
 import {learnTopicName,rememberForumName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,forumAutoOffKey,forumAutoKey,reviveArchivedForumTopic,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
 import {applyForumTopicChange,handleOwnerForumCommand,missingRightRefusal} from "./forum-commands";
-import {authorOfTurn,deleteLog,deleteRefusal,ownMessageChat} from "./delete-command";
+import {authorOfTurn,turnStartedByMessage,deleteLog,deleteRefusal,ownMessageChat} from "./delete-command";
 import {topicStateKey,isTopicPaused} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
@@ -26,7 +26,7 @@ import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicToo
 import { privacyKey, privacySummary, rememberMembership, sendVisibilityUpdates } from "./group-visibility";
 import {reconcileEmployeeTicket,employeeHome,employeeUpdate,isEmployeeUpdate,readEmployeeProfile,employeeWriteAllowed,employeeWriteCheck} from "./employee-policy";
 import {proposalInput,presentProposal,handleOwnerSelection,collectDecisionResults,presentProjectProposals} from "./owner-selection";
-import {groupFollowUpInput,bbReminderInput,isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder} from "./group-result";
+import {groupFollowUpInput,bbReminderInput,isDirectOwnerRequest,resolveGroupMessage,inspectGroupTask,deliverGroupResults,groupResultInput,groupResultStatus,queueGroupResult,groupReminderInput,queueGroupReminder,startAddedIntroduction} from "./group-result";
 import {groupExecutor} from "./isolated-client";
 import {isolatedGroupInput,isolatedGroupResult,submitIsolatedGroup,isolatedLookup,isolatedAnswer,readIsolatedGroup,isolatedPdfInput,isolatedPdfPart,readIsolatedPdf,isolatedImageInput,isolatedImagePart,readIsolatedImage,isolatedDocumentInput,isolatedDocumentPart,readIsolatedDocument,validateIsolatedPurpose} from "./isolated-group";
 import {cleanInbox} from "./inbox-retention";
@@ -61,7 +61,7 @@ import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
 import { acceptGroupUpdate, contextMediaPrefix, offsetForServer, routeUpdate, skipExcludedForumUpdate, unboundAddressedGroupMessage, type GroupTopicPolicy } from "./ingress";
-import { accessList, accessModeKey, agentBots, agentBotsKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings,markOwnerMemoryChoice, senderRole, setAccess } from "./rights";
+import { accessList, accessModeKey, activeGroupSettings, defaultGroupSettings, agentBots, agentBotsKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings,markOwnerMemoryChoice, senderRole, setAccess } from "./rights";
 import { handleConsentCallback, watchConsents } from "./consent";
 import { handleSetupUpdate, notifyGroupsAdded, welcomeScreen } from "./setup-screens";
 import { menuCommands } from "./commands";
@@ -134,6 +134,8 @@ const statusSchema = z.object({
   lastSync: z.string().nullable(),
   error: z.string().nullable(),
   queue: z.number(),
+  groupSettingsChanges: z.record(z.string(), z.array(z.object({at: z.string(), by: z.string(), changes: z.record(z.string(), z.string())}))).optional(),
+  privacy: z.object({ mode: z.enum(["on", "off", "unknown"]), text: z.string() }).optional(),
   ingressError: z.string().nullable(),
   owner: z.number().nullable(),
   menu: z.array(z.object({ command: z.string(), description: z.string() })),
@@ -1381,6 +1383,19 @@ export default async function plugin(bb: BbPluginApi) {
       error: lastError,
       tasksState: tasksMissing ? "Tasks не установлен" : "ok",
       queue: store.list("queue:").length,
+      // 0.9.77: who changed groups' settings lately (the last 3 per group).
+      groupSettingsChanges: Object.fromEntries(store.list<{at:number;by:string;changes:Record<string,[unknown,unknown]>}[]>(`rights:${botId() ?? 0}:group-log:`)
+        .map(({key,value})=>[key.split(":").pop(),value.slice(-3).map(c=>({at:new Date(c.at).toISOString().slice(0,16),by:c.by,
+          changes:Object.fromEntries(Object.entries(c.changes).map(([k,[a,b]])=>[k,`${JSON.stringify(a)} → ${JSON.stringify(b)}`]))}))])),
+      // С113: whether the bot sees ordinary messages in groups, and in which groups it sees only what is addressed to it.
+      privacy: (()=>{
+        const bot=botId() ?? 0, mode=store.get<boolean>(privacyKey(bot));
+        const blind=mode ? store.list<{chat:number;title?:string;administrator?:boolean}>(`visibility:${bot}:group:`).map(r=>r.value)
+          .filter(g=>!g.administrator).map(g=>g.title ?? String(g.chat)) : [];
+        return {mode: (mode===undefined ? "unknown" : mode ? "on" : "off") as "on"|"off"|"unknown",
+          text: privacySummary(store,bot)+(blind.length ? ` Видит только ответы на свои сообщения и команды в: ${blind.join(", ")} — `+
+            "выключите приватность у BotFather (/setprivacy → Disable) или сделайте бота администратором там." : "")};
+      })(),
       ingressError,
       owner: ownerId() ?? null,
       menu:
@@ -1968,7 +1983,7 @@ export default async function plugin(bb: BbPluginApi) {
     rightsGroup: async ({ chatId }) => botId() ? groupSettings(store, botId()!, chatId) ?? null : null,
     rightsGroupSet: async ({ chatId, ...change }) => {
       if (!botId()) throw Error("bot_unavailable");
-      const saved = saveGroupSettings(store, botId()!, chatId, change);
+      const saved = saveGroupSettings(store, botId()!, chatId, change, "вызов платформы");
       markOwnerMemoryChoice(store, botId()!, chatId, (change as {memory?:unknown}).memory);
       if (change.shortName !== undefined) void applyThreadTitles(store, bb.sdk, botId()!, chatId).catch(() => {});   // С66
       return saved;
@@ -2693,7 +2708,8 @@ export default async function plugin(bb: BbPluginApi) {
         const wholeChat=argv.includes("--chat");
         if (action==="status") return {exitCode:0,stdout:JSON.stringify({mode:now.mode,explicit:now.explicit,
           chatLead:leadsChat(store,bot,place.chat),agents:otherAgentsInChat(store,bot,place.chat,organization)})};
-        const author=store.get<number>("group:turn-author:"+ctx.threadId);
+        const startedTurn=(await bb.sdk.threads.events.list({threadId:ctx.threadId,order:"desc",limit:"1",types:["turn/started"],signal:lifetime.signal}))[0];
+        const author=authorOfTurn(store,ctx.threadId,startedTurn?.scope.kind==="turn" ? startedTurn.scope.turnId : undefined);
         if (author===undefined || !canAssignLead(store,owner,author))
           return {exitCode:1,stderr:"Назначать ведущего темы и отпускать его может только владелец или куратор этого агента. Скажи это человеку словами."};
         const refusal=action==="lead" ? leadRefusal(organization) : undefined;
@@ -2768,12 +2784,16 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           const caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
           // Who started the current turn of a group conversation: rights follow the author, not the place (С44).
-          const author=ctx.threadId ? store.get<number>("group:turn-author:"+ctx.threadId) : undefined;
+          // The author of the message that started the current turn: not the thread's last writer, and none for a turn
+          // begun from BB (a schedule, another thread, a subthread) — 0.9.77 review.
+          const started=(await bb.sdk.threads.events.list({threadId:ctx.threadId,order:"desc",limit:"1",types:["turn/started"],signal:lifetime.signal}))[0];
+          const author=authorOfTurn(store,ctx.threadId,started?.scope.kind==="turn" ? started.scope.turnId : undefined);
+          const ownMessage=turnStartedByMessage(store,ctx.threadId,started?.scope.kind==="turn" ? started.scope.turnId : undefined);
           // A thread whose group conversation moved to another thread is told so in words, not left with an empty list.
           const moved=caller || !ctx.threadId ? undefined : await movedConversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
           if (moved && (opt.targets || !(opt.person && ["owner","владелец"].includes(opt.person.trim().toLowerCase()))))
             return {exitCode:1,stderr:movedConversationRefusal(moved,movedTitle(moved.chatId))};
-          if (opt.targets) return {exitCode:0,stdout:JSON.stringify(sendTargets(store,bot,owner,caller,p=>archive?.groupsOf(bot,p) ?? [],author))};
+          if (opt.targets) return {exitCode:0,stdout:JSON.stringify(sendTargets(store,bot,owner,caller,p=>archive?.groupsOf(bot,p) ?? [],author,ownMessage))};
           let target:{chat:number;topic:number}; let curatorAsked=false;
           const answer=store.get<import("./send-command").Ask>(`send:ask:${bot}:${opt.answer}`);
           if (opt.answer) { if (!answer) return {exitCode:1,stderr:"no_open_question_for_this_answer"}; target=answer.origin; }
@@ -2790,7 +2810,7 @@ export default async function plugin(bb: BbPluginApi) {
           else return {exitCode:2,stderr:"target_required: --chat, --topic, --person or --answer; see --targets"};
           const relayTo=opt.for ? findPerson(store,bot,opt.for) : undefined;
           // A question to the curator is allowed from any conversation, like one to the owner; his chat must be open.
-          const refusal=sendRefusal(store,bot,owner,curatorAsked ? {kind:"owner"} : caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author,ask,relayTo);
+          const refusal=sendRefusal(store,bot,owner,curatorAsked ? {kind:"owner"} : caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author,ask,relayTo,ownMessage);
           if (refusal) return {exitCode:1,stderr:refusal};
           // С90: the relayed words are marked: the addressee mentioned, «по просьбе <requester>».
           if (caller?.kind==="person" && target.chat<0 && relayTo!==undefined && (opt.text || opt["text-file"])) {
@@ -2817,8 +2837,10 @@ export default async function plugin(bb: BbPluginApi) {
           const ownPlace=caller && (caller.kind==="owner" ? target.chat===owner :
             caller.kind==="person" ? target.chat===caller.subject : target.chat===caller.chat && (caller.topic ?? 0)===target.topic);
           const plain=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8").catch(()=>"") : opt.text ?? "";
-          if (day && !ownPlace && !opt.answer && plain.trim() && holdFirstToday(store,`${target.chat}:${target.topic}`,day))
-            return {exitCode:0,stdout:JSON.stringify({sent:false,firstToday:true,localTime:day.localTime,hint:FIRST_TODAY_HINT})};
+          // Only an agent's conversation greets: a script or a schedule without one is never held (0.9.77). A hold is not a
+          // success: a non-zero code and the reason in words, so no caller takes it for «sent».
+          if (day && caller && !ownPlace && !opt.answer && plain.trim() && holdFirstToday(store,`${target.chat}:${target.topic}`,day))
+            return {exitCode:1,stderr:`first_today_hold: сегодня бот здесь ещё не писал — сообщение НЕ отправлено (${day.localTime}). `+FIRST_TODAY_HINT};
           // П28: an ordinary thread of this BB writes to the owner: who it is, the text as sent, cut at 3500 characters.
           if (!caller && (target.chat===owner || handedBy) && !opt.answer && (opt.text || opt["text-file"])) {
             const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
@@ -2949,8 +2971,20 @@ export default async function plugin(bb: BbPluginApi) {
               remember(files,outcome); unverified=true;
               if (outcome==="unknown") return {exitCode:1,stderr:unsettledSendText({went:textSent ? "текст" : "ничего подтверждённого",outcome,from:opt.file!,rest:files})+onlyFile};
             }
-          } else messageId=!text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file,replyTo})
-            : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text,...(buttons && {replyMarkup:buttons})})).at(-1);
+          } else {
+            try {
+              messageId=!text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file,replyTo})
+                : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text,...(buttons && {replyMarkup:buttons})})).at(-1);
+            } catch (error) {
+              // 0.9.77: the same honest outcome as for files — Telegram's «ok» is delivered, no answer is unknown.
+              const outcome=sendOutcome(error);
+              if (outcome==="rejected") throw error;
+              if (outcome==="unknown") return {exitCode:1,stderr:"send_outcome_unknown: Telegram не ответил — исход не подтверждён, сообщение могло дойти. "+
+                "НЕ повторяй отправку сразу: скажи в чате, что сообщение могло прийти, и повтори только если его там нет."};
+              unverified=true;
+            }
+            if (messageId===undefined && !unverified) return {exitCode:1,stderr:"send_nothing_sent: после оформления текст пуст — ничего не отправлено"};
+          }
           if (ownerAsk && remembered && messageId) rememberAskMessage(store,bot,messageId,remembered);
           if (opt.answer) closeAsk(store,bot,opt.answer);
           // A group conversation wrote into its own chat during the turn: the turn's final answer is not posted again.
@@ -2960,7 +2994,7 @@ export default async function plugin(bb: BbPluginApi) {
             store.put(sentInTurnKey(ctx.threadId),{chat:target.chat,topic:target.topic,at:Date.now(),
               sent:[...(same ? (prev.sent ?? []).filter(x=>Date.now()-x.at<6*3600_000) : []),{t:sameWords(text),at:Date.now()}].slice(-10)});
           }
-          return {exitCode:0,stdout:JSON.stringify({sent:true,messageId,...(unverified && {note:"Telegram принял файлы, но его ответ не совпал с ожидаемым: считай доставленным, не повторяй"}),...(remembered && {ask:remembered}),
+          return {exitCode:0,stdout:JSON.stringify({sent:true,messageId,...(unverified && {note:"Telegram принял отправку, но его ответ не совпал с ожидаемым: считай доставленным, не повторяй"}),...(remembered && {ask:remembered}),
             ...(day && {firstToday:day.firstToday,localTime:day.localTime})})};
         } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
       }
@@ -3517,6 +3551,24 @@ export default async function plugin(bb: BbPluginApi) {
               const me = await checkBot(tg,botId());
               store.put(privacyKey(me.id), !me.readsAllGroups);
               if (ownerId()) await sendGroupVisibility();
+              // С113: added by the owner or a person with access — the employee's conversation of the group starts at once
+              // and the agent introduces itself there (instead of the bridge's own greeting).
+              const ch=u.my_chat_member, joined=["member","administrator","creator"];
+              if (cfg.chatEnabled && !legacyOperations && cfg.installKind==="employee" && privateOwner && privateBot &&
+                  ["group","supergroup"].includes(ch.chat?.type) && ch.new_chat_member?.user?.id===privateBot &&
+                  joined.includes(ch.new_chat_member?.status) && !joined.includes(ch.old_chat_member?.status) &&
+                  Number.isSafeInteger(ch.from?.id) && (ch.from.id===privateOwner || hasAccess(store,privateBot,privateOwner,ch.from.id))) {
+                const chat=ch.chat.id as number, title=String(ch.chat.title ?? chat);
+                if (await bindConversation(privateOwner,privateBot,{chatId:chat,topicId:0,title,acceptAfterSecond:Number(ch.date)||undefined},signal).catch(()=>false)) {
+                  const policy=store.get<{threadId?:string;revision?:string}>(`group:policy:${chat}:0`);
+                  const s=activeGroupSettings(store,privateBot,chat) ?? defaultGroupSettings();
+                  if (policy?.threadId && startAddedIntroduction(store,{chatId:chat,threadId:policy.threadId,bot:privateBot,owner:privateOwner,
+                      revision:policy.revision,title,botUsername:store.get<string>("bot:username"),reply:s.reply,
+                      inviterName:[ch.from.first_name,ch.from.last_name].filter(Boolean).join(" ") || (ch.from.username ? "@"+ch.from.username : "участник"),
+                      seesAll:ch.new_chat_member.status!=="member" || me.readsAllGroups}))
+                    store.put(`rights:${privateBot}:announced:${chat}`,Date.now());
+                }
+              }
             }
             // С54: the bridge-wide switch of the default topic pickup (stored so the pure checks see it).
             if (store.get(forumAutoKey)!==(cfg.autoTopics!==false)) store.put(forumAutoKey,cfg.autoTopics!==false);

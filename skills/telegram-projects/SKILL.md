@@ -284,9 +284,10 @@ its own chat. Someone else's message is removed only on the owner's word, as bef
 ## First message of the day (С103)
 
 The turn note says whether you have written in this chat today and the local time. `send` into another chat answers
-with `firstToday` and `localTime`; the first message of the day there waits once and comes back as
-`{"sent":false,"firstToday":true,"hint":…}`: add a greeting for the time of day in that chat's style if the text has
-none and send again — the next send there goes as it is.
+with `firstToday` and `localTime`; the first message of the day there waits once: the command fails with
+`first_today_hold: …` (nothing was sent): add a greeting for the time of day in that chat's style if the text has
+none and send again — the next send there goes as it is. A send not made from a conversation (a script, a schedule)
+is never held.
 
 ## Pinning (С108)
 

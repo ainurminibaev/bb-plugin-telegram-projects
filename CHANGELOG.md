@@ -1,3 +1,16 @@
+# 0.9.77
+
+- Incoming ledger: what the agent wrote before working on and then wrote again is interim — it never closes a message as its answer (the answer is the turn's final or an explicit send); the first of two messages in one turn gets the turn's final, not a note between calls.
+- С113: a bot added to a group by the owner or a person with access starts its conversation there at once and the agent introduces itself in one message (who, what it helps with, how to reach it there, its curator); with privacy mode on and no admin rights it is told that a plain mention never reaches it, and the bridge's greeting says «reply to my message or /ask@bot». On the owner's request a coordination chat writes to any group the bot is in (the first message to a new group); a refusal says why in words. When Telegram does not let the bot write in a group, one line goes to the curator (or the owner) once a day and the answer is not retried forever. The status shows the privacy mode and the groups where the bot sees only what is addressed to it.
+- «Отвечаю сам» (no mention needed): a message nobody addressed to the agent gets no 👀 and no live line, also in groups limited to people with access; its answer, if any, is the only sign. The owner's messages keep the sign.
+- Owner's chat (case 35): open questions of other conversations are never glued to the owner's text; a question card and its button answer become lines of the owner's chat for the next turn; a reply to the card still answers that question.
+- Group settings history: who changed what and when (menu, platform call, the bridge itself) — in the status (last 3 per group); the agent gets one line when people changed its answer mode.
+- Sending: the first-of-day hold is a failure in words (exit 1, «НЕ отправлено»), and a send not from a conversation is never held; a text without Telegram's answer is «not confirmed, may have arrived — do not repeat»; an emptied text sends nothing and says so. Every agent text to people goes through one formatting point (a source test keeps the list of direct sends).
+
+Checked live on the stand (3902b34): the introduction when added, the first message to a new group on the owner's request, two open questions from two conversations (case 35), the first-of-day hold from a conversation and a script send, a question while a long task runs (3 of 3, with the long task's result), two messages in a row (3 of 3), group replies, files both ways, a subthread's result.
+
+Not checked live (covered by tests): «отвечаю сам» without 👀 — a third person is needed on the stand; the line to the curator when writing or only files are forbidden — no group with such a ban on the stand; a guest's message joining the owner's turn — a guest needs the first stand BB, which is down; a subthread's question as buttons — the stand's guest guard blocks the subthread (as in 0.9.76).
+
 # 0.9.76
 
 - Topic window (off by default, `topicWindowSinceLast`): a group turn carries only the topic lines its thread has not seen, newest first within a character budget; the agent searches older ones itself.

@@ -58,4 +58,9 @@ test("an employee announces once in a group open to all members",async()=>{
   const closed=saveGroupSettings(store as any,BOT,-1009,{who:"access"});
   await announceInGroup(ctx,-1009,closed);
   assert.equal(sent.length,1,"a closed group gets no announcement");
+  // С113: privacy mode on and no admin rights — a plain mention never reaches the bot; the greeting says how to reach it.
+  store.put(`visibility:${BOT}:privacy`,true);
+  await announceInGroup(ctx,-1010,defaultEmployeeGroupSettings());
+  assert.match(sent[1].text,/ответьте на это моё сообщение или напишите \/ask@acmebot/);
+  assert.doesNotMatch(sent[1].text,/отметьте/);
 });

@@ -98,7 +98,7 @@ const reachable=(store:Store,bot:number,owner:number,person:number)=>
 
 /** Undefined when allowed, otherwise the reason. */
 export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversation|undefined,target:SendTarget,
-  groupsOf:(person:number)=>number[],askId?:string,author?:number,ask?:boolean,relayTo?:number):string|undefined {
+  groupsOf:(person:number)=>number[],askId?:string,author?:number,ask?:boolean,relayTo?:number,ownMessage=true):string|undefined {
   // П28: an ordinary thread of this BB writes to the owner only (a group or a person stays a Telegram conversation's business).
   if (!caller) return target.chat===owner && !askId ? undefined : "send_only_from_a_telegram_conversation: an ordinary thread writes only to the owner (--person owner)";
   if (askId) {
@@ -111,13 +111,17 @@ export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversat
     if (!store.get(`visibility:${bot}:group:${target.chat}`)) return "bot_is_not_in_this_group";
     if (caller.kind==="owner") return;
     if (caller.kind==="group" && caller.chat===target.chat) return;
+    // С113: on the owner's own request («представься там») a group's conversation (a coordination chat) writes to any
+    // group the bot is in — the first message to a new group included.
+    if (caller.kind==="group" && author===owner && ownMessage) return;
     // С90: «скажи такому-то» from an approved person's private chat goes to a group where both of them are,
     // with the addressee mentioned and «по просьбе …» (--for PERSON); never to a group without the requester.
     if (caller.kind==="person" && groupsOf(caller.subject).includes(target.chat)) {
       if (relayTo!==undefined && groupsOf(relayTo).includes(target.chat)) return;
       return "relay_needs_addressee_in_this_group: передать можно только в группу, где состоите и вы, и адресат: --for ИМЯ";
     }
-    return "group_not_allowed_from_this_conversation";
+    return "group_not_allowed_from_this_conversation: из этого разговора писать в другую группу можно только по просьбе владельца — "+
+      "попроси его здесь написать это самому или ответь людям здесь; бот в той группе есть, добавлять его не нужно";
   }
   // Any conversation may ask the owner (С43): a question whose answer comes back here. A group's conversation may also
   // send the owner a short report («отпиши мне потом»): text only, marked with the group, see OWNER_REPORT_GAP_MS.
@@ -137,9 +141,9 @@ export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversat
 }
 
 /** Where this conversation may send, for the agent to pick names from. */
-export function sendTargets(store:Store,bot:number,owner:number,caller:Conversation|undefined,groupsOf:(person:number)=>number[],author?:number) {
+export function sendTargets(store:Store,bot:number,owner:number,caller:Conversation|undefined,groupsOf:(person:number)=>number[],author?:number,ownMessage=true) {
   const groups=store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`).map(r=>r.value)
-    .filter(g=>!sendRefusal(store,bot,owner,caller,{chat:g.chat,topic:0},groupsOf))
+    .filter(g=>!sendRefusal(store,bot,owner,caller,{chat:g.chat,topic:0},groupsOf,undefined,author,false,undefined,ownMessage))
     .map(g=>({chat:g.chat,title:g.title ?? String(g.chat),topics:groupTopics(store,bot,g.chat)}));
   const people=accessList(store,bot).map(p=>({...p,reachable:reachable(store,bot,owner,p.id)}))
     .filter(p=>!p.reachable || !sendRefusal(store,bot,owner,caller,{chat:p.id,topic:0},groupsOf,undefined,author))
@@ -169,12 +173,9 @@ export function ownerAskNotes(store:Store,owner:number,now=Date.now(),replyTo?:n
   const own=replied ? asks.find(a=>a.id===replied) : undefined;
   if (own) return `Владелец ответил на вопрос из другого разговора: «${own.question.slice(0,300)}». Передай его ответ туда: `+
     `bb telegram-projects send --answer ${own.id} --text "<ответ владельца его словами>"`;
-  return [
-    ...asks.map(a=>`Открытый вопрос владельцу из другого разговора: «${a.question.slice(0,300)}». Ответ владельца на него: bb telegram-projects send --answer ${a.id} --text "…"`),
-    asks.length>1
-      ? "Открыт не один вопрос: если по сообщению владельца не ясно, к какому из них ответ, не угадывай — попроси его нажать «Да» или «Нет» под нужным вопросом или ответить на него реплаем."
-      : "Если сообщение владельца не про этот вопрос — ничего туда не передавай.",
-  ].join("\n");
+  // 0.9.77 (owner, case 35: «это же просто чат»): a text without a reply to a question's card is this chat's own
+  // message — open questions of other conversations are never glued to it. They are answered by a button or a reply.
+  return "";
 }
 
 export function askNotes(store:Store,bot:number,target:number) {

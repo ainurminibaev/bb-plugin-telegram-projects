@@ -71,6 +71,18 @@ export async function forwardOriginal(tg: (chat: number) => Telegram, owner: num
 export type DeliverAnswer = (ask: Ask, answer: string, via: "button" | "text") => Promise<boolean>;
 
 /** The owner pressed «Да» or «Нет» under a question. Returns true when the update was this kind of button. */
+/** Lines of the owner's chat the conversation did not take part in (a card of another conversation and its answer). */
+const chatLinesKey = (owner: number) => `chat:owner-lines:${owner}`;
+export function rememberChatLine(store: Store, owner: number, line: string) {
+  store.put(chatLinesKey(owner), [...(store.get<{line: string; at: number}[]>(chatLinesKey(owner)) ?? []), {line, at: Date.now()}].slice(-5));
+}
+/** Taken once, into the next turn of the owner's chat. */
+export function takeChatLines(store: Store, owner: number) {
+  const lines = (store.get<{line: string; at: number}[]>(chatLinesKey(owner)) ?? []).filter(l => Date.now() - l.at < 86400_000);
+  store.del(chatLinesKey(owner));
+  return lines.length ? "Раньше в этом чате (без тебя): " + lines.map(l => l.line).join("; ") + "." : "";
+}
+
 export async function acceptOwnerAskCallback(d: {store: Store; bot: number; owner: number; tg: Telegram; deliver: DeliverAnswer;
   tgFor?: (chat: number) => Telegram}, update: any) {
   const cq = update?.callback_query;
@@ -93,6 +105,9 @@ export async function acceptOwnerAskCallback(d: {store: Store; bot: number; owne
     return true;
   }
   const ok = await d.deliver(ask, answer, "button").catch(() => false);
+  // Case 35 (0.9.77): the card and its button answer stay in this chat's own conversation as ordinary lines — the next
+  // turn of the owner's chat sees «there was a question …; the owner answered …», nothing is wiped or substituted.
+  if (ok && chat === d.owner) rememberChatLine(d.store, d.owner, `в этом чате был вопрос ${ask.question.slice(0, 300)} — владелец ответил кнопкой: «${answer}»`);
   await d.tg("answerCallbackQuery", {callback_query_id: cq.id, text: ok ? `Передал: ${answer}` : "Не удалось передать ответ, попробуйте ещё раз."}).catch(() => {});
   if (ok) await tgHere("editMessageReplyMarkup", {chat_id: chat, message_id: cq.message.message_id,
     reply_markup: {inline_keyboard: [[{text: `Ответ: ${answer}`, callback_data: "oa:done"}]]}}).catch(() => {});

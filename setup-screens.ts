@@ -4,7 +4,7 @@ import { groupMemory } from "./archive-access";
 import { privacyKey } from "./group-visibility";
 import type { Store, Telegram } from "./model";
 import {
-  accessList, activeGroupSettings, installKind, defaultGroupSettings, groupSettings, hasAccess, openGroupLock, saveGroupSettings, markOwnerMemoryChoice, setAccess,
+  accessList, activeGroupSettings, installKind, defaultGroupSettings, groupSettings, hasAccess, openGroupLock, saveGroupSettings, markOwnerMemoryChoice, setSettingsActor, setAccess,
   type GroupSettings, type MembersMode,
 } from "./rights";
 
@@ -169,7 +169,7 @@ export async function notifyGroupsAdded(ctx: SetupContext) {
     if (!s.memory) {
       // Only the owner and the bot: one memory with everything else. Other people: this group's own memory.
       const count = await ctx.tg(g.chat)<number>("getChatMemberCount", { chat_id: g.chat }).catch(() => undefined);
-      s = saveGroupSettings(ctx.store, ctx.bot, g.chat, { memory: typeof count === "number" && count <= 2 ? "shared" : "separate" });
+      s = saveGroupSettings(ctx.store, ctx.bot, g.chat, { memory: typeof count === "number" && count <= 2 ? "shared" : "separate" }, "мост при добавлении в группу");
     }
     const lines = [`Меня добавили в «${g.title}». Если ничего не менять: ${summaryLine(ctx, s)}.`];
     if (!visible)
@@ -233,7 +233,12 @@ export async function announceInGroup(ctx: SetupContext, chat: number, s: GroupS
   const key = `rights:${ctx.bot}:announced:${chat}`;
   if (ctx.store.get(key) || installKind(ctx.store) !== "employee" || s.who !== "all" || openGroupLock(ctx.store)) return;
   const name = ctx.botUsername ? "@" + ctx.botUsername : "мне";
-  const how = s.reply === "mention" ? `отметьте ${name} или ответьте на моё сообщение` : "напишите в группу";
+  // With Telegram's privacy mode on and no admin rights the bot sees only replies to its messages and commands to it —
+  // a mention in plain text never reaches it (С113): then the greeting says so instead of «отметьте».
+  const admin = ctx.store.get<{administrator?: boolean}>(`visibility:${ctx.bot}:group:${chat}`)?.administrator === true;
+  const seesAll = admin || ctx.store.get<boolean>(privacyKey(ctx.bot)) !== true;   // privacy unknown — as before
+  const how = !seesAll ? `ответьте на это моё сообщение или напишите /ask@${ctx.botUsername ?? "бот"} и вопрос — простую отметку я здесь не вижу`
+    : s.reply === "mention" ? `отметьте ${name} или ответьте на моё сообщение` : "напишите в группу";
   try {
     await ctx.tg(chat)("sendMessage", { chat_id: chat,
       text: `Здравствуйте! Я отвечаю здесь всем участникам: ${how}. Можно просить и поручать. Написать мне лично: откройте чат со мной и нажмите «Старт» — доступ одобрит владелец.` });
@@ -266,6 +271,8 @@ export async function handleSetupUpdate(ctx: SetupContext, u: any): Promise<bool
   const m = cb ? cb.message : u?.message;
   const user: number | undefined = cb ? cb.from?.id : m?.from?.id;
   if (!user || m?.chat?.type !== "private" || m.chat.id !== user) return false;
+  const from = cb ? cb.from : m?.from;
+  setSettingsActor(`${[from?.first_name, from?.last_name].filter(Boolean).join(" ") || user} (меню)`);
   const allowed = hasAccess(ctx.store, ctx.bot, ctx.owner, user);
   const tg = ctx.tg(user);
   const send = (screen: object) => tg("sendMessage", { chat_id: user, ...screen });

@@ -18,6 +18,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { translate, type Language } from "./locale";
 import { markdownExcerpt } from "./events";
 import { ownerAskNotes } from "./send-command";
+import { takeChatLines } from "./owner-ask";
 import { bbText } from "./bb-mentions";
 import { localArtifacts, renderTelegramParts, cleanAssistantText, publicActivity, ARTIFACT_EXTENSIONS } from "./telegram-ux";
 import type { BbPluginApi, MessageDispatchHookContext, MessageDispatchHookDecision } from "@get-bb/plugin-sdk";
@@ -2212,7 +2213,7 @@ export class ChatBridge {
       !input.forwarded && !input.attachment && !input.voice && !input.replyTo
       ? createHash("sha256").update(text).digest("hex") : undefined;
     // Questions to the owner from other conversations (С43): the owner's turn knows them and returns the answer.
-    const ownerAsks=input.chatId===this.d.owner() ? ownerAskNotes(this.s,input.chatId,Date.now(),input.replyTo) : "";
+    const ownerAsks=input.chatId===this.d.owner() ? [takeChatLines(this.s,input.chatId),ownerAskNotes(this.s,input.chatId,Date.now(),input.replyTo)].filter(Boolean).join("\n") : "";
     if (ownerAsks) text=text+"\n\n"+ownerAsks;
     // The rules in force (0.9.59): in full once per edit, otherwise one line; the session keeps what it started with.
     // Asked early, alongside the thread checks, so the turn's timing does not change.
@@ -3211,6 +3212,11 @@ export class ChatBridge {
           if (event.scope.kind === "turn" && event.type === "item/completed" &&
               event.data.item.type === "agentMessage" && !event.data.item.parentToolCallId) {
             const text = event.data.item.text.trim();
+            const interimKey = "chat:candidate-interim:" + b.revision + ":" + event.scope.turnId;
+            if (this.s.get(interimKey)) {
+              this.s.del("chat:candidate:" + b.revision + ":" + event.scope.turnId);
+              this.s.del(interimKey);
+            }
             if (text.startsWith("[telegram-answer:")) {
               const reply = /^\[telegram-answer:([a-f0-9]{8}|[a-f0-9-]{36})\][ \t]*\r?\n([\s\S]+?)\r?\n\[\/telegram-answer\]$/.exec(text);
               const route = reply && this.routes.busyAnswer(b.threadId, event.scope.turnId, reply[1]);
@@ -3278,6 +3284,10 @@ export class ChatBridge {
               const presentation =
                 "presentation" in item ? item.presentation : undefined;
               b.toolActivity = stepLabel(item as never) ?? ""; // "" — work without a plain-words label
+              // 0.9.77 (incoming ledger): the agent went on working after its message — if it writes again in this
+              // turn, that earlier message was interim (a note between calls), not the turn's final.
+              if (event.scope.kind === "turn" && this.s.get("chat:candidate:" + b.revision + ":" + event.scope.turnId) !== undefined)
+                this.s.put("chat:candidate-interim:" + b.revision + ":" + event.scope.turnId, true);
             }
           }
           if (event.type === "turn/completed") {
@@ -3347,6 +3357,7 @@ export class ChatBridge {
             }
             this.s.del(k);
             this.s.del(timeKey);
+            this.s.del("chat:candidate-interim:" + candidate);
             this.recoverNativeBusy(b,event.scope.turnId,event.seq);
           }
           // A stopped run: a short line in a person's words (С79), under the request when it is known.
@@ -3806,7 +3817,8 @@ export class ChatBridge {
               edited = false;
               result = await this.d.tg("sendMessage", {
                 ...payload,
-                text: assistantOutput ? chunks[index].replace(/<a href="([^"]+)">([^<]*)<\/a>/g, "$2 ($1)").replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&") : chunks[index],
+                // Telegram refused the formatting: plain words without marks, whatever the source (0.9.77).
+                text: plainFromHtml(chunks[index]),
               });
             } else throw e;
           }

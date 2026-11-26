@@ -1,3 +1,4 @@
+import {sendAgentText} from "./outbound-message";
 import {stripTelegramMarkers} from "./reply-routing";
 import {createHash} from "node:crypto";
 import {z} from "zod";
@@ -51,9 +52,9 @@ export async function channelPost(store:Store,tg:Telegram,owner:number,bot:numbe
     if (await tg("deleteMessage",{chat_id:channelId,message_id:args.messageId})!==true) throw Error("channel_delete_unconfirmed");
     id=args.messageId;
   } else {
-    const result=await tg<{message_id:number;chat:{id:number;type:string}}>(
-      action==="publish"?"sendMessage":"editMessageText",{chat_id:channelId,text:outgoing,
-        ...(action==="edit"?{message_id:args.messageId}:{})});
+    const result=await sendAgentText<{message_id:number;chat:{id:number;type:string}}>(tg,
+      action==="publish"?"sendMessage":"editMessageText",{chat_id:channelId,
+        ...(action==="edit"?{message_id:args.messageId}:{})},outgoing!);
     if (result?.chat?.id!==channelId || result.chat.type!=="channel" || !Number.isSafeInteger(result.message_id) ||
         result.message_id<=0 || (action==="edit" && result.message_id!==args.messageId)) throw Error("channel_post_unconfirmed");
     id=result.message_id;

@@ -6,7 +6,10 @@ import test from "node:test";
 import {ReplyRoutes} from "../reply-routing";
 import assert from "node:assert/strict";
 import {acceptGroupUpdate} from "../ingress";
-import {bindGroupTopic,groupCliRestricted,processGroupInputs,sameWords,sentInTurnKey} from "../group-worker";
+import {bindGroupTopic,groupCliRestricted,processGroupInputs,sameWords,sentInTurnKey,tellCannotAnswer} from "../group-worker";
+import {startAddedIntroduction} from "../group-result";
+import {TelegramFailure} from "../model";
+import {curatorsKey} from "../topic-mode";
 
 const pixel=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=","base64");
 const image={type:"image" as const,url:"data:image/png;base64,"+pixel.toString("base64")};
@@ -674,12 +677,12 @@ test("0.9.76: the owner's answer given to a person's conversation keeps that per
  store.put("group:project:group-project",true);
  store.put("group:thread:t","group:policy:-1001:3");
  store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:false,allowedSenderIds:[42]});
- store.put("group:turn-message:t",{chat:-1001,topic:3,message:10,sender:42,senderName:"Евгений",text:"дай доступ"});
+ store.put("group:turn-message:t",{chat:-1001,topic:3,message:10,sender:42,senderName:"Тестовый Иван",text:"дай доступ"});
  store.put("group:in:5:-1795600000000",{ownerId:7,state:"pending",route:{kind:"group",chatId:-1001,topicId:3,senderId:7,threadId:"t",messageId:10,updateId:-1795600000000,text:"Ответ владельца: да"}});
  const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible",status:"idle"}),
    events:{list:async()=>[]},send:async()=>{}}};
  await processGroupInputs(store,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal);
- assert.equal((store.get("group:turn-message:t") as any).sender,42,"still Евгений, not the owner");
+ assert.equal((store.get("group:turn-message:t") as any).sender,42,"still the person, not the owner");
 });
 
 test("0.9.76: a voice gets 👀 at once and its reaction by meaning from the transcript, not from empty text",async()=>{
@@ -737,6 +740,34 @@ test("0.9.76: after a labelled answer to a person, the same turn's unlabelled fi
    assert.equal(sent[0].reply_parameters?.message_id,10,"as a reply to the same message");
  } else assert.equal(sent.length,0,"another person's turn: its final is not ours");
  assert.equal(rows.has("group:turn-watch:5:t:T1"),false,"the watch ends with the turn");
+ }
+});
+
+test("0.9.77: a message the agent wrote before working on is interim — not the answer when it writes again",async()=>{
+ for (const [then,expected] of [["Готово: 8 файлов.","Готово: 8 файлов."],["[telegram-answer:abcdef12]\nОтвет другому.\n[/telegram-answer]",null],[null,"Посчитаю файлы."]] as const) {
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"посчитай"}},7,5));
+ const events:any[]=[];
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+ send:async(q:any)=>{
+   const event=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"g"}});
+   event("client/turn/requested",{requestId:"g",originPluginId:"telegram-projects",input:q.input});
+   event("turn/input/accepted",{clientRequestId:"g"});
+   event("item/completed",{item:{type:"agentMessage",text:"Посчитаю файлы."}});
+   event("item/started",{item:{type:"commandExecution",command:"find . -name '*.md'"}});
+   if (then) event("item/completed",{item:{type:"agentMessage",text:then}});
+   event("turn/completed",{status:"completed"});
+ }}};
+ const sent:any[]=[];
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,()=>async <T>(m:string,p:any)=>{if(m==="sendMessage")sent.push(p.text);return {message_id:1} as T},new AbortController().signal);
+ await tick(); await tick(); await tick();
+ if (expected===null) assert.equal(sent.filter(t=>/Посчитаю/.test(t)).length,0,"the note between calls is not an answer");
+ else assert.ok(sent.some(t=>t.includes(expected)),String(then));
  }
 });
 
@@ -843,4 +874,130 @@ test("0.9.75: two forwards and a comment of the owner in a place without mention
  assert.match(inputs[0],/первая мысль[\s\S]*вторая мысль[\s\S]*Передай это Потапычу/);
  assert.match(inputs[0],/Автор оригинала: Пётр/);
  assert.equal(inputs[0].split("вторая мысль").length,2,"a merged voice's transcript is there once");
+});
+
+test("С113: the bot just added — the agent introduces itself once, as a plain message; Telegram forbids writing — one line to the curator",async()=>{
+ for (const forbidden of [false,true]) {
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:0");
+ store.put("group:policy:-1001:0",{chatId:-1001,topicId:0,threadId:"t",botId:5,botUsername:"bot",requireMention:true,ownerOnly:false});
+ store.put("visibility:5:group:-1001",{chat:-1001,title:"Отдел (тестовая группа)"});
+ store.put(curatorsKey,[42]);
+ const args={chatId:-1001,threadId:"t",bot:5,owner:7,title:"Отдел (тестовая группа)",inviterName:"Анна",botUsername:"bot",reply:"mention" as const,seesAll:false};
+ assert.equal(startAddedIntroduction(store as any,args),true);
+ assert.equal(startAddedIntroduction(store as any,args),false,"once per group");
+ const inputs:string[]=[];
+ const events:any[]=[];
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+ send:async(q:any)=>{
+   inputs.push(q.input.map((b:any)=>b.text).join("\n"));
+   const event=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"g"}});
+   event("client/turn/requested",{requestId:"g",originPluginId:"telegram-projects",input:q.input});
+   event("turn/input/accepted",{clientRequestId:"g"});
+   event("item/completed",{item:{type:"agentMessage",text:"Здравствуйте! Я помощник отдела, отвечайте на моё сообщение."}});
+   event("turn/completed",{status:"completed"});
+ }}};
+ const sent:any[]=[];
+ const tick=()=>processGroupInputs(store as any,sdk as any,7,5,(chat:number)=>async <T>(m:string,p:any)=>{
+   if (forbidden && chat<0) throw new TelegramFailure("telegram_rights");
+   sent.push({chat,...p}); return {message_id:1} as T},new AbortController().signal);
+ await tick(); await tick(); await tick();
+ assert.match(inputs[0],/Тебя добавили в группу «Отдел \(тестовая группа\)»; добавил: Анна/);
+ assert.match(inputs[0],/только ответы на свои сообщения и команды \/ask@bot/,"privacy: the agent knows people must reply to it");
+ if (!forbidden) {
+   const intro=sent.filter(x=>x.chat===-1001);
+   assert.equal(intro.length,1);
+   assert.match(intro[0].text,/Здравствуйте/);
+   assert.equal(intro[0].reply_parameters,undefined,"no message to reply to");
+ } else {
+   assert.equal(sent.length,1,"one line, and the job is not retried");
+   assert.equal(sent[0].chat,42,"to the curator");
+   assert.match(sent[0].text,/Не могу ответить в «Отдел \(тестовая группа\)»: Telegram не даёт мне писать там/);
+   assert.equal([...rows.keys()].some(k=>k.startsWith("group:in:")),false,"closed");
+ }
+ }
+});
+
+test("0.9.77: «отвечаю сам» — a message nobody addressed gets no 👀 and no live line, only the answer if the agent gives one; in «по отметке» a mention gets 👀 at once",async()=>{
+ for (const [mode,text,answer] of [["auto","кто-нибудь видел отчёт?","NO_REPLY"],["auto","кто-нибудь видел отчёт?","Отчёт лежит в общей папке."],["mention","@bot где отчёт?","В общей папке."]] as const) {
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:mode==="mention",ownerOnly:false});
+ store.put("rights:5:access",[{id:9,name:"Анна"}]);
+ const accepted=acceptGroupUpdate(store as any,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:9,first_name:"Анна"},message_thread_id:3,text,
+   ...(mode==="mention" && {entities:[{type:"mention",offset:0,length:4}]})}},7,5);
+ assert.ok(accepted,mode);
+ const events:any[]=[];
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+ send:async(q:any)=>{
+   const event=(type:string,data:any)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId:"g"}});
+   event("client/turn/requested",{requestId:"g",originPluginId:"telegram-projects",input:q.input});
+   event("turn/input/accepted",{clientRequestId:"g"});
+   event("item/started",{item:{type:"commandExecution",command:"ls"}});
+   event("item/completed",{item:{type:"agentMessage",text:answer}});
+   event("turn/completed",{status:"completed"});
+ }}};
+ const calls:{m:string;p:any}[]=[];
+ const tick=()=>processGroupInputs(store as any,sdk as any,7,5,()=>async <T>(m:string,p:any)=>{calls.push({m,p});return (m==="sendMessage" ? {message_id:20} : true) as T},new AbortController().signal);
+ for (let i=0;i<4;i++) await tick();
+ await new Promise(r=>setTimeout(r,20));
+ const reactions=calls.filter(c=>c.m==="setMessageReaction");
+ const texts=calls.filter(c=>c.m==="sendMessage").map(c=>String(c.p.text));
+ if (mode==="mention") assert.ok(reactions.length>0,"a mention is seen at once");
+ else {
+   assert.equal(reactions.length,0,"no 👀 on talk not addressed to the agent: "+answer);
+   assert.equal(texts.filter(t=>t!==answer).length,0,"no live line: "+texts.join(" | "));
+   assert.equal(texts.includes(answer),answer!=="NO_REPLY");
+ }
+ }
+});
+
+test("С113 review: the once-a-day line is marked only when it reached someone; media-only refusal says so",async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("visibility:5:group:-1001",{chat:-1001,title:"Отдел (тестовая группа)"});
+ store.put(curatorsKey,[42]);
+ let open=false; const got:any[]=[];
+ const transport=(chat:number)=>async <T>(_m:string,p:any)=>{if (!open) throw new TelegramFailure("telegram_403"); got.push({chat,...p}); return {message_id:1} as T};
+ await tellCannotAnswer(store as any,5,7,{chatId:-1001,senderName:"Анна"},"telegram_rights",transport as any,1000);
+ assert.equal(got.length,0);
+ assert.equal(rows.has("group:cannot-answer:5:-1001"),false,"nobody got it — not marked");
+ open=true;
+ await tellCannotAnswer(store as any,5,7,{chatId:-1001,senderName:"Анна"},"files",transport as any,2000);
+ assert.equal(got.length,1); assert.equal(got[0].chat,42);
+ assert.match(got[0].text,/нет права отправлять файлы и фото: ответ для Анна ушёл текстом/);
+ await tellCannotAnswer(store as any,5,7,{chatId:-1001},"telegram_rights",transport as any,3000);
+ assert.equal(got.length,1,"once a day");
+});
+
+test("0.9.77 review: a person's message joining the owner's running turn marks that turn with its author before it is sent",async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:true,ownerOnly:false});
+ store.put("rights:5:access",[{id:9,name:"Анна"}]);
+ assert.ok(acceptGroupUpdate(store as any,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:9,first_name:"Анна"},message_thread_id:3,
+   text:"@bot напиши в группу Склад",entities:[{type:"mention",offset:0,length:4}]}},7,5));
+ const events:any[]=[{type:"turn/started",data:{},seq:1,scope:{kind:"turn",turnId:"T-owner"}}];
+ let markedBeforeSend:unknown;
+ const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible",status:"active"}),
+   events:{list:async(q:any)=>events.filter(e=>(!q.types || q.types.includes(e.type)) && e.seq>Number(q.afterSeq??0)).sort((a,b)=>q.order==="desc" ? b.seq-a.seq : a.seq-b.seq).slice(0,Number(q.limit ?? 100))},
+   send:async()=>{markedBeforeSend=rows.get("group:turn-mixed:t:T-owner");}}};
+ await processGroupInputs(store as any,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal);
+ assert.equal(markedBeforeSend,9);
+ // A person with access joining after a stranger does not raise the turn back.
+ rows.set("group:turn-mixed:t:T-owner",31);
+ assert.ok(acceptGroupUpdate(store as any,{update_id:9,message:{message_id:11,chat:{type:"supergroup",id:-1001},from:{id:9,first_name:"Анна"},message_thread_id:3,
+   text:"@bot и ещё",entities:[{type:"mention",offset:0,length:4}]}},7,5));
+ await processGroupInputs(store as any,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal);
+ assert.equal(rows.get("group:turn-mixed:t:T-owner"),31,"the least trusted stays");
 });

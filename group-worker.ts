@@ -1,4 +1,4 @@
-import {topicNote} from "./topic-mode";
+import {curators,topicNote} from "./topic-mode";
 import {markHanded} from "./turn-window";
 import {albumCaption,albumChanged,albumKind,deliverAlbumWarnings,sendAlbum,type AlbumMedia} from "./media-album";
 import {beginTopicSend,isTopicPaused} from "./topic-lifecycle";
@@ -19,17 +19,35 @@ import {ReplyRoutes, busyAnswerText, isBusyAnswer, stripTelegramMarkers} from ".
 import {voiceTranscripts} from "./archive";
 import {askNotes} from "./send-command";
 import {turnMessageKey} from "./owner-ask";
+import {turnAuthorKey,turnMixedKey} from "./delete-command";
 import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumScope, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
 import {TelegramFailure,type Store,type Telegram} from "./model";
-import {DISCLOSURE,accessModeKey,agentBots,authorStatus,activeGroupSettings,peopleNote,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
+import {DISCLOSURE,accessModeKey,agentBots,hasAccess,authorStatus,activeGroupSettings,groupSettingsLog,peopleNote,permissionModeFor,rulesNote,senderRole,type PermissionMode} from "./rights";
 import {voiceHeader,acknowledge,reactByMeaning,react,SERVICE_REACTIONS,stepLabel,firstLine,progressText,DEFAULT_REACTION_OPTIONS,type ReactionChooser,type ReactionOption,type Stage} from "./turn-feedback";
 
 type GroupInput = Extract<Ingress,{kind:"group"}>;
 /** A submitted message without a turn for this long, while its thread is idle, is lost. */
 export const LOST_SUBMIT_MS=15*60_000;
 /** The agent's own message into its conversation's chat during a turn (send): the final answer is then not repeated. */
+/** С113: once a day per chat, the curator (or, unreachable, the owner) learns that the agent cannot answer in a chat and why. */
+export async function tellCannotAnswer(store:Store,bot:number,owner:number,r:{chatId:number;senderName?:string},code:string,
+  transport:(chat:number)=>Telegram,now=Date.now()) {
+  const key=`group:cannot-answer:${bot}:${r.chatId}`;
+  const last=store.get<number>(key);
+  if (last!==undefined && now-last<86400_000) return;
+  const title=store.get<{title?:string}>(`visibility:${bot}:group:${r.chatId}`)?.title ?? String(r.chatId);
+  const text=code==="files"
+    ? `В «${title}» у меня нет права отправлять файлы и фото: ответ${r.senderName ? " для "+r.senderName : ""} ушёл текстом, без вложений. Нужно право на медиа (настройки группы → Разрешения или права администратора).`
+    : `Не могу ответить в «${title}»: ${code==="telegram_rights" ? "Telegram не даёт мне писать там — нужно право отправлять сообщения (настройки группы → Разрешения или права администратора)"
+      : "Telegram отказал: меня там нет или мне запрещено писать"}. Сообщение${r.senderName ? " от "+r.senderName : ""} осталось без ответа.`;
+  for (const to of [...curators(store).filter(id=>id!==owner),owner]) {
+    // Marked only once it reached someone: a line nobody got is tried again with the next refusal.
+    try { await transport(to)("sendMessage",{chat_id:to,text}); store.put(key,now); return; } catch { /* the next one */ }
+  }
+}
+
 export const sentInTurnKey=(threadId:string)=>"group:sent-in-turn:"+threadId;
 /** Text compared by its words only, so formatting and spacing do not make a repeat look new. */
 export const sameWords=(text:string)=>text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu," ").trim();
@@ -88,6 +106,8 @@ type Job = {
   taskId?:string; progressId?:number|null;
   /** A deferred task the bridge gives itself (no person waits for this turn's answer). */
   followUp?:true;
+  /** Telegram refused a file here for lack of rights: the answer goes as text only. */
+  noFiles?:true;
   /** 0.9.75: this message went into the turn of an earlier one of the same person. */
   mergedInto?:number;
   /** С106: the edited message this answer replies to. */
@@ -103,6 +123,8 @@ type Job = {
   /** Sent into a running turn: the selector of its separate answer; busyOnce — the plain retry is under way. */
   busyLabel?:string; busyOnce?:true;
   /** С45/С46: the visible sign and the live status of this message. */
+  /** 0.9.77: the agent worked on after its message; a later message makes that one interim, not the answer. */
+  interim?:true;
   acked?:true; stage?:Stage; stageShown?:true; guest?:boolean;
   agentLine?:string; step?:string; startedAt?:number; progressAt?:number; progressText?:string;
 };
@@ -392,7 +414,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     // С45: every message that reached this agent gets a visible sign at once: 👀, then the chosen reaction.
     // A message of the owner without a mention may not be for the agent (С55): no sign until it answers.
     // С74: no reaction is chosen for an agent bot's message.
-    if (r.updateId>0 && !job.acked && !r.ownerUnaddressed && !r.leaderUnaddressed && !agentBots(store).includes(r.senderId)) {
+    if (r.updateId>0 && !job.acked && !r.ownerUnaddressed && !r.leaderUnaddressed && !r.quietAck && !agentBots(store).includes(r.senderId)) {
       job.acked=true; job.startedAt??=Date.now(); store.put(key,job);
       const set=reactions?.();
       // A voice has no words yet: 👀 now, the reaction by meaning after its transcript (below).
@@ -401,7 +423,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     }
     // С46: one live status message: the agent's first line and the current step; guests see the step only.
     const updateProgress=async()=>{
-      if (!visibleProgress || policy.ownerSharedProject || r.ownerUnaddressed || r.leaderUnaddressed || r.updateId<=0 || job.progressId===null) return;
+      // A message nobody addressed to the agent shows nothing while it works: its answer (if any) is the only sign.
+      if (!visibleProgress || policy.ownerSharedProject || r.ownerUnaddressed || r.leaderUnaddressed || r.quietAck || r.updateId<=0 || job.progressId===null) return;
       const text=progressText({agentLine:job.agentLine,step:job.step,guest:job.guest,startedAt:job.startedAt ?? Date.now()});
       if (!text || text===job.progressText || Date.now()-(job.progressAt ?? 0)<5000) return;
       try {
@@ -582,11 +605,12 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const provider=(thread as {providerId?:string}).providerId;
       const role=senderRole(store,botId,owner,r.chatId,r.senderId,provider);
       if (role==="none") {finish("revoked");continue;}
-      store.put("group:turn-author:"+r.threadId,r.senderId);
+      // Whose word this message's turn carries; a turn the bridge gives without a message (the bot added) has none.
+      if (r.messageId>0) store.put(turnAuthorKey(r.threadId,r.updateId),r.senderId);
       // С67: the message this turn answers, for a question to the owner (a link to it, or the message itself forwarded).
       // A turn the bridge gives itself (the owner's answer, a deferred task) keeps the person's original request: the
       // next question names that person, not «Владелец».
-      if (r.updateId>0 || !store.get(turnMessageKey(r.threadId)))
+      if (r.messageId>0 && (r.updateId>0 || !store.get(turnMessageKey(r.threadId))))
         store.put(turnMessageKey(r.threadId),{chat:r.chatId,topic:r.topicId,message:r.messageId,sender:r.senderId,
           ...(r.senderName && {senderName:r.senderName}),text:String(r.ownText ?? r.text ?? "").slice(0,1500)});
       job.guest=role==="member" || !!policy.isolated;
@@ -605,7 +629,13 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const topic=topicNote(store,policy,agentBots(store),id=>store.get<string>(`chat:agent-name:${id}`),
         agentBots(store).includes(r.senderId));
       const day=todayOf ? (()=>{try {return todayOf(r.chatId,r.topicId);} catch {return "";}})() : "";
-      const rules=[rulesBase,people,asks,unaddressed,leader,topic,day].filter(Boolean).join("\n");
+      // 0.9.77: a person changed how the agent answers here since its last turn — one line, so it is not surprised.
+      const seenKey="group:settings-seen:"+r.threadId;
+      const replyChanges=groupSettingsLog(store,botId,r.chatId).filter(c=>c.at>Math.max(store.get<number>(seenKey) ?? 0,Date.now()-86400_000) && c.changes.reply && !c.by.startsWith("мост"));
+      const lastReply=replyChanges.at(-1);
+      const modeChanged=lastReply ? `Режим ответа в этом чате сменил ${lastReply.by}: теперь ${lastReply.changes.reply[1]==="mention" ? "только по отметке или ответу на твоё сообщение" : "отвечаешь сам, когда к тебе по делу"}.` : "";
+      store.put(seenKey,Date.now());
+      const rules=[rulesBase,people,asks,unaddressed,leader,topic,day,modeChanged].filter(Boolean).join("\n");
       // A running session keeps the rules it started with: the rules in force come with the turn — in full once per edit,
       // otherwise one line (0.9.59).
       const rulesVersionKey="group:rules-version:"+r.threadId;
@@ -622,6 +652,15 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const metadata=busy ? routes.busyIngress(r.threadId,dest,undefined,senderName) : [routes.ingress(r.threadId,dest)];
       if (busy) job.busyLabel=/\[telegram-answer:([a-f0-9-]+)\]/.exec(metadata[1]?.text ?? "")?.[1];
       else delete job.busyLabel;
+      // A message joining a running turn lowers that turn's rights to its author's before the agent sees it (review 0.9.77).
+      if (busy && r.senderId!==owner) {
+        const running=(await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",types:["turn/started"],signal}))[0];
+        // The least trusted of those who joined stays: the owner, then people with access, then anyone else.
+        const trust=(id:number)=>id===owner ? 2 : hasAccess(store,botId,owner,id) ? 1 : 0;
+        const key=running?.scope.kind==="turn" ? turnMixedKey(r.threadId,running.scope.turnId) : undefined;
+        const before=key ? store.get<number>(key) : undefined;
+        if (key && (before===undefined || trust(r.senderId)<trust(before))) store.put(key,r.senderId);
+      }
       job.cursor=latest[0]?.seq ?? 0;
       delete r.examples;
       job.state="submitted"; job.submittedAt=Date.now();
@@ -662,12 +701,17 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           }
           if (job.state==="submitted" && routes.sameTask(routes.destination(r.threadId,turn),dest)) {
             job.started=true;
-            if (e.type==="item/started" && GROUP_TOOL_ITEMS.has(e.data.item.type)) job.step=stepLabel(e.data.item as never);
+            if (e.type==="item/started" && GROUP_TOOL_ITEMS.has(e.data.item.type)) {
+              job.step=stepLabel(e.data.item as never);
+              // 0.9.77: work went on after the agent's message — if it writes again, that message was interim.
+              if (job.turnId===turn && job.answer!==undefined) job.interim=true;
+            }
             if (e.type==="item/completed" && e.data.item.type==="agentMessage" && !e.data.item.parentToolCallId) {
               const text=e.data.item.text;
               job.agentLine??=firstLine(stripTelegramMarkers(text).replace(/\[\/?telegram-answer(?::[a-f0-9-]+)?\]/g,"").trim()) || undefined;
               // Answers to other messages that joined this turn are not this message's answer.
               const own=label ? busyAnswerText(text,label) : undefined;
+              if (job.interim) {delete job.answer; delete job.interim;}
               if (own || !isBusyAnswer(text)) {job.turnId=turn; job.answer=own ?? text;}
             }
             if (e.type==="turn/completed") {
@@ -714,7 +758,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     }
     // NO_REPLY means "say nothing" in any group turn, not only in a scheduled check: the reaction stays as the sign.
     if (job.state==="ready" && stripTelegramMarkers(job.answer ?? "").trim()===NO_REPLY) {finish("done");continue;}
-    if (job.state==="ready") {
+    let sendingFiles=true;   // the answer's files go first; a refusal there may be about media only
+    if (job.state==="ready") try {
       // Ready jobs may be resumed long after submission, including between reply parts.
       if (!allowed()) {finish("revoked");continue;}
       if (!executor && !belongsToGroup(await sdk.threads.get({threadId:r.threadId,signal}))) {finish("revoked");continue;}
@@ -727,6 +772,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         return env.path;
       };
       let text=stripTelegramMarkers(job.answer!);
+      // Files are forbidden here but text is not: the answer goes as text, its attachments named as not sent.
+      if (job.noFiles) for (const link of localArtifacts(text)) text=text.replace(link.markdown,(link.label ? link.label+" " : "")+"(вложение не отправлено: нет права на файлы)");
       // A link to a file not of this conversation is not attached: the agent is told where to copy it and sends it
       // itself (the owner's own forum is not limited).
       const refused:string[]=[];
@@ -750,7 +797,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const afterEdit=edited && edited.chat===r.chatId && edited.topic===r.topicId && edited.at>=(job.submittedAt ?? 0) ? edited.message : undefined;
       // Kept on the job, so the rest of a delivery resumed on the next pass also replies to the edited message.
       if (afterEdit) {job.replyTo??=afterEdit; store.put(key,job); store.del(editedInTurnKey(r.threadId));}
-      const reply={chatId:r.chatId,topicId:r.topicId,replyTo:job.replyTo ?? r.messageId};
+      // A turn the bridge gave without a message (the bot was just added) is a plain message, not a reply.
+      const reply={chatId:r.chatId,topicId:r.topicId,replyTo:job.replyTo ?? (r.messageId>0 ? r.messageId : undefined)};
       const byPath=new Map(artifacts.map(link=>[link.path,link]));
       const unique=[...byPath.values()];
       const links=artifacts.filter(link=>routedArtifactKind(byPath.get(link.path)!)!=="image");
@@ -787,7 +835,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           const end=beginTopicSend(store,botId,r.chatId,r.topicId);
           try {
             store.put(key,{...job,state:"sending"});
-            const sent=await sendAlbum(transport(r.chatId),reply,files);
+            const sent=await sendAlbum(transport(r.chatId),{...reply,replyTo:reply.replyTo ?? 0},files);
             job.albumSent=sent.messageIds;
             store.put(key,job);
           } finally {end();}
@@ -871,6 +919,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       for (const link of imageLinks) text=text.replace(link.markdown,
         job.failedImages?.includes(link.path) ? "Изображение недоступно для отправки." : "");
       if (job.captionSent || !text.trim()) {finish("done");continue;}
+      sendingFiles=false;
       // The same formatting as a private chat: bold, italic, lists, code and links; plain words if Telegram rejects it.
       const parts=renderTelegramParts(cleanAssistantText(text).trim());
       for (let i=job.part??0;i<parts.length;i++) {
@@ -889,6 +938,18 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (i+1===parts.length) finish("done",sent?.message_id);
         else store.put(key,{...job,state:"ready",part:i+1});
       }
+    } catch (error) {
+      // С113: Telegram does not let the bot write here (no right to post, removed from the chat) — the answer cannot be
+      // delivered, and retrying forever helps nobody: one line to the curator (or the owner) says what is missing.
+      if (!(error instanceof TelegramFailure) || error.ambiguous || !["telegram_rights","telegram_403"].includes(error.code)) throw error;
+      // Only media may be forbidden (photos or documents) while text is allowed: once more as text, without files.
+      if (error.code==="telegram_rights" && sendingFiles && !job.noFiles) {
+        job.noFiles=true; store.put(key,job);
+        if (r.chatId<0) await tellCannotAnswer(store,botId,owner,r,"files",transport);
+        continue;
+      }
+      if (r.chatId<0) await tellCannotAnswer(store,botId,owner,r,error.code,transport);   // a private chat: the person blocked the bot
+      finish("done");
     }
   }
 }

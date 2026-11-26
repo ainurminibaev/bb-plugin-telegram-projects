@@ -91,7 +91,17 @@ export function markOwnerMemoryChoice(store: Store, bot: number, chat: number, m
   if (memory === "separate" || memory === "shared") store.put(ownerMemoryChoiceKey(bot, chat), memory);
 }
 
-export function saveGroupSettings(store: Store, bot: number, chat: number, change: Partial<Omit<GroupSettings, "version">>) {
+/** Who changes a group's settings now (a person on the menu); set by the menu handler for its own changes. */
+let settingsActor: string | undefined;
+export function setSettingsActor(who: string | undefined) { settingsActor = who; }
+export type SettingsChange = { at: number; by: string; changes: Record<string, [unknown, unknown]> };
+export const groupLogKey = (bot: number, chat: number) => `rights:${bot}:group-log:${chat}`;
+/** The last changes of a group's settings: who, when, what was and what became (0.9.77). */
+export function groupSettingsLog(store: Store, bot: number, chat: number) {
+  return store.get<SettingsChange[]>(groupLogKey(bot, chat)) ?? [];
+}
+
+export function saveGroupSettings(store: Store, bot: number, chat: number, change: Partial<Omit<GroupSettings, "version">>, by?: string) {
   const current = activeGroupSettings(store, bot, chat) ?? defaultGroupSettings();
   const next: GroupSettings = {
     ...current,
@@ -101,6 +111,10 @@ export function saveGroupSettings(store: Store, bot: number, chat: number, chang
     version: current.version + 1,
   };
   store.put(groupKey(bot, chat), next);
+  const changes = Object.fromEntries(Object.keys(change).filter((k) => JSON.stringify((current as any)[k]) !== JSON.stringify((next as any)[k]))
+    .map((k) => [k, [(current as any)[k], (next as any)[k]]]));
+  if (Object.keys(changes).length)
+    store.put(groupLogKey(bot, chat), [...groupSettingsLog(store, bot, chat), { at: Date.now(), by: by ?? settingsActor ?? "мост", changes }].slice(-50));
   return next;
 }
 
@@ -215,7 +229,7 @@ export function migrateLegacyRights(store: Store, bot: number, extraPeople: numb
       members: "silent",
       zones: rules.sources ?? [],
       note: value.note ?? "",
-    });
+    }, "перенос старых правил");
   }
   for (const { value } of store.list<GroupTopicPolicy>("group:policy:")) {
     if (value.botId === bot) (value.allowedSenderIds ?? []).forEach(add);

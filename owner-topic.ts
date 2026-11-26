@@ -1,3 +1,4 @@
+import {sendAgentText} from "./outbound-message";
 import {forumDefaults,rememberForumName} from "./forum-defaults";
 import {groupThreadMatches,isSharedOwnerPolicy,sharedOwnerForum} from "./group-binding";
 import { createHash, randomUUID } from "node:crypto";
@@ -215,8 +216,8 @@ export function ownerTopicTool(d: Dependencies) {
       const checkForum=()=>checkOwnerForum(tg,chatId,owner,bot,{shared:sourceIsShared,work});
       const {username}=await checkForum();
       async function post(topicId:number) {
-        const message=await tg("sendMessage",{chat_id:chatId,message_thread_id:topicId,text,
-          link_preview_options:{is_disabled:true}});
+        const message=await sendAgentText<any>(tg,"sendMessage",{chat_id:chatId,message_thread_id:topicId,
+          link_preview_options:{is_disabled:true}},text);
         if (message?.chat?.id!==chatId || message.message_thread_id!==topicId ||
             !Number.isSafeInteger(message.message_id) || message.message_id<1)
           throw Error("owner_topic_post_unconfirmed");

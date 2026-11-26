@@ -57,7 +57,7 @@ export function guardGroupMemory(store:Store,bot:number,owner:number,update:any)
     const all=[...known,...found.filter(f=>!known.some(k=>k.id===f.id))];
     store.put(key,all);
     if (groupMemory(store,bot,chat)!=="shared") return;
-    saveGroupSettings(store,bot,chat,{memory:"separate"});
+    saveGroupSettings(store,bot,chat,{memory:"separate"},"мост: в группе незнакомый человек");
     return {kind:"guest",chat,title,unknown:all};
   }
   // An approved person wrote in a group made separate before reasons were kept (no list): ask the owner once.
@@ -101,7 +101,7 @@ export function groupMemoryAnswer(store:Store,bot:number,owner:number,update:any
     if (ownChoice) return {...reply,text:"Не вернул: память этой группы вы сами сделали отдельной в настройках."};
     const now=(store.get<Stranger[]>(unknownKey(bot,chat)) ?? []).filter(p=>!hasAccess(store,bot,owner,p.id));
     if (now.length) return {...reply,text:`Не вернул: в группе появились не одобренные — ${pending(now)}.`};
-    saveGroupSettings(store,bot,chat,{memory:"shared"});
+    saveGroupSettings(store,bot,chat,{memory:"shared"},"владелец (кнопка «Вернуть»)");
     return {...reply,text:"Готово: в группе снова общая память."};
   }
   const key=unknownKey(bot,chat);
@@ -115,7 +115,7 @@ export function groupMemoryAnswer(store:Store,bot:number,owner:number,update:any
   if (left.length) return {...reply,text:`${name} одобрен. В группе ещё не одобрены: ${pending(left)} — общая память пока выключена.`,
     reply_markup:{inline_keyboard:[...left.filter(p=>!p.channel).slice(0,5).map(p=>[approveButton(chat,p)]),[{text:"Оставить так",callback_data:`gm:keep:${chat}`}]]}};
   if (ownChoice) return {...reply,text:`Готово: ${name} одобрен. Память группы остаётся отдельной — так вы выбрали в настройках.`};
-  saveGroupSettings(store,bot,chat,{memory:"shared"});
+  saveGroupSettings(store,bot,chat,{memory:"shared"},`владелец (кнопка «Одобрить ${name}»)`);
   return {...reply,text:`Готово: ${name} одобрен, в группе снова общая память.`};
 }
 

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {acceptGroupUpdate} from "../ingress";
 import {processGroupInputs} from "../group-worker";
-import {accessModeKey,effectiveGroupPolicy,migrateLegacyRights,permissionModeFor,rulesNote,saveGroupSettings,senderRole,setAccess,accessList,groupSettings} from "../rights";
+import {accessModeKey,effectiveGroupPolicy,migrateLegacyRights,permissionModeFor,rulesNote,saveGroupSettings,senderRole,setAccess,accessList,groupSettings,groupSettingsLog} from "../rights";
 import {describeInteraction,handleConsentCallback,watchConsents} from "../consent";
 
 const OWNER=7, BOT=5, CHAT=-1001, TOPIC=3, LENA=11, STRANGER=99;
@@ -111,4 +111,18 @@ test("a personal assistant never answers strangers in groups, even when the grou
   saveGroupSettings(store as any,BOT,CHAT,{who:"all",members:"read"});
   assert.equal(senderRole(store as any,BOT,OWNER,CHAT,STRANGER),"none");
   assert.equal(senderRole(store as any,BOT,OWNER,CHAT,OWNER),"access");
+});
+
+test("0.9.77: a group's settings changes are logged — who, when, what was and what became; no change, no entry", () => {
+  const rows = new Map<string, unknown>();
+  const s: any = {get: (k: string) => rows.get(k), put: (k: string, v: unknown) => { rows.set(k, v); }, del: (k: string) => { rows.delete(k); },
+    list: (p: string) => [...rows].filter(([k]) => k.startsWith(p)).map(([key, value]) => ({key, value})), atomic: (fn: () => void) => fn()};
+  saveGroupSettings(s, 5, -1001, {reply: "auto"}, "Тестовый Иван (меню)");
+  saveGroupSettings(s, 5, -1001, {reply: "auto"}, "Тестовый Иван (меню)");
+  saveGroupSettings(s, 5, -1001, {reply: "mention"}, "вызов платформы");
+  const log = groupSettingsLog(s, 5, -1001);
+  assert.equal(log.length, 2, "the repeat changed nothing");
+  assert.equal(log[0].by, "Тестовый Иван (меню)");
+  assert.deepEqual(log[0].changes.reply, ["mention", "auto"]);
+  assert.deepEqual(log[1].changes.reply, ["auto", "mention"]);
 });

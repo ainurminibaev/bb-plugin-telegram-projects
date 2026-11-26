@@ -162,6 +162,26 @@ export async function sendOutboundMessage(tg:Telegram,args:Omit<MessagePayload,"
 }
 
 /**
+ * The one point an agent's text passes on its way to people (0.9.77): its Markdown as Telegram HTML, and the same words
+ * without marks for when Telegram refuses the formatting. Raw Markdown never goes out.
+ */
+export function agentText(markdown: string) {
+  const parts = renderTelegramParts(cleanAssistantText(markdown).trim());
+  const html = parts.length === 1 ? parts[0] : undefined;
+  return {html, plain: html !== undefined ? plainFromHtml(html) : plainFromHtml(parts.join("\n"))};
+}
+
+/** Sends (or edits) one message of an agent's text: formatted, or as plain words if Telegram refuses the formatting. */
+export async function sendAgentText<T>(tg: Telegram, method: string, body: Record<string, unknown>, markdown: string): Promise<T> {
+  const {html, plain} = agentText(markdown);
+  if (html === undefined) return tg<T>(method, {...body, text: plain});
+  return tg<T>(method, {...body, text: html, parse_mode: "HTML"}).catch(error => {
+    if (error instanceof TelegramFailure && error.code === "telegram_400") return tg<T>(method, {...body, text: plain});
+    throw error;
+  });
+}
+
+/**
  * The agent's text as a file's caption, formatted as any message (bold, lists, links); undefined when it does not fit
  * one caption — then it goes as its own message. Never raw Markdown: «**» in a caption is what people saw.
  */

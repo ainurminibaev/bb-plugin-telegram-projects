@@ -29,7 +29,14 @@ test("who may send where follows the calling conversation",()=>{
   assert.equal(no({kind:"owner"},{chat:ALICE,topic:0}),undefined,"owner: a person with access who started the bot");
   assert.match(no({kind:"owner"},{chat:BOB,topic:0})!,/person_has_not_started_the_bot/);
   assert.equal(no({kind:"group",chat:TEAM},{chat:TEAM,topic:9}),undefined,"group: its own topics");
-  assert.match(no({kind:"group",chat:TEAM},{chat:OTHER,topic:0})!,/group_not_allowed/);
+  assert.match(no({kind:"group",chat:TEAM},{chat:OTHER,topic:0})!,/group_not_allowed.*только по просьбе владельца/);
+  // С113: the owner asked in a coordination chat «представься там» — the first message to that group goes.
+  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OTHER,topic:0},groupsOf,undefined,OWNER),undefined,"group: another group on the owner's request");
+  assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OTHER,topic:0},groupsOf,undefined,ALICE)!,/group_not_allowed/,"not on a member's request");
+  // Valis 25.11: the owner's answer to this group's question (a turn the bridge gives) is no request to write elsewhere.
+  assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OTHER,topic:0},groupsOf,undefined,OWNER,false,undefined,false)!,/group_not_allowed/,"not on the owner's answer to a question");
+  assert.equal(sendTargets(s,BOT,OWNER,{kind:"group",chat:TEAM},groupsOf,OWNER,false).groups.some((g:any)=>g.chat===OTHER),false);
+  assert.ok(sendTargets(s,BOT,OWNER,{kind:"group",chat:TEAM},groupsOf,OWNER).groups.some((g:any)=>g.chat===OTHER),"listed in --targets on the owner's turn");
   // С44: from a group, a person's private chat only when the owner asked in this turn; otherwise answer in the group.
   assert.match(no({kind:"group",chat:TEAM},{chat:ALICE,topic:0})!,/person_only_on_the_owners_request_from_a_group/);
   assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,999)!,/person_only_on_the_owners_request/);
@@ -127,9 +134,8 @@ test("a question to the owner from a person's private chat reaches the owner's t
     atomic:(f:()=>void)=>f(),list:<T>(p:string)=>[...rows].filter(([k])=>k.startsWith(p)).map(([key,value])=>({key,value:value as T}))};
   const OWNER=7, ALICE=11, BOT=5;
   const ask=rememberAsk(s as never,BOT,OWNER,{chat:ALICE,topic:0},"Вопрос из лички «Алиса»: закрыть задачу 12? да/нет");
-  const notes=ownerAskNotes(s as never,OWNER);
-  assert.match(notes,/закрыть задачу 12/);
-  assert.match(notes,new RegExp("--answer "+ask.id));
+  // 0.9.77: free text is not glued to the open question; a reply to its card is (owner-ask test).
+  assert.equal(ownerAskNotes(s as never,OWNER),"");
   assert.equal(sendRefusal(s as never,BOT,OWNER,{kind:"owner"},{chat:ALICE,topic:0},()=>[],ask.id),undefined);
   assert.equal(ownerAskNotes(s as never,ALICE),"");
 });
