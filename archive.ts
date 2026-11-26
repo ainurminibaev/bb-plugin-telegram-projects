@@ -152,6 +152,18 @@ export function openArchive(db:Database) {
     ON CONFLICT(bot,chat,message) DO UPDATE SET text=excluded.text,search=excluded.search,markdown=excluded.markdown,file_id=COALESCE(excluded.file_id,archive.file_id),
       file_name=COALESCE(excluded.file_name,archive.file_name),file_kind=COALESCE(excluded.file_kind,archive.file_kind)`);
   const moveChat=db.prepare("UPDATE OR IGNORE archive SET chat=? WHERE bot=? AND chat=?");
+  // С119: people's reactions to the bot's own messages, kept next to the message (one row per person: their current
+  // reactions; an empty list — taken off). They go with the message: removed when the message leaves the archive.
+  db.exec(`CREATE TABLE IF NOT EXISTS reactions(
+      bot INTEGER NOT NULL, chat INTEGER NOT NULL, message INTEGER NOT NULL, user INTEGER NOT NULL, user_name TEXT NOT NULL,
+      reactions TEXT NOT NULL, date INTEGER NOT NULL, PRIMARY KEY(bot,chat,message,user));
+    CREATE INDEX IF NOT EXISTS reactions_by_date ON reactions(bot,chat,date);
+    CREATE TRIGGER IF NOT EXISTS archive_reactions_ad AFTER DELETE ON archive BEGIN
+      DELETE FROM reactions WHERE bot=OLD.bot AND chat=OLD.chat AND message=OLD.message; END;`);
+  const setReaction=db.prepare(`INSERT INTO reactions(bot,chat,message,user,user_name,reactions,date) VALUES(?,?,?,?,?,?,?)
+    ON CONFLICT(bot,chat,message,user) DO UPDATE SET reactions=excluded.reactions,date=excluded.date,user_name=excluded.user_name
+    WHERE excluded.date>=reactions.date`);
+  const moveReactions=db.prepare("UPDATE OR IGNORE reactions SET chat=? WHERE bot=? AND chat=?");
   return {
     record(bot:number,update:any) {
       const row=archiveRow(update);
@@ -168,7 +180,33 @@ export function openArchive(db:Database) {
       return true;
     },
     /** A basic group that became a supergroup keeps its archive under the new chat ID. */
-    moveChat(bot:number,from:number,to:number) { moveChat.run(to,bot,from); },
+    moveChat(bot:number,from:number,to:number) { moveChat.run(to,bot,from); moveReactions.run(to,bot,from); },
+    /**
+     * С119: a person changed their reaction to a message (Telegram message_reaction). Kept only for the bot's own
+     * messages the archive holds; anonymous reactions (no person) are not kept. Returns whether it was kept.
+     */
+    reaction(bot:number,update:any) {
+      const r=update?.message_reaction;
+      const user=r?.user;
+      if (!r || !user || user.is_bot || !Number.isSafeInteger(r.chat?.id) || !Number.isSafeInteger(r.message_id)) return false;
+      const own=db.prepare("SELECT 1 FROM archive WHERE bot=? AND chat=? AND message=? AND sender=?").get(bot,r.chat.id,r.message_id,bot);
+      if (!own) return false;
+      const kinds=(Array.isArray(r.new_reaction) ? r.new_reaction : []).map((x:any)=>
+        x?.type==="emoji" ? String(x.emoji) : x?.type==="custom_emoji" ? "custom:"+String(x.custom_emoji_id) : x?.type==="paid" ? "paid" : "").filter(Boolean);
+      const name=[user.first_name,user.last_name].filter(Boolean).join(" ").slice(0,128) || String(user.id);
+      setReaction.run(bot,r.chat.id,r.message_id,user.id,name,JSON.stringify(kinds),Number(r.date) || Math.floor(Date.now()/1000));
+      return true;
+    },
+    /** С119: reactions to the bot's messages in a chat (and topic) changed since a moment (Telegram seconds). */
+    reactions(bot:number,chat:number,since:number,topic?:number) {
+      const rows=db.prepare(`SELECT r.message,r.user,r.user_name,r.reactions,r.date,a.topic,a.text FROM reactions r
+        JOIN archive a ON a.bot=r.bot AND a.chat=r.chat AND a.message=r.message
+        WHERE r.bot=? AND r.chat=? AND r.date>=? ${topic===undefined ? "" : "AND a.topic=?"} ORDER BY r.date`)
+        .all(...[bot,chat,since,...(topic===undefined ? [] : [topic])]) as any[];
+      return rows.map(r=>({message:r.message,topic:r.topic,text:String(r.text).replace(/\s+/g," ").slice(0,200),
+        personId:r.user,person:r.user_name,reactions:JSON.parse(r.reactions) as string[],removed:JSON.parse(r.reactions).length===0,
+        at:new Date(r.date*1000).toISOString()}));
+    },
     find(bot:number,chats:(chat:number)=>boolean,q:ArchiveQuery,defaultZone:string) {
       const where=["a.bot=?"]; const args:unknown[]=[bot];
       const zone=q.timeZone||defaultZone||"UTC";

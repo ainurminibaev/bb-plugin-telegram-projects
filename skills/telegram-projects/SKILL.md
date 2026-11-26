@@ -281,6 +281,14 @@ From the owner's conversation (and its subthreads) the bot's own message in any 
 its own chat. Someone else's message is removed only on the owner's word, as before. Before you say a message is
 «unanswered», check the place's history (`search-history`).
 
+## People's reactions to your messages (С119)
+
+`bb telegram-projects reactions [--chat <group id or name>] [--topic N] [--since 24h|7d|<date>]` lists reactions people
+put on your own messages in a place this conversation may read: message number, its first words, who, which reactions
+(an empty list — taken off), when. Only people who may write there are listed. Nothing happens on a reaction by itself:
+read them when your task needs them (for example, «👎 under a reminder — do not send such ones again»). In a group
+Telegram gives reactions only while the bot is an administrator there.
+
 ## First message of the day (С103)
 
 The turn note says whether you have written in this chat today and the local time. `send` into another chat answers

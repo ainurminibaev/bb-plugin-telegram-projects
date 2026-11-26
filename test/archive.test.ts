@@ -232,4 +232,27 @@ test("list previews name the full-message command; reading one message preserves
         `…[обрезано: показано 2000 из ${full.length} знаков; полный текст — bb telegram-projects search-history --message ${TEAM}:${u.message.message_id}]`);
     }
   } finally {db.close();}
+
+test("С119: a person's reaction to the bot's own message is kept next to it; taking it off is kept; others' messages and anonymous reactions are not",()=>{
+  const db=new Database(":memory:"); const a=openArchive(db);
+  a.record(BOT,{message:{message_id:50,date:1_795_300_000,chat:{id:TEAM,type:"supergroup",title:"Команда"},from:{id:BOT,first_name:"Бот",is_bot:true},text:"Напоминание: созвон в 10:00"}});
+  a.record(BOT,msg(TEAM,ALICE,"Алиса","обычное сообщение"));
+  const alicesMessage=id;
+  const react=(message:number,user:any,emoji:string[],date:number)=>({update_id:++id,message_reaction:{chat:{id:TEAM,type:"supergroup"},message_id:message,
+    ...(user && {user}),...(!user && {actor_chat:{id:-1009,type:"channel"}}),date,old_reaction:[],new_reaction:emoji.map(e=>({type:"emoji",emoji:e}))}});
+  assert.equal(a.reaction(BOT,react(50,{id:ALICE,first_name:"Алиса"},["👎"],1_795_300_100)),true);
+  assert.equal(a.reaction(BOT,react(alicesMessage,{id:BOB,first_name:"Боб"},["👍"],1_795_300_100)),false,"not the bot's message");
+  assert.equal(a.reaction(BOT,react(50,undefined,["👍"],1_795_300_100)),false,"anonymous");
+  assert.equal(a.reaction(BOT,react(50,{id:99,first_name:"Другой бот",is_bot:true},["👍"],1_795_300_100)),false,"a bot");
+  let rows=a.reactions(BOT,TEAM,1_795_300_000);
+  assert.deepEqual(rows.map(r=>[r.message,r.person,r.reactions,r.removed]),[[50,"Алиса",["👎"],false]]);
+  assert.match(rows[0].text,/Напоминание: созвон/);
+  a.reaction(BOT,react(50,{id:ALICE,first_name:"Алиса"},[],1_795_300_200));
+  rows=a.reactions(BOT,TEAM,1_795_300_000);
+  assert.deepEqual(rows.map(r=>[r.reactions,r.removed]),[[[],true]],"taken off — one row, now empty");
+  a.reaction(BOT,react(50,{id:ALICE,first_name:"Алиса"},["🔥"],1_795_300_150));
+  assert.deepEqual(a.reactions(BOT,TEAM,0)[0].reactions,[],"an older update never overwrites a newer one");
+  assert.equal(a.reactions(BOT,TEAM,1_795_300_300).length,0,"since");
+  db.prepare("DELETE FROM archive WHERE bot=? AND chat=? AND message=?").run(BOT,TEAM,50);
+  assert.equal((db.prepare("SELECT count(*) n FROM reactions").get() as any).n,0,"they go with the message");
 });

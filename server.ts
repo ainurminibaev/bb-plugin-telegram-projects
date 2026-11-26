@@ -3151,6 +3151,33 @@ export default async function plugin(bb: BbPluginApi) {
             ...(day && {firstToday:day.firstToday,localTime:day.localTime})})};
         } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
       }
+      if(argv[0]==="reactions"){
+        // С119: bb telegram-projects reactions [--chat C] [--topic T] [--since 24h|ISO] — people's reactions to the bot's
+        // messages in a place this conversation may read; only from those who may write there.
+        if (!ctx.threadId) return {exitCode:1,stderr:"run_from_a_conversation_thread"};
+        const owner=ownerId(),bot=botId();
+        if (!owner || !bot || !archive) return {exitCode:1,stderr:"archive_unavailable"};
+        const opt:Record<string,string>={};
+        const rest=argv.slice(1);
+        for (let i=0;i<rest.length;i++) {
+          if (rest[i]==="--json") continue;
+          if (["--chat","--topic","--since"].includes(rest[i]) && rest[i+1]!==undefined) opt[rest[i].slice(2)]=rest[++i];
+          else return {exitCode:2,stderr:"unexpected_argument "+rest[i]+"; usage: reactions [--chat C] [--topic T] [--since 24h|2026-11-26T10:00]"};
+        }
+        const conversation=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
+        if (!conversation) return {exitCode:1,stderr:"telegram_conversation_required"};
+        const chat=opt.chat!==undefined ? (/^-?\d+$/.test(opt.chat) ? Number(opt.chat) : findGroup(store,bot,opt.chat)) :
+          conversation.kind==="group" ? conversation.chat : conversation.kind==="person" ? conversation.subject : owner;
+        if (!readableChats(store,archive,bot,owner,conversation)(chat)) return {exitCode:1,stderr:"not_available_in_this_conversation"};
+        const topic=opt.topic!==undefined ? Number(opt.topic) : conversation.kind==="group" && opt.chat===undefined ? conversation.topic : undefined;
+        const m=/^(\d+)\s*(h|d|ч|д)$/i.exec(opt.since ?? "24h");
+        const since=m ? Math.floor(Date.now()/1000)-Number(m[1])*(/[dд]/i.test(m[2]) ? 86400 : 3600) : Math.floor(Date.parse(opt.since ?? "")/1000);
+        if (!Number.isFinite(since)) return {exitCode:2,stderr:"invalid_since: 24h, 7d or a date"};
+        // Who may write there: in a group by its rules; in a private chat the person themselves and the owner.
+        const may=(person:number)=>chat>0 ? person===chat || person===owner : senderRole(store,bot,owner,chat,person,undefined)!=="none";
+        const rows=archive.reactions(bot,chat,since,Number.isSafeInteger(topic) ? topic : undefined).filter(r=>may(r.personId));
+        return {exitCode:0,stdout:JSON.stringify({chat,...(Number.isSafeInteger(topic) && {topic}),since:new Date(since*1000).toISOString(),reactions:rows})};
+      }
       if(argv[0]==="search-history"){
         if (!ctx.threadId) return {exitCode:1,stderr:"run_from_a_conversation_thread"};
         // bb telegram-projects search-history [words] [--author A] [--from D] [--to D] [--tz Z] [--last N] [--files] [--chat C] [--topic T] [--file CHAT:MESSAGE]
@@ -3643,7 +3670,7 @@ export default async function plugin(bb: BbPluginApi) {
             updates = await tg<any[]>("getUpdates", {
               offset: offsetForServer(store, checkedApiRoot(await apiRoot())),
               timeout: 25,
-              allowed_updates: ["message", "edited_message", "callback_query", ...(process.env.BB_TELEGRAM_GUEST_TOPICS ? ["guest_message"] : []), "my_chat_member"],
+              allowed_updates: ["message", "edited_message", "callback_query", ...(process.env.BB_TELEGRAM_GUEST_TOPICS ? ["guest_message"] : []), "my_chat_member", "message_reaction"],
             });
           } finally { ingressPolling = false; }
           ingressError = null;
@@ -3653,6 +3680,12 @@ export default async function plugin(bb: BbPluginApi) {
             const moved=groupMigration(u);
             if (moved && botId()) {migrateGroupChat(store,botId()!,moved.from,moved.to);archive?.moveChat(botId()!,moved.from,moved.to);}
             try { if (botId()) { archive?.record(botId()!,u); learnTopicName(store,botId()!,u); } } catch { /* the archive never blocks a message */ }
+            // С119: a person's reaction to a message is only written down next to it — no turn, no model, nothing else.
+            if (u.message_reaction || u.message_reaction_count) {
+              try { if (botId()) archive?.reaction(botId()!,u); } catch { /* never blocks the intake */ }
+              store.put("ingress:offset",u.update_id+1);
+              continue;
+            }
             if (botId() && ownerId()) {
               const closed=guardGroupMemory(store,botId()!,ownerId()!,u);
               if (closed) await telegram(botToken,signal,15_000,ownerId,apiRoot)("sendMessage",{chat_id:ownerId(),...groupMemoryNotice(closed)}).catch(()=>{});
