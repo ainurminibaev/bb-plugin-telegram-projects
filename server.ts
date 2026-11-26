@@ -81,6 +81,7 @@ import {
   type Events,
 } from "./events";
 import {WaitingMarks,type WaitingConfig} from "./waiting-mark";
+import {acceptActionButtonCallback,buildActionKeyboard,newActionButtonToken,parseActionButtons,rememberActionButtons} from "./action-buttons";
 import {PROMISE_NOTE_MARKER,formatRecentLabelsNote,promiseWatchKey,recentPromiseLabels,type PromiseWatch} from "./promise-labels";
 import {interactionOpen,codexAsyncQuestions} from "./codex-async-question";
 import { makeChatControlPublisher, writeJsonAtomic } from "./json-file";
@@ -2573,7 +2574,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name:"send",
         summary:"Send a message or file to a group topic or a person with access; --ask remembers the question so the answer comes back",
-        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON|owner | --answer ASK) (--text TEXT | --text-file PATH, not stdin) [--file PATH …] [--reply-to MESSAGE] [--ask]",
+        usage:"bb telegram-projects send --targets | send ([--chat GROUP] [--topic TOPIC] | --person PERSON|owner | --answer ASK) (--text TEXT | --text-file PATH, not stdin) [--file PATH …] [--reply-to MESSAGE] [--ask] [--button \"Подпись[=данные]\"]",
       },
       {
         name:"topic",
@@ -2876,7 +2877,7 @@ export default async function plugin(bb: BbPluginApi) {
         // bb telegram-projects send (--chat C [--topic T] | --person P | --answer ASK) (--text T | --text-file F) [--file PATH] [--reply-to MESSAGE] [--ask]
         const owner=ownerId(),bot=botId();
         if (!ctx.threadId || !owner || !bot) return {exitCode:1,stderr:"run_from_a_conversation_thread"};
-        const opt:Record<string,string>={}; let ask=false; let again=false; const files:string[]=[];
+        const opt:Record<string,string>={}; let ask=false; let again=false; const files:string[]=[]; const rawButtons:string[]=[];
         const rest=argv.slice(1);
         for (let i=0;i<rest.length;i++) {
           if (rest[i]==="--ask") ask=true;
@@ -2885,10 +2886,11 @@ export default async function plugin(bb: BbPluginApi) {
           else if (rest[i]==="--targets") opt.targets="1";
           // С84: several files in one send: --file A --file B … (one album per up to ten files).
           else if (rest[i]==="--file" && rest[i+1]!==undefined) { files.push(rest[++i]); opt.file??=files[0]; }
+          else if (rest[i]==="--button" && rest[i+1]!==undefined) { rawButtons.push(rest[++i]); }
           else if (rest[i]==="--json") continue;
           // --key=value as well as --key value.
           else if (/^--(?:ask|again|targets|json)=/.test(rest[i])) return {exitCode:2,stderr:"flag_takes_no_value: "+rest[i].split("=")[0]};
-          else if (/^--[a-z-]+=/.test(rest[i])) { const [k,...v]=rest[i].slice(2).split("="); if (k==="file") { files.push(v.join("=")); opt.file??=files[0]; } else opt[k]=v.join("="); }
+          else if (/^--[a-z-]+=/.test(rest[i])) { const [k,...v]=rest[i].slice(2).split("="); if (k==="file") { files.push(v.join("=")); opt.file??=files[0]; } else if (k==="button") { rawButtons.push(v.join("=")); } else opt[k]=v.join("="); }
           else if (rest[i].startsWith("--") && rest[i+1]!==undefined) opt[rest[i].slice(2)]=rest[++i];
           else return {exitCode:2,stderr:"unexpected_argument "+rest[i]};
         }
@@ -3034,7 +3036,13 @@ export default async function plugin(bb: BbPluginApi) {
           }
           // A person's own message goes to the owner as it is, before the question (С67).
           if (ownerAsk?.turn && ownerAsk.turn.chat>0) await forwardOriginal(chat=>telegram(botToken,lifetime.signal,60_000,()=>chat,apiRoot),owner,ownerAsk.turn,store);
-          const buttons=(ownerAsk || topicAsk) && remembered ? askButtons(remembered) : undefined;
+          if (rawButtons.length && (ask || opt.answer)) return {exitCode:2,stderr:"buttons_cannot_combine_with_ask_or_answer"};
+          const parsedButtons=rawButtons.length ? parseActionButtons(rawButtons) : undefined;
+          if (parsedButtons && "error" in parsedButtons) return {exitCode:2,stderr:parsedButtons.error};
+          const actionToken=parsedButtons ? newActionButtonToken() : undefined;
+          const actionButtons=parsedButtons?.buttons;
+          const buttons=actionButtons && actionToken ? buildActionKeyboard(actionToken,actionButtons)
+            : (ownerAsk || topicAsk) && remembered ? askButtons(remembered) : undefined;
           const messageIds:number[]=[];
           let unverified=false;
           const mismatches:{incomplete:boolean;note:string}[]=[];
@@ -3097,7 +3105,7 @@ export default async function plugin(bb: BbPluginApi) {
             try {
               // The text as the file's caption is formatted as any message (not raw Markdown).
               messageId=await sendFormattedFile(tg,{chatId:target.chat,topicId:target.topic,markdown:text,file,replyTo,
-                ...(buttons && store.waiting?.own(target.chat,target.topic) && {replyMarkup:buttons})}, messageIds,checks);
+                ...(buttons && (actionButtons || store.waiting?.own(target.chat,target.topic)) && {replyMarkup:buttons})}, messageIds,checks);
               remember(files,"delivered");
             } catch (error) {
               if (error instanceof TextPartFailure) throw error;
@@ -3136,6 +3144,7 @@ export default async function plugin(bb: BbPluginApi) {
             }
           }
           if (ownerAsk && remembered && messageId) rememberAskMessage(store,bot,messageId,remembered);
+          if (actionButtons && actionToken && messageId) rememberActionButtons(store,{token:actionToken,botId:bot,ownerId:owner,chatId:target.chat,topicId:target.topic,messageId,buttons:actionButtons,text:text || opt.file || ""});
           if (opt.answer) closeAsk(store,bot,opt.answer);
           // A group conversation wrote into its own chat during the turn: the turn's final answer is not posted again.
           if (caller?.kind==="group" && caller.chat===target.chat && (caller.topic ?? 0)===target.topic && !ask && text?.trim()) {
@@ -3717,6 +3726,17 @@ export default async function plugin(bb: BbPluginApi) {
             if (privateOwner && privateBot && cfg.chatEnabled && bridge && await acceptOwnerAskCallback({store,bot:privateBot,owner:privateOwner,
                 tg:telegram(botToken,signal,15000,()=>privateOwner,apiRoot),deliver:deliverOwnerAnswer,
                 tgFor:chat=>telegram(botToken,signal,15000,()=>chat,apiRoot)},u)) {
+              store.put("ingress:offset",u.update_id+1);
+              continue;
+            }
+            // С118: action buttons attached by send --button — allowed clickers feed an ordinary turn; others get a hint.
+            if (privateOwner && privateBot && cfg.chatEnabled && bridge && await acceptActionButtonCallback({
+                store,bot:privateBot,owner:privateOwner,
+                tgFor:chat=>telegram(botToken,signal,15000,()=>chat,apiRoot),
+                deliverOwner:async ({chatId,topicId,messageId,updateId,text})=>{
+                  await bridge!.handle({ownerId:privateOwner,chatId,topicId,messageId,updateId,text,sentAt:Math.floor(Date.now()/1000)});
+                },
+                wake:()=>wake?.()},u)) {
               store.put("ingress:offset",u.update_id+1);
               continue;
             }

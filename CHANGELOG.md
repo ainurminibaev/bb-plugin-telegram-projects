@@ -1,3 +1,8 @@
+# 0.9.82
+
+- С119: people's reactions to the bot's own messages (`message_reaction`) are recorded next to the message in the archive without starting a turn or model call; `bb telegram-projects reactions [--chat] [--topic] [--since 24h|7d|date]` reads reactions from people allowed to write in the place.
+- С118: action buttons under a message (`bb telegram-projects send ... --button "Label[=data]"`, up to 6). Pressing a button by a person allowed to write in the place leaves a `✓ Label — Name` mark while keeping the buttons, and feeds an ordinary turn in that conversation; unauthorized clickers only see a short hint.
+
 # 0.9.81
 
 - Promised replies reach the person across turns (inventory № 40): every incoming Telegram message gets an answer label valid for 24 hours in any turn of the same conversation (both owner DM and groups/topics). Turns started outside Telegram (by another thread or a schedule) receive a short agent-only note with the last recent human requests and their labels; unlabelled finals of such turns still never go to Telegram, and place rights / forward protections are unchanged.
