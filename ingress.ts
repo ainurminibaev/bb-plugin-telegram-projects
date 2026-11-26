@@ -303,7 +303,6 @@ export function routeUpdate(
   const sameTopic = replied?.chat?.id === m.chat.id && (replied.message_thread_id ?? 0) === topicId;
   const replyExcerpt = !callback && sameTopic
     ? (m.quote?.text || replied.text || replied.caption || replied.document?.file_name || replied.audio?.file_name || "")
-      .slice(0, 2000)
     : "";
   const v = m.voice && (m.voice.file_size ?? 0) <= 15_000_000 &&
     (m.voice.duration ?? 0) <= 600 ? m.voice : undefined;
@@ -320,7 +319,7 @@ export function routeUpdate(
       chatId: owner,
       topicId,
       messageId: m.message_id,
-      text: callback ? undefined : text?.slice(0, 16000),
+      text: callback ? undefined : text,
       ...(!callback && (kind==="photo" || kind==="document") && attached && mediaGroupId(m) && {
         albumId:mediaGroupId(m),...(m.has_protected_content===true && {protectedContent:true as const}),
       }),
@@ -337,7 +336,7 @@ export function routeUpdate(
         kind,
       } : undefined,
       replyTo: m.reply_to_message?.message_id,
-      ...(replyExcerpt && {replyExcerpt}),
+      ...(replyExcerpt && {replyExcerpt,replyOriginal:replied.text ?? replied.caption}),
       voice: v
         ? {
             fileId: v.file_id,
@@ -403,7 +402,16 @@ export function releaseGroupAlbums(store:Store,owner:number,bot:number) {
 }
 
 /** A receipt pins the original destination even if the topic is rebound before processing. */
-export function acceptGroupUpdate(store: Store, update: any, owner: number | undefined, botId: number | undefined): boolean {
+export function clearWaitingOnUpdate(store:Store,update:any,owner:number|undefined) {
+  if (!owner || !store.waiting) return;
+  const q=update.callback_query,m=q?.message ?? update.message;
+  if (m?.is_topic_message && (m.forum_topic_closed || (q?.from ?? m.from)?.id===owner))
+    store.waiting.clear(m.chat.id,m.message_thread_id);
+}
+
+export function acceptGroupUpdate(store: Store, update: any, owner: number | undefined, botId: number | undefined,
+  waitingHandled=false): boolean {
+  if (!waitingHandled) clearWaitingOnUpdate(store,update,owner);
   const guest=update?.guest_message;
   if (guest) {
     const topics=(process.env.BB_TELEGRAM_GUEST_TOPICS??"").split(",");
@@ -482,11 +490,11 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
         !message.entities?.some((e:any)=>e.type==="mention" &&
           message.text.slice(e.offset,e.offset+e.length).toLowerCase()==="@"+policy.botUsername.toLowerCase()))) return;
     const replyId=message.reply_to_message?.message_id;
-    // С81 fallback: Telegram's own short quote of the answered message, kept aside; the agent gets it only when the
-    // message is missing from the conversation's memory (search-history --message).
+    // Retain Telegram's copy of an answered message for lookup if it predates the archive.
     if (Number.isSafeInteger(replyId)) {
-      const quoted=String(message.reply_to_message?.text ?? message.reply_to_message?.caption ?? "").trim().slice(0,200);
-      if (quoted) store.put(`reply:quote:${chatId}:${replyId}`,{t:quoted,at:Date.now()});
+      const quoted=String(message.reply_to_message?.text ?? message.reply_to_message?.caption ?? "").trim();
+      if (quoted && message.reply_to_message.chat?.id===chatId && (message.reply_to_message.message_thread_id??0)===topicId)
+        store.put(`reply:quote:${chatId}:${replyId}`,{t:quoted,original:message.reply_to_message.text ?? message.reply_to_message.caption,at:Date.now()});
     }
     if (file && message.document?.mime_type==="application/pdf" && Number.isSafeInteger(replyId) &&
         replyId!==topicId && Number.isSafeInteger(message.from?.id) && !message.from.is_bot &&

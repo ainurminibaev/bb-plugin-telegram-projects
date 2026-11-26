@@ -58,11 +58,13 @@ export async function deliverScheduledResults(store:Store,sdk:Pick<BbPluginApi["
           const telegramTask=new ReplyRoutes(store).destination(threadId,turnId)?.kind==="telegram" ||
             store.list<{state?:string;route?:{threadId?:string}}>("group:in:").some(({value:j})=>
               j.route?.threadId===threadId && (j.state==="submitted" || j.state==="ready" || j.state==="sending"));
+          if (!telegramTask) store.waiting?.completed(threadId,turnId,e.data.status==="completed" && (!text || text===NO_REPLY));
           if (!telegramTask && e.data.status==="completed" && text && text!==NO_REPLY && !store.get(sentKey(threadId,turnId)) && allowed()) {
             store.put(sentKey(threadId,turnId),Date.now());
             const tg=transport(policy.chatId);
             try {
-              await sendFormattedText(tg,{chatId:policy.chatId,topicId:policy.privateChat ? 0 : policy.topicId,markdown:text});
+              const ids=await sendFormattedText(tg,{chatId:policy.chatId,topicId:policy.privateChat ? 0 : policy.topicId,markdown:text});
+              store.waiting?.delivered(policy.chatId,policy.topicId,ids.at(-1),text);
             } catch (error) {
               // Not delivered: the next pass reads this turn again and retries.
               store.del(sentKey(threadId,turnId));

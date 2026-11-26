@@ -15,7 +15,7 @@ import {cleanAssistantText,localArtifacts,renderTelegramParts} from "./telegram-
 import {readGroupImage,readGroupPdf,readGroupDocument} from "./group-pdf";
 import {outboundMessagePayload,plainFromHtml} from "./outbound-message";
 import {routedArtifactKind,routedCaption} from "./routed-message";
-import {ReplyRoutes, busyAnswerText, isBusyAnswer, stripTelegramMarkers} from "./reply-routing";
+import {ReplyRoutes, routeMarker, busyAnswerText, isBusyAnswer, stripTelegramMarkers} from "./reply-routing";
 import {voiceTranscripts} from "./archive";
 import {askNotes} from "./send-command";
 import {turnMessageKey} from "./owner-ask";
@@ -46,6 +46,16 @@ export async function tellCannotAnswer(store:Store,bot:number,owner:number,r:{ch
     // Marked only once it reached someone: a line nobody got is tried again with the next refusal.
     try { await transport(to)("sendMessage",{chat_id:to,text}); store.put(key,now); return; } catch { /* the next one */ }
   }
+}
+
+/**
+ * 0.9.79: a number for a job the bridge makes itself (a further labelled answer, a watched final): negative, so it never
+ * meets a Telegram update, unique, and growing in time — the queue goes by number, so later answers go later.
+ */
+export function nextSyntheticId(store:Store) {
+  const n=(store.get<number>("group:synthetic-seq") ?? 0)+1;
+  store.put("group:synthetic-seq",n);
+  return -(1e15-n);
 }
 
 export const sentInTurnKey=(threadId:string)=>"group:sent-in-turn:"+threadId;
@@ -81,7 +91,7 @@ export const editedInTurnKey=(threadId:string)=>"group:edited-in-turn:"+threadId
  */
 export function collectChain(store:Store,botId:number,job:Job) {
   const r=job.route;
-  const same=store.list<Job>(`group:in:${botId}:`).filter(({value:j})=>j.state==="pending" && j.ownerId===job.ownerId &&
+  const same=store.list<Job>(`group:in:${botId}:`).filter(({value:j})=>j.state==="pending" && !j.retryAfterPlugin && j.ownerId===job.ownerId &&
     j.revision===job.revision && j.route.chatId===r.chatId && j.route.topicId===r.topicId && j.route.threadId===r.threadId &&
     j.route.senderId===r.senderId && j.route.arrivedAt!==undefined && j.route.updateId>0)
     .sort((a,b)=>a.value.route.updateId-b.value.route.updateId);
@@ -122,6 +132,8 @@ type Job = {
   cursor?:number; turnId?:string; answer?:string; part?:number;
   /** Sent into a running turn: the selector of its separate answer; busyOnce — the plain retry is under way. */
   busyLabel?:string; busyOnce?:true;
+  /** A previous labelled reply is not a receipt for the final displaced by a plugin. */
+  retryAfterPlugin?:true;
   /** С45/С46: the visible sign and the live status of this message. */
   /** 0.9.77: the agent worked on after its message; a later message makes that one interim, not the answer. */
   interim?:true;
@@ -137,7 +149,9 @@ async function sendCaptioned(tg:Telegram,payload:(html:boolean)=>{method:string;
   });
 }
 type TurnWatch={threadId:string;turn:string;afterSeq:number;route:GroupInput;ownerId:number;revision?:string;at:number;
-  notices?:string[];scanned?:true;foreign?:true;final?:string};
+  final?:string; labelAt?:number; taskId?:string; replyTo?:number;
+  /** 0.9.79: the label of the message this watch follows and the last labelled answer already given to it. */
+  label?:string; labelled?:string};
 const GROUP_TOOL_ITEMS=new Set(["commandExecution","mcpToolCall","toolCall","fileChange","webSearch"]);
 
 // Keep thread ownership after disconnect: history may already contain group messages.
@@ -313,46 +327,129 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       canInvokeGroup(policy,owner,scope.senderId) &&
       (!policy.ownerSharedProject || !!await verifyOwnerForum?.(policy));
   },signal);
-  // One rule (0.9.76): after a labelled answer to a person's message, the same turn's unlabelled final goes to that
-  // person's place as a reply to the same message — unless the turn has another addressee: it was started by another
-  // person's message, or someone else's request (the owner from BB, another thread) joined it after the answer.
-  // Only a subthread's completion (a system notice) is nobody's request. A plugin's line (a watch, a limit notice)
-  // asks for an answer of its own — that answer must not reach the person: such a request takes the final away.
-  const notice=(d:any)=>d?.initiator==="system" || String(d?.systemMessageKind ?? "").startsWith("child-");
+  // A busy job starts observing at submission, possibly midway through a BB turn.
+  // Its first locally observed acceptance is insufficient proof of who started that turn.
+  async function* earlierEvents(threadId:string,before:number,types:Parameters<typeof sdk.threads.events.list>[0]["types"]) {
+    while (true) {
+      const page=await sdk.threads.events.list({threadId,beforeSeq:String(before),order:"desc",limit:"100",types,signal});
+      const events=page.filter(e=>e.seq<before).sort((a,b)=>b.seq-a.seq);
+      yield* events;
+      if (events.length<100) return;
+      before=events[events.length-1].seq;
+    }
+  }
+  async function acceptRequest(threadId:string,turn:string,id:string,seq:number) {
+    // A queued tell can be requested before our submission cursor, then accepted into our turn.
+    if (!routes.routeOf(threadId,id)) {
+      for await (const e of earlierEvents(threadId,seq,["client/turn/requested"])) {
+        if (e.type==="client/turn/requested" && e.data.requestId===id) {
+          routes.requested(threadId,e.data);
+          break;
+        }
+      }
+    }
+    routes.accept(threadId,turn,id);
+  }
+  // A plugin can request work before our cursor and join it later. Only requests
+  // actually accepted by this turn can claim its unlabelled reply.
+  async function pluginJoined(threadId:string,turn:string,through:number) {
+    const joined=new Set(routes.requestIds(threadId,turn).slice(1));
+    if (!joined.size) return false;
+    for await (const e of earlierEvents(threadId,through+1,["client/turn/requested"])) {
+      if (e.type!=="client/turn/requested" || !joined.delete(e.data.requestId)) continue;
+      const req=e.data;
+      if (req.originPluginId && req.originPluginId!=="telegram-projects" &&
+          !(req.initiator==="system" && req.systemMessageKind?.startsWith("child-"))) return true;
+      if (!joined.size) break;
+    }
+    return false;
+  }
+  function requestFinal(source:Pick<Job,"route"|"ownerId"|"revision"|"taskId"|"replyTo">):Job {
+    return {route:source.route,ownerId:source.ownerId,revision:source.revision,taskId:source.taskId,
+      replyTo:source.replyTo,state:"pending",acked:true,retryAfterPlugin:true};
+  }
+  const starters=new Map<string,string|undefined>();
+  async function starterRequest(threadId:string,turn:string,through:number) {
+    const key=JSON.stringify([threadId,turn]);
+    if (starters.has(key)) return starters.get(key);
+    let first:string|undefined;
+    for await (const e of earlierEvents(threadId,through+1,["turn/input/accepted","turn/completed"])) {
+      if (e.scope.kind!=="turn") continue;
+      if (e.type==="turn/completed" && e.scope.turnId!==turn) break;
+      if (e.type==="turn/input/accepted" && e.scope.turnId===turn) first=e.data.clientRequestId;
+    }
+    starters.set(key,first);
+    return first;
+  }
+  const destinationOf=(r:GroupInput)=>({kind:"telegram" as const,chatId:r.chatId,topicId:r.topicId,
+    updateId:r.updateId,messageId:r.messageId});
+  // Separate messages from one verified group author can share one final. This
+  // is a delivery decision only; it confers no permissions or delegated claims.
+  async function finalFor(r:GroupInput,turn:string,through:number) {
+    const dest=destinationOf(r);
+    const first=await starterRequest(r.threadId,turn,through);
+    const owners=routes.taskRequestIds(r.threadId,turn);
+    if (!first || first!==owners[0]) return;
+    const exact=routes.destination(r.threadId,turn);
+    if (exact) return routes.sameTask(exact,dest) ? "deliver" : undefined;
+    if (owners.length<2 || r.updateId<=0) return;
+    let latest=0, included=false;
+    for (const id of owners) {
+      const route=routes.routeOf(r.threadId,id);
+      if (route?.kind!=="telegram" || route.chatId!==r.chatId || route.topicId!==r.topicId ||
+          !route.messageId || route.updateId<=0 || routes.cancelled(route) ||
+          store.get<number>(turnAuthorKey(r.threadId,route.updateId))!==r.senderId) return;
+      latest=Math.max(latest,route.messageId);
+      if (routes.sameTask(route,dest)) included=true;
+    }
+    if (included) return r.messageId===latest ? "deliver" : "covered";
+  }
   for (const {key,value:w} of store.list<TurnWatch>(`group:turn-watch:${botId}:`)) {
     if (signal.aborted) return;
     if (Date.now()-w.at>6*3600_000) {store.del(key);continue;}
     let events;
     try {
-      // A notice may be requested before the labelled answer and taken into the turn after it.
-      if (!w.scanned) {
-        for (const e of await sdk.threads.events.list({threadId:w.threadId,afterSeq:String(Math.max(0,w.afterSeq-200)),order:"asc",
-            limit:"200",signal,types:["client/turn/requested"]}) as any[])
-          if (e.seq<=w.afterSeq && notice(e.data)) (w.notices??=[]).push(e.data.requestId);
-        w.scanned=true;
-      }
       events=await sdk.threads.events.list({threadId:w.threadId,afterSeq:String(w.afterSeq),order:"asc",limit:"100",signal,
         types:["client/turn/requested","turn/input/accepted","item/completed","turn/completed"]});
     } catch {continue;}
     let done=false;
     for (const e of events as any[]) {
+      const previous=w.afterSeq;
       w.afterSeq=Math.max(w.afterSeq,e.seq);
-      if (e.type==="client/turn/requested" && notice(e.data)) (w.notices??=[]).push(e.data.requestId);
+      if (e.type==="client/turn/requested") routes.requested(w.threadId,e.data);
       if (e.scope?.kind!=="turn" || e.scope.turnId!==w.turn) continue;
-      if (e.type==="turn/input/accepted" && !w.notices?.includes(e.data.clientRequestId)) w.foreign=true;
+      if (e.type==="turn/input/accepted") await acceptRequest(w.threadId,w.turn,e.data.clientRequestId,e.seq);
       if (e.type==="item/completed" && e.data.item?.type==="agentMessage" && !e.data.item.parentToolCallId &&
           !isBusyAnswer(e.data.item.text)) w.final=e.data.item.text;
+      // 0.9.79: another answer with the same label in this turn («прочитаю и пришлю», then the result) goes too, as a
+      // reply to the same message; only a word-for-word repeat of the last one is dropped.
+      const again=w.label && e.type==="item/completed" && e.data.item?.type==="agentMessage" && !e.data.item.parentToolCallId ?
+        busyAnswerText(e.data.item.text,w.label) : undefined;
+      if (again && sameWords(again)!==sameWords(w.labelled ?? "")) {
+        w.labelled=again;
+        const updateId=nextSyntheticId(store);
+        store.put(`group:in:${botId}:${updateId}`,{ownerId:w.ownerId,revision:w.revision,state:"ready",turnId:w.turn,
+          answer:again,...(w.replyTo && {replyTo:w.replyTo}),route:{...w.route,updateId}} satisfies Job);
+      }
       if (e.type==="turn/completed") {
         const said=stripTelegramMarkers(w.final ?? "").replace(/<!--[\s\S]*?-->/g,"").trim();
-        const started=routes.destination(w.threadId,w.turn);
-        const otherPerson=!!started && !routes.sameTask(started,w.route as never);
+        const ownsFinal=await finalFor(w.route,w.turn,e.seq)==="deliver";
         // Already sent into this place by command during the turn: no second copy.
         const wrote=store.get<{chat:number;topic:number;sent?:{at:number}[]}>(sentInTurnKey(w.threadId));
-        const sentHere=!!wrote && wrote.chat===w.route.chatId && wrote.topic===(w.route.topicId ?? 0) && (wrote.sent ?? []).some(x=>x.at>=w.at);
-        if (!otherPerson && !w.foreign && !sentHere && e.data.status==="completed" && said && said!==NO_REPLY) {
-          const updateId=-Date.now();
-          store.put(`group:in:${botId}:${updateId}`,{ownerId:w.ownerId,revision:w.revision,state:"ready",turnId:w.turn,
-            answer:w.final,route:{...w.route,updateId}} satisfies Job);
+        const sentHere=!!wrote && wrote.chat===w.route.chatId && wrote.topic===(w.route.topicId ?? 0) &&
+          (wrote.sent ?? []).some(x=>x.at>=(w.labelAt ?? w.at) && (e.createdAt===undefined || x.at<=e.createdAt));
+        store.waiting?.completed(w.threadId,w.turn,ownsFinal && sentHere && e.data.status==="completed");
+        if (ownsFinal && !sentHere && e.data.status==="completed" && said && said!==NO_REPLY) {
+          if (await pluginJoined(w.threadId,w.turn,e.seq)) {
+            const retryKey=`group:in:${botId}:${w.route.updateId}`;
+            // Finish sending the labelled reply before reusing its job key.
+            if (store.get(retryKey)) {w.afterSeq=previous;break;}
+            store.atomic(()=>{store.put(retryKey,requestFinal(w));store.del(key);});
+          } else {
+            const updateId=nextSyntheticId(store);
+            store.put(`group:in:${botId}:${updateId}`,{ownerId:w.ownerId,revision:w.revision,state:"ready",turnId:w.turn,
+              answer:w.final,route:{...w.route,updateId}} satisfies Job);
+          }
         }
         done=true; break;
       }
@@ -366,7 +463,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   }
   const pending=store.list<Job>(`group:in:${botId}:`);
   pending.sort((a,b)=>a.value.route.updateId-b.value.route.updateId);
-  for (const {key,value:job} of pending) {
+  jobs: for (const {key,value:job} of pending) {
     if (signal.aborted) return;
     const r=job.route;
     if (isTopicPaused(store,botId,r.chatId,r.topicId)) continue;
@@ -407,7 +504,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         !!binding && (!binding.ownerSharedProject || !thread.parentThreadId) &&
         groupThreadMatches(store,binding,thread.projectId);
     };
-    const dest={kind:"telegram" as const,chatId:r.chatId,topicId:r.topicId,updateId:r.updateId,messageId:r.messageId};
+    const dest=destinationOf(r);
     const reactionKey=`group:reaction:${botId}:${r.updateId}`;
     // Lazy: a transport that cannot be built must not break the job (the reaction is best effort).
     const reactTg:Telegram=(method,body)=>transport(r.chatId)(method,body);
@@ -440,6 +537,23 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         job.progressText=text; job.progressAt=Date.now(); store.put(key,job);
       } catch { /* A status failure must not stop the actual reply. */ }
     };
+    const finalUnavailable="Не удалось получить итог по вашему сообщению.";
+    if (job.retryAfterPlugin && job.state==="pending") {
+      const thread=await sdk.threads.get({threadId:r.threadId,signal});
+      const provider=thread.providerId;
+      const role=senderRole(store,botId,owner,r.chatId,r.senderId,provider);
+      if (executor || role==="none" || !belongsToGroup(thread)) {finish("revoked");continue;}
+      const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
+      if (!allowed() || !await safeToSend()) {finish("revoked");continue;}
+      const {token,label}=routes.labelledIngress(r.threadId,dest);
+      job.busyLabel=label; job.cursor=latest[0]?.seq ?? 0;
+      job.state="submitted"; job.submittedAt=Date.now();
+      // Persist before send: even an uncertain SDK receipt must never trigger another request.
+      store.put(key,job);
+      await sdk.threads.send({threadId:r.threadId,mode:"queue-if-active",
+        permissionMode:permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey)),
+        input:[{type:"text",mentions:[],text:`Итог по сообщению №${r.messageId} не доставлен человеку. Дай готовый итог одним сообщением: начни отдельной строкой [telegram-answer:${label}] и закончи строкой [/telegram-answer]. Работу не повторяй.`},routeMarker(token)]});
+    }
     if (job.state==="pending" && r.voice) {
       // С50: a long transcription in one chat never holds the others — it runs in the background and is taken
       // on a later pass.
@@ -640,9 +754,11 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       // otherwise one line (0.9.59).
       const rulesVersionKey="group:rules-version:"+r.threadId;
       const inForce=policy.projectId && turnRules ? await turnRules(policy.projectId).catch(()=>null) : null;
-      const rulesInForce=!inForce ? "" : store.get<string>(rulesVersionKey)===inForce.version
-        ? `Правила организации без изменений (версия ${inForce.version}).`
-        : `Правила обновлены (версия ${inForce.version}) и действуют с этого хода. Прежние формулировки правил в этом разговоре отменены — следуй этим:\n\n${inForce.text}`;
+      const placeRule="Итог хода в этом разговоре уходит человеку, чьё сообщение начало ход; ответ другому треду отправляй командой bb thread tell, не итогом.";
+      const rulesVersion=JSON.stringify([inForce?.version,placeRule]);
+      const changedRules=store.get<string>(rulesVersionKey)!==rulesVersion;
+      const rulesInForce=changedRules ? [inForce && `Правила обновлены (версия ${inForce.version}). Прежние формулировки правил в этом разговоре отменены — следуй этим:\n\n${inForce.text}`,placeRule].filter(Boolean).join("\n") :
+        inForce ? `Правила организации без изменений (версия ${inForce.version}).` : "";
       const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
       if (!allowed() || !await safeToSend()) {finish("revoked");continue;}
@@ -670,7 +786,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         input:[{type:"text",text:r.text,mentions:[]},...localInputs,...metadata,{type:"text" as const,visibility:"agent-only" as const,text:rules,mentions:[]},
           ...(rulesInForce ? [{type:"text" as const,visibility:"agent-only" as const,text:rulesInForce,mentions:[]}] : []),
           ...(taskNote ? [{type:"text" as const,visibility:"agent-only" as const,text:taskNote,mentions:[]}] : [])]});
-      if (inForce) store.put(rulesVersionKey,inForce.version);
+      if (changedRules) store.put(rulesVersionKey,rulesVersion);
       markHanded(store,r.threadId,r.windowUpTo);
     }
     if (job.state==="submitted") {
@@ -680,8 +796,32 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (e.type==="client/turn/requested") routes.requested(r.threadId,e.data);
         if (e.scope.kind==="turn") {
           const turn=e.scope.turnId;
-          if (e.type==="turn/input/accepted") routes.accept(r.threadId,turn,e.data.clientRequestId);
+          if (e.type==="turn/input/accepted") await acceptRequest(r.threadId,turn,e.data.clientRequestId,e.seq);
           const label=job.busyLabel;
+          if (job.retryAfterPlugin) {
+            if (label && routes.sameTask(routes.busyAnswer(r.threadId,turn,label),dest)) {
+              const item=e.type==="item/completed" ? e.data.item : undefined;
+              const body=item?.type==="agentMessage" && !item.parentToolCallId ? busyAnswerText(item.text,label) : undefined;
+              const result=body && stripTelegramMarkers(body).trim();
+              if (result && result!==NO_REPLY) {
+                job.answer=body; job.turnId=turn; job.state="ready";
+              } else if (e.type==="turn/completed") {
+                job.answer=finalUnavailable; job.stage="failed"; job.state="ready";
+              }
+            }
+            job.cursor=e.seq;
+            if (job.state==="ready") break;
+            continue;
+          }
+          const exact=routes.destination(r.threadId,turn);
+          let ownsFinal=routes.sameTask(exact,dest);
+          if (r.updateId>0 && (label || !exact) && (e.type==="turn/completed" || e.type==="item/completed")) {
+            const disposition=await finalFor(r,turn,e.seq);
+            ownsFinal=disposition==="deliver";
+            if (disposition==="covered" && e.type==="turn/completed") {
+              job.turnId=turn; job.answer=NO_REPLY; job.state="ready";
+            }
+          }
           if (label && routes.busyAnswer(r.threadId,turn,label)) {
             // This message joined a running turn: its answer is the enclosed one.
             const enclosed=e.type==="item/completed" && e.data.item.type==="agentMessage" && !e.data.item.parentToolCallId ?
@@ -689,17 +829,20 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
             if (enclosed) {
               job.turnId=turn; job.answer=enclosed; job.state="ready";
               // The turn goes on after this answer: if a subthread's completion joins it, its final is that result.
+              // The watch follows the rest of the turn: further answers with this label always; the unlabelled final
+              // only when the turn is this message's (checked again when the turn ends).
               store.put(`group:turn-watch:${botId}:${r.threadId}:${turn}`,{threadId:r.threadId,turn,afterSeq:e.seq,
-                route:r,ownerId:job.ownerId,revision:job.revision,at:Date.now()} satisfies TurnWatch);
+                route:r,ownerId:job.ownerId,revision:job.revision,at:Date.now(),labelAt:e.createdAt,taskId:job.taskId,replyTo:job.replyTo,
+                label,labelled:enclosed} satisfies TurnWatch);
             }
-            else if (e.type==="turn/completed" && !routes.sameTask(routes.destination(r.threadId,turn),dest)) {
+            else if (e.type==="turn/completed" && !ownsFinal) {
               // The turn ended without that answer: send the message again, in turn order — unless the bot has already
               // replied to it (С105): then it is answered and not given twice.
               if (answered(r)) {job.turnId=turn; job.answer=NO_REPLY; job.state="ready";}
               else {job.busyOnce=true; delete job.busyLabel; job.state="pending";}
             }
           }
-          if (job.state==="submitted" && routes.sameTask(routes.destination(r.threadId,turn),dest)) {
+          if (job.state==="submitted" && ownsFinal) {
             job.started=true;
             if (e.type==="item/started" && GROUP_TOOL_ITEMS.has(e.data.item.type)) {
               job.step=stepLabel(e.data.item as never);
@@ -708,7 +851,8 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
             }
             if (e.type==="item/completed" && e.data.item.type==="agentMessage" && !e.data.item.parentToolCallId) {
               const text=e.data.item.text;
-              job.agentLine??=firstLine(stripTelegramMarkers(text).replace(/\[\/?telegram-answer(?::[a-f0-9-]+)?\]/g,"").trim()) || undefined;
+              if (!job.agentLine && (r.updateId<=0 || isBusyAnswer(text) || !await pluginJoined(r.threadId,turn,e.seq)))
+                job.agentLine=firstLine(stripTelegramMarkers(text).replace(/\[\/?telegram-answer(?::[a-f0-9-]+)?\]/g,"").trim()) || undefined;
               // Answers to other messages that joined this turn are not this message's answer.
               const own=label ? busyAnswerText(text,label) : undefined;
               if (job.interim) {delete job.answer; delete job.interim;}
@@ -730,6 +874,11 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
               if (e.data.status!=="completed") {job.answer="Не получилось сделать — повторите или уточните, пожалуйста."; job.stage="failed";}
               else if (repeated) job.answer=NO_REPLY;
               else if (job.turnId!==turn || !job.answer?.trim()) job.answer=NO_REPLY;   // С79: no service line; the reaction stays
+              else if (r.updateId>0 && job.answer.trim()!==NO_REPLY && await pluginJoined(r.threadId,turn,e.seq)) {
+                store.put(key,{...requestFinal(job),progressId:job.progressId});
+                continue jobs;
+              }
+              store.waiting?.completed(r.threadId,turn,e.data.status==="completed" && here && job.answer===NO_REPLY);
               job.state="ready";
             }
           }
@@ -738,7 +887,10 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (job.state!=="submitted") break;
       }
       // A message the thread never took up (no turn, the thread idle) is given once more, then closed honestly.
-      if (job.state==="submitted" && !job.turnId && Date.now()-(job.submittedAt ?? 0)>LOST_SUBMIT_MS) {
+      if (job.retryAfterPlugin && job.state==="submitted" && events.length<100 && Date.now()-(job.submittedAt ?? 0)>LOST_SUBMIT_MS) {
+        job.answer=finalUnavailable; job.stage="failed"; job.state="ready";
+      }
+      if (!job.retryAfterPlugin && job.state==="submitted" && !job.turnId && Date.now()-(job.submittedAt ?? 0)>LOST_SUBMIT_MS) {
         const t=await sdk.threads.get({threadId:r.threadId,signal}).catch(()=>undefined);
         if (t && (t as {status?:string}).status!=="active") {
           if (answered(r)) {job.answer=NO_REPLY; job.state="ready";}
@@ -749,7 +901,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       store.put(key,job);
       // On the employee's pause a message waiting for its end shows only the «seen» sign; the live line comes when
       // its turn really starts.
-      if (job.state==="submitted" && (job.started || !await isPaused())) await updateProgress();
+      if (job.state==="submitted" && !job.retryAfterPlugin && (job.started || !await isPaused())) await updateProgress();
     }
     // С45: the bridge's service reaction over the chosen one: a question, a refusal or a failure.
     if (job.state==="ready" && job.stage && !job.stageShown && r.updateId>0) {
@@ -874,7 +1026,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         const sent=await sendCaptioned(transport(r.chatId),docPayload,caption!==undefined);
         if (!Number.isSafeInteger(sent?.message_id) || !sent.document?.file_id) throw Error("missing_document_receipt");
         job.pdfIndex=i+1;
-        if (caption) job.captionSent=true;
+        if (caption) {job.captionSent=true;store.waiting?.delivered(r.chatId,r.topicId,sent.message_id,plainFromHtml(caption));}
         store.atomic(()=>{
           if (kind==="pdf" && job.taskId) store.put("group:completed-pdf:"+job.taskId,sent.message_id);
           if (kind==="pdf" && "sha256" in document && "path" in document) store.put(`group:pdf:${botId}:${r.chatId}:${r.topicId}:${sent.message_id}`,{
@@ -911,7 +1063,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         const sent=await sendCaptioned(transport(r.chatId),photoPayload,caption!==undefined);
         if (!Number.isSafeInteger(sent?.message_id) || !sent.photo?.length) throw Error("missing_photo_receipt");
         job.imageIndex=i+1;
-        if (caption) job.captionSent=true;
+        if (caption) {job.captionSent=true;store.waiting?.delivered(r.chatId,r.topicId,sent.message_id,plainFromHtml(caption));}
         store.put(key,job);
       }
       if (!store.get(key)) continue;
@@ -926,7 +1078,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (!allowed() || !await safeToSend()) {finish("revoked");break;}
         store.put(key,{...job,state:"sending",part:i});
         const send=(html:boolean)=>{
-          const {method,body}=outboundMessagePayload({...reply,text:html ? parts[i] : plainFromHtml(parts[i]),html});
+          const {method,body}=outboundMessagePayload({...reply,replyTo:i===0 ? reply.replyTo : undefined,text:html ? parts[i] : plainFromHtml(parts[i]),html});
           return transport(r.chatId)(method,body);
         };
         const sent=await send(true).catch(error=>{
@@ -935,7 +1087,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         });
         if (job.taskId && Number.isSafeInteger(sent?.message_id))
           store.put(`group:task-message:${botId}:${r.chatId}:${r.topicId}:${sent.message_id}`,job.taskId);
-        if (i+1===parts.length) finish("done",sent?.message_id);
+        if (i+1===parts.length) {finish("done",sent?.message_id);store.waiting?.delivered(r.chatId,r.topicId,sent?.message_id,text);}
         else store.put(key,{...job,state:"ready",part:i+1});
       }
     } catch (error) {

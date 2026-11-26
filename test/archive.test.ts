@@ -212,3 +212,24 @@ test("С81: one message by its number in one call",()=>{
   assert.equal(one.author,"Алиса");
   assert.equal(a.message(BOT,TEAM,id+1000),undefined);
 });
+
+test("list previews name the full-message command; reading one message preserves text, Markdown and transcript",()=>{
+  const db=new Database(":memory:");
+  try{
+    const a=openArchive(db as any);
+    const text="🙂".repeat(1999)+" Конец макета. ".repeat(35);
+    const u=msg(TEAM,ALICE,"Мира",text,{entities:[{type:"text_link",offset:0,length:2,url:"https://example.invalid/map"}]});
+    a.record(BOT,u);
+    a.transcript(BOT,TEAM,u.message.message_id,text);
+    const row=a.message(BOT,TEAM,u.message.message_id)!;
+    assert.equal(row.text,text);
+    assert.equal(row.markdown,"[🙂](https://example.invalid/map)"+text.slice(2));
+    assert.equal(row.transcript,text);
+    const [preview]=a.find(BOT,()=>true,{last:1},"UTC");
+    for(const key of ["text","markdown","transcript"] as const){
+      const full=Array.from(row[key]!);
+      assert.equal(preview[key],full.slice(0,2000).join("")+
+        `…[обрезано: показано 2000 из ${full.length} знаков; полный текст — bb telegram-projects search-history --message ${TEAM}:${u.message.message_id}]`);
+    }
+  } finally {db.close();}
+});

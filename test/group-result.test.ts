@@ -246,3 +246,11 @@ test("owner return removes internal lines without changing the approved reply ta
   assert.equal(f.sent[0].text,"Approved");
   assert.deepEqual(f.sent[0].reply_parameters,{message_id:42,allow_sending_without_reply:false});
 });
+
+test("a queued group result preserves the next line after an unfinished local link",async()=>{
+  const {store,sent,tick}=fixture();
+  const text="• По просьбе Миры [лист](/макет\n• Уточнили сроки)";
+  queueGroupResult(store,2,1,"0",text);
+  await tick();
+  assert.deepEqual(sent.map(p=>p.text),[text]);
+});

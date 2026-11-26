@@ -1,4 +1,4 @@
-import {sameTelegramFilename} from "./send-outcome";
+import {sendOutcome,sameTelegramFilename} from "./send-outcome";
 import {createHash} from "node:crypto";
 import {closeSync,constants,fstatSync,openSync,readSync,realpathSync} from "node:fs";
 import {basename,isAbsolute,relative,sep} from "node:path";
@@ -113,6 +113,11 @@ export function telegramMessageId(sent:any,chatId:number) {
   return sent.message_id as number;
 }
 
+type TextMismatch = {received:number;expected:number};
+type ReceiptChecks = {
+  onUnverified?:()=>void;
+  onTextMismatch?:(mismatch:TextMismatch)=>void;
+};
 type MessagePayload = {
   chatId:number;topicId:number;replyTo?:number;text?:string;
   file?:Pick<OutboundFile,"kind"|"name"|"data">;
@@ -128,6 +133,15 @@ export function plainFromHtml(html:string) {
     .replace(/<[^>]+>/g,"").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,"&");
 }
 
+/** Normalize differences in the Telegram echo without changing the outgoing payload. */
+function receiptText(text:string) {
+  return text.replace(/&#(x[0-9a-f]+|[0-9]+);/gi,(entity,digits:string)=>{
+    const code=digits[0].toLowerCase()==="x" ? parseInt(digits.slice(1),16) : Number(digits);
+    return code>0 && code<=0x10ffff && !(code>=0xd800 && code<=0xdfff)
+      ? String.fromCodePoint(code) : entity;
+  }).replace(/\r\n/g,"\n").trim();
+}
+
 export function outboundMessagePayload(args:MessagePayload):{method:string;body:Record<string,unknown>} {
   const {chatId,topicId,replyTo,text,file,html,replyMarkup}=args;
   // A formatted caption counts by its visible words, as Telegram counts it.
@@ -141,12 +155,13 @@ export function outboundMessagePayload(args:MessagePayload):{method:string;body:
     return {method:"sendMessage",body:{...target,text,...(html && {parse_mode:"HTML"}),...(replyMarkup && {reply_markup:replyMarkup}),link_preview_options:{is_disabled:true}}};
   return {method:file.kind==="photo" ? "sendPhoto" : "sendDocument",body:{
     ...target,...(text!==undefined && {caption:text,...(html && {parse_mode:"HTML"})}),
+    ...(replyMarkup && {reply_markup:replyMarkup}),
     [file.kind]:file.data,[file.kind+"_filename"]:file.name,
     ...(file.kind==="document" && {disable_content_type_detection:true}),
   }};
 }
 
-export async function sendOutboundMessage(tg:Telegram,args:Omit<MessagePayload,"file">&{file?:OutboundFile}) {
+export async function sendOutboundMessage(tg:Telegram,args:Omit<MessagePayload,"file">&{file?:OutboundFile}&ReceiptChecks) {
   const {chatId,topicId,replyTo,file}=args;
   const {method,body}=outboundMessagePayload(args);
   const sent=await tg(method,body);
@@ -158,7 +173,15 @@ export async function sendOutboundMessage(tg:Telegram,args:Omit<MessagePayload,"
     throw Error("outbound_receipt_missing");
   if (file?.kind==="photo" && (!Array.isArray(sent?.photo) || !sent.photo.some((item:any)=>typeof item?.file_id==="string")))
     throw Error("outbound_receipt_missing");
-  return telegramMessageId(sent,chatId);
+  const id=telegramMessageId(sent,chatId);
+  const echo=file ? sent.caption : sent.text;
+  if (args.onTextMismatch && args.text!==undefined && typeof echo==="string") {
+    // Message.text contains the visible link label. The plain fallback was sent with its URL spelled out.
+    const expected=receiptText(args.html ? plainFromHtml(args.text.replace(/<[^>]+>/g,"")) : args.text);
+    const received=receiptText(echo);
+    if (received!==expected) args.onTextMismatch({received:Array.from(received).length,expected:Array.from(expected).length});
+  }
+  return id;
 }
 
 /**
@@ -193,22 +216,24 @@ export function formattedCaption(markdown:string) {
 
 /** A file with the agent's text: a formatted caption, or the formatted text and then the file when it is too long.
  * If Telegram rejects the formatting, the caption goes as plain words — the marks taken off, links as «name (address)». */
-export async function sendFormattedFile(tg:Telegram,args:{chatId:number;topicId:number;replyTo?:number;markdown?:string;file:OutboundFile}) {
-  const {markdown,...target}=args;
-  if (!markdown?.trim()) return sendOutboundMessage(tg,target);
+export async function sendFormattedFile(tg:Telegram,args:{chatId:number;topicId:number;replyTo?:number;markdown?:string;file:OutboundFile;replyMarkup?:Record<string,unknown>}, messageIds:number[] = [], checks:ReceiptChecks={}) {
+  const record=(id:number)=>{ messageIds.push(id); return id; };
+  const {markdown,...destination}=args;
+  const target={...destination,...checks};
+  if (!markdown?.trim()) return sendOutboundMessage(tg,target).then(record);
   const caption=formattedCaption(markdown);
   if (caption===undefined) {
-    await sendFormattedText(tg,{chatId:target.chatId,topicId:target.topicId,replyTo:target.replyTo,markdown});
+    messageIds.push(...await sendFormattedText(tg,{chatId:target.chatId,topicId:target.topicId,replyTo:target.replyTo,markdown,...checks}));
     // The text went: whatever becomes of the file, a repeat must not carry the text again.
-    return sendOutboundMessage(tg,target).catch(error=>{
+    return sendOutboundMessage(tg,{...target,replyTo:undefined}).catch(error=>{
       if (error && typeof error==="object") Object.assign(error,{textSent:true});
       throw error;
-    });
+    }).then(record);
   }
   return sendOutboundMessage(tg,{...target,text:caption,html:true}).catch(error=>{
     if (error instanceof TelegramFailure && error.code==="telegram_400") return sendOutboundMessage(tg,{...target,text:plainFromHtml(caption)});
     throw error;
-  });
+  }).then(record);
 }
 
 /**
@@ -243,20 +268,39 @@ export async function editFormatted(tg:Telegram,args:{chatId:number;messageId:nu
   });
 }
 
+export class TextPartFailure extends Error {
+  constructor(readonly outcome:"unknown"|"rejected", index:number, ids:number[], cause:unknown) {
+    const accepted=index ? `Ушли части 1–${index} (подтверждённые номера: ${ids.join(", ") || "нет"}). ` : "";
+    const next=outcome==="unknown"
+      ? `Не повторяй: часть ${index+1} могла дойти. Проверь сообщения в чате.`
+      : `Повтори только оставшееся, начиная с части ${index+1}.`;
+    super(`partial_send: messageIds=[${ids.join(",")}], part=${index+1}, ${String(cause)}. ${accepted}${next}`,{cause});
+  }
+}
+
 /**
  * Agent text to a group or a person: the same formatting as the owner's private chat (bold, italic, lists, code, links).
  * A part Telegram rejects as formatting goes as plain words. Returns the sent message IDs in order.
  */
-export async function sendFormattedText(tg:Telegram,args:{chatId:number;topicId:number;replyTo?:number;markdown:string;replyMarkup?:Record<string,unknown>}) {
+export async function sendFormattedText(tg:Telegram,args:{chatId:number;topicId:number;replyTo?:number;markdown:string;replyMarkup?:Record<string,unknown>}&ReceiptChecks) {
   const ids:number[]=[];
   const parts=renderTelegramParts(cleanAssistantText(args.markdown).trim());
   for (const [index,part] of parts.entries()) {
     // Buttons go under the last part only.
-    const target={chatId:args.chatId,topicId:args.topicId,replyTo:args.replyTo,...(index===parts.length-1 && args.replyMarkup && {replyMarkup:args.replyMarkup})};
-    ids.push(await sendOutboundMessage(tg,{...target,text:part,html:true}).catch(error=>{
-      if (error instanceof TelegramFailure && error.code==="telegram_400") return sendOutboundMessage(tg,{...target,text:plainFromHtml(part)});
-      throw error;
-    }));
+    const target={chatId:args.chatId,topicId:args.topicId,onTextMismatch:args.onTextMismatch,replyTo:index===0 ? args.replyTo : undefined,...(index===parts.length-1 && args.replyMarkup && {replyMarkup:args.replyMarkup})};
+    try {
+      ids.push(await sendOutboundMessage(tg,{...target,text:part,html:true}).catch(error=>{
+        if (error instanceof TelegramFailure && error.code==="telegram_400") return sendOutboundMessage(tg,{...target,text:plainFromHtml(part)});
+        throw error;
+      }));
+    } catch (error) {
+      const outcome=sendOutcome(error);
+      if (outcome==="delivered") {
+        args.onUnverified?.();
+        continue;
+      }
+      throw new TextPartFailure(outcome,index,ids,error);
+    }
   }
   return ids;
 }

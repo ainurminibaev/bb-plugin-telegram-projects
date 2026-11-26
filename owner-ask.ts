@@ -40,7 +40,7 @@ export function ownerQuestion(args: {store: Store; bot: number; owner: number; p
   return [
     `Вопрос из ${args.place}${who ? `. Просит: ${who}` : ""}.`,
     link ? `Исходная просьба: ${link}` : "",
-    body.length > 3500 ? body.slice(0, 3500) + "…" : body,
+    body,
     "Ответьте кнопкой или ответом на это сообщение.",
   ].filter(Boolean).join("\n");
 }

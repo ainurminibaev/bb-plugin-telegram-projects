@@ -1568,7 +1568,7 @@ test("Telegram rendering preserves links, escaping, lists, code and long text", 
   const source = '# Заголовок\n**Жирный** и *курсив*\n- [Источник](https://example.org/?a=1&b=2)\n`x < y`\n' + '**' + 'Длинный ответ '.repeat(800) + '**';
   const parts = renderTelegramParts(source);
   assert.ok(parts.length > 2);
-  assert.ok(parts.every(p => p.length < 4096));
+  assert.ok(parts.every(p => p.length <= 4096));
   const all = parts.join('');
   assert.ok(all.includes('<a href="https://example.org/?a=1&amp;b=2">Источник</a>'));
   assert.ok(all.includes('<code>x &lt; y</code>'));
@@ -3571,4 +3571,42 @@ test("С102: an employee's owner chat with no project hears a plain line; with t
     assert.ok(f.sent.some(m => m.text === "Сейчас не могу ответить: меня ещё не до конца настроили. Я уже сообщил тем, кто меня настраивает."));
     assert.ok(!f.sent.some(m => /project|BB/.test(m.text ?? "")));
   } finally { f.cleanup(); }
+});
+
+test("private final keeps prose after an unfinished local link", async () => {
+  const f=fixture();
+  try {
+    const text="• По просьбе Миры [лист](/макет\n• Уточнили сроки)";
+    await f.bridge.handle(f.input("Run"));
+    f.acceptTelegramTurn("t");
+    f.setEvents([
+      {seq:1,type:"item/completed",scope:{kind:"turn",turnId:"t"},data:{item:{type:"agentMessage",text}}},
+      {seq:2,type:"turn/completed",scope:{kind:"turn",turnId:"t"},data:{status:"completed"}}
+    ]);
+    await f.bridge.observe(); await f.bridge.flush();
+    assert.ok(f.sent.some(p => p.text === text));
+  } finally {f.cleanup();}
+});
+
+test("a forwarded 2476-character private message reaches the agent in full, and a long reply quote is labelled",async()=>{
+  const text="Данные по макету. ".repeat(160).slice(0,2459)+" Последняя точка\n";
+  assert.equal(text.length,2476);
+  for(const mode of ["forward","incoming","reply"]){
+    const f=fixture();
+    try {
+      const chat={id:OWNER_ID,type:"private"};
+      const msg={message_id:64,chat,message_thread_id:100,from:{id:OWNER_ID},text:mode==="reply"?"Проверь результат":text,
+        ...(mode==="forward" && {forward_origin:{type:"hidden_user",sender_user_name:"Мира",date:5}}),
+        ...(mode==="reply" && {reply_to_message:{message_id:63,chat,message_thread_id:100,text}})};
+      const routed=routeUpdate({update_id:126,message:msg},OWNER_ID);
+      assert.equal(routed.kind,"chat");
+      if(routed.kind!=="chat") throw Error("missing input");
+      await f.bridge.handle(routed.input);
+      const prompt=f.calls.find(c=>c[0]==="spawn")[1].input[0].text;
+      if(mode==="reply"){
+        assert.ok(prompt.includes(text.slice(0,2000)+"…[обрезано: показано 2000 из 2476 знаков"));
+        assert.ok(prompt.includes("search-history --message "+OWNER_ID+":63]"));
+      } else assert.ok(prompt.includes(text));
+    } finally { f.cleanup(); }
+  }
 });

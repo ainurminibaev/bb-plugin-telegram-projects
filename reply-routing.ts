@@ -84,9 +84,9 @@ export class ReplyRoutes {
   }
   // The reply label is public in the native timeline and carries no permission
   // to delegate. The separate hidden ingress token proves the native request.
-  busyIngress(threadId: string, route: Extract<ReplyRoute, {kind: "telegram"}>, digest?: string, sender?: string) {
+  labelledIngress(threadId: string, route: Extract<ReplyRoute, {kind: "telegram"}>, digest?: string) {
     const token = randomUUID();
-    const marker = this.ingress(threadId, route, undefined, undefined, digest, token);
+    this.ingress(threadId, route, undefined, undefined, digest, token);
     const uuid = randomUUID();
     const short = uuid.slice(0, 8);
     const reserved = "reply:busy-selector:" + short;
@@ -100,7 +100,11 @@ export class ReplyRoutes {
       }
       this.store.put("reply:busy-ingress:" + token, label);
     });
-    return [marker, {type: "text" as const, visibility: "agent-only" as const, mentions: [],
+    return {token,label};
+  }
+  busyIngress(threadId: string, route: Extract<ReplyRoute, {kind: "telegram"}>, digest?: string, sender?: string) {
+    const {token,label}=this.labelledIngress(threadId,route,digest);
+    return [routeMarker(token,true), {type: "text" as const, visibility: "agent-only" as const, mentions: [],
       text: (sender ? "This Telegram message from " + sender + " in the group arrived while work was running. Answer it promptly in a separate public assistant message. "
         : "This private Telegram message arrived while work was running. Answer the owner's message promptly in a separate public assistant message. ") +
         "Start that message with this line exactly: [telegram-answer:" + label + "]. On the following lines write only the answer intended for this message. " +
@@ -489,6 +493,11 @@ export class ReplyRoutes {
   /** Запросы, из которых состоит ход (первый — исходное сообщение). */
   requestIds(threadId: string, turnId: string) {
     return this.store.get<TurnRoutes>(this.turnKey(threadId, turnId))?.requestIds ?? [];
+  }
+  /** Independent submissions, excluding busy replies and service inputs that joined the task. */
+  taskRequestIds(threadId:string,turnId:string) {
+    const turn=this.store.get<TurnRoutes>(this.turnKey(threadId,turnId));
+    return turn ? this.owningRequests(threadId,turn) : [];
   }
   routeOf(threadId: string, requestId: string) {
     return this.store.get<ReplyRoute>(this.requestKey(threadId, requestId));

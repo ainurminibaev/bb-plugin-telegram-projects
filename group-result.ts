@@ -243,16 +243,16 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     try {
       // The same formatting as the private chat; plain words if Telegram rejects it.
       let sent:any;
-      for (const part of renderTelegramParts(cleanAssistantText(text))) {
+      for (const [index,part] of renderTelegramParts(cleanAssistantText(text)).entries()) {
         const body={chat_id:chatId,message_thread_id:topicId||undefined,
-          reply_parameters:{message_id:origin.messageId,allow_sending_without_reply:false}};
+          ...(index===0 && {reply_parameters:{message_id:origin.messageId,allow_sending_without_reply:false}})};
         sent=await transport(chatId)("sendMessage",{...body,text:part,parse_mode:"HTML"}).catch(error=>{
           if (error instanceof TelegramFailure && error.code==="telegram_400")
             return transport(chatId)("sendMessage",{...body,text:plainFromHtml(part)});
           throw error;
         });
       }
-      if (Number.isSafeInteger(sent?.message_id) && sent.message_id>0) finish("sent",sent.message_id);
+      if (Number.isSafeInteger(sent?.message_id) && sent.message_id>0) {finish("sent",sent.message_id);store.waiting?.delivered(chatId,topicId,sent.message_id,text);}
     } catch (error) {
       if (error instanceof TelegramFailure && !error.ambiguous) finish("rejected");
     }

@@ -36,7 +36,9 @@ test("send with one file: the caption goes as Telegram HTML; if Telegram rejects
   assert.equal(calls.length,2); assert.equal(calls[1].body.parse_mode,undefined);
   assert.doesNotMatch(String(calls[1].body.caption),/\*\*|<b>/);
   calls.length=0;
-  await sendFormattedFile(tg(false),{chatId:-7,topicId:3,markdown:text.repeat(2),file});
+  const ids:number[]=[];
+  await sendFormattedFile(tg(false),{chatId:-7,topicId:3,markdown:text.repeat(2),file},ids);
+  assert.deepEqual(ids,[9,9]);
   assert.deepEqual(calls.map(c=>c.method),["sendMessage","sendDocument"],"too long for a caption: the formatted text, then the file");
   assert.equal(calls[1].body.caption,undefined);
 });
@@ -63,4 +65,14 @@ test("edit: a file's caption is edited by editMessageCaption, formatted; a text 
   assert.equal(calls.length,2); assert.equal(calls[1].body.parse_mode,undefined);
   assert.doesNotMatch(String(calls[1].body.caption),/\*\*|<b>/,"a refused formatting — plain words without marks");
   await assert.rejects(editFormatted(tg(false),{chatId:-7,messageId:359,markdown:text.repeat(2),caption:true}),/edit_caption_too_long/);
+});
+
+test("a caption and its edit keep prose following an unfinished link",async()=>{
+  const markdown="• По просьбе Миры [лист](/макет\n• Уточнили сроки)";
+  assert.equal(formattedCaption(markdown),markdown);
+  const tg:Telegram=async<T>(_method,body)=>{
+    assert.equal(body.caption,markdown);
+    return true as T;
+  };
+  await editFormatted(tg,{chatId:-7,messageId:9,markdown,caption:true});
 });

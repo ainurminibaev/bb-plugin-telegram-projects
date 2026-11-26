@@ -33,7 +33,7 @@ export function dropThreadLinks(text: string): string {
 /** Only public assistant text enters this formatter; never feed reasoning items. */
 export function cleanAssistantText(text: string): string {
   return dropThreadLinks(stripTelegramMarkers(text)
-    .replace(/\[([^\]]+)\]\((?:\/|file:\/\/)[^)]+\)/g, "$1"))
+    .replace(/\[([^\[\]\r\n]+)\]\((?:\/|file:\/\/)[^\s()]+\)/g, "$1"))
     .replace(/(?:\/srv\/projects\/|\/root\/|\/Users\/)[^\s<>`"')\]]+/g, (path) => path.split("/").filter(Boolean).pop() || "файл проекта");
 }
 
@@ -57,7 +57,7 @@ export function localArtifacts(text: string, options: {relative?: boolean} = {})
   const found: {markdown: string; path: string; label: string; asDocument?: boolean; relative?: boolean}[] = [];
   // Empty labels allow a file without a caption. Relative paths are an
   // opt-in; the caller resolves them inside the permitted workspace.
-  const pattern = /!?\[([^\]]*)\]\((<[^>]+>|[^\n)]+)\)/g;
+  const pattern = /!?\[([^\[\]\r\n]*)\]\((<[^>\r\n]+>|[^\r\n)]+)\)/g;
   for (const m of text.matchAll(pattern)) {
     const titled = m[2].match(/^(.*?)\s+"telegram:document"$/);
     let path = (titled ? titled[1] : m[2]).replace(/^<|>$/g, "").replace(/^file:\/\//, "");
@@ -74,23 +74,48 @@ export function localArtifacts(text: string, options: {relative?: boolean} = {})
 
 /** Split rendered HTML, preserving complete entities, links and balanced tags. */
 export function renderTelegramParts(markdown: string): string[] {
-  const html = markdownExcerpt(markdown, markdown.length + 1);
-  const parts: string[] = [];
-  const stack: {open: string; close: string}[] = [];
-  let part = "";
-  const close = () => stack.slice().reverse().map(t => t.close).join("");
-  for (const token of html.match(/<[^>]*>|&(?:#\d+|#x[\da-f]+|\w+);|[^<&]+|[<&]/gi) || []) {
-    const chunks = token.startsWith("<") || token.startsWith("&") ? [token] : Array.from(token);
-    for (const unit of chunks) {
-      if (part.length + unit.length + close().length > 3500 && part) {
-        parts.push(part + close()); part = stack.map(t => t.open).join("");
-      }
-      part += unit;
-      const opening = unit.match(/^<(b|i|code|pre|a)(?:\s[^>]*)?>$/);
-      if (opening) stack.push({open: unit, close: `</${opening[1]}>`});
-      else if (/^<\//.test(unit)) stack.pop();
+  // An anchor whose address alone exceeds a message cannot be reopened there.
+  // Keep its label and address as visible text so the URL can span messages.
+  const html = markdownExcerpt(markdown, markdown.length + 1).replace(
+    /<a href="([^"]+)">([^\n]*?)<\/a>/g,
+    (link, href:string, label:string) => href.length + 64 > 4096 ? (label===href ? href : label+" ("+href+")") : link,
+  );
+  const limit = 4096;
+  if (html.length <= limit) return html ? [html] : [];
+  const units = html.match(/<[^>]+>|&(?:#\d+|#x[\da-f]+|\w+);|./gsu) ?? [];
+  type Tag = {open:string; close:string};
+  type Boundary = {end:number; tags:Tag[]};
+  let start = 0;
+  let carried:Tag[] = [];
+  const parts:string[] = [];
+  while (start < units.length) {
+    let tags = carried;
+    const opening = carried.map(t=>t.open).join("");
+    let length = opening.length;
+    let best:Boundary|undefined;
+    let priority = -1;
+    let end = start;
+    for (; end < units.length; end++) {
+      const unit = units[end];
+      let next = tags;
+      if (unit.startsWith("</")) next = tags.slice(0,-1);
+      else if (unit.startsWith("<")) next = [...tags,{open:unit,close:"</"+unit.match(/^<(\w+)/)![1]+">"}];
+      const reserved = next.reduce((sum,t)=>sum+t.close.length,0);
+      if (length+unit.length+reserved > limit) break;
+      tags = next;
+      length += unit.length;
+      // Prefer semantic boundaries in the final third. Earlier ones leave a short message.
+      if (length < limit*2/3 || unit.startsWith("<") || tags.some(t=>t.close==="</a>")) continue;
+      const previous = units[end-1];
+      const rank = unit==="\n" ? (previous==="\n" ? 4 : 3)
+        : /\s/u.test(unit) ? (/[.!?…]$/u.test(previous ?? "") ? 2 : 1) : 0;
+      if (rank >= priority) { priority=rank; best={end:end+1,tags}; }
     }
+    const cut = end===units.length || !best ? {end,tags} : best;
+    if (cut.end===start) throw Error("telegram_markup_too_long");
+    parts.push(opening+units.slice(start,cut.end).join("")+cut.tags.map(t=>t.close).reverse().join(""));
+    start=cut.end;
+    carried=cut.tags;
   }
-  if (part) parts.push(part + close());
   return parts;
 }

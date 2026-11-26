@@ -220,3 +220,9 @@ test("0.9.74: several groups fit a name — a refusal naming them, never the fir
   s.put("group:moved:-1003", -1002);
   assert.equal(findGroup(s, 5, "прогоны (старый)"), -1002);
 });
+
+test("a long group report to the owner keeps its final paragraph", () => {
+  const body = "Проверили макет.\n".repeat(300) + "Последняя запись.";
+  const result = ownerReport(setup() as any, BOT, {kind:"group", chat:TEAM}, body, false);
+  assert.ok("text" in result && result.text.endsWith(body));
+});

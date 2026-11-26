@@ -154,6 +154,7 @@ export async function applyForumTopicChange(store:Store,bot:number,chatId:number
     store.put(key,"uncertain");
     throw Error("forum_topic_unconfirmed");
   }
+  if (action!=="reopen") store.waiting?.clear(chatId,topic);
   store.atomic(()=>{
     if (action==="reopen") store.put(key,"open");
     else if (action==="close") store.put(key,"closed");

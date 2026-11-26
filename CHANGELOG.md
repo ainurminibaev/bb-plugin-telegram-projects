@@ -1,3 +1,11 @@
+# 0.9.79
+
+- A turn a person started gets its final: the group's final goes to the verified person who started the turn (a route comparison dropped it); two messages of one person give one final; a message of another thread joining the turn no longer cancels the delivery; when a plugin's request claims the turn's final, the finished result is asked for once and one line goes to the person (inventory № 42).
+- Long texts: a message read from the archive by number comes whole; previews say they are cut; a long send is split into any number of parts in order, with all message numbers in the answer; a partial send says what went; Telegram's receipt is compared by length — under 90 % of the characters is flagged and exits 1 (inventory № 41).
+- С115 «waiting for the owner» state of an owner's forum topic: an agent's question sets it, the owner's answer clears it, `waiting` lists it, an external command is called on changes. Off by default (setting).
+
+Not checked live: two consecutive messages of one person in an owner's forum topic joining one turn without a busy-answer label (in live tests the second received a busy-answer label; covered by unit tests, and two consecutive messages in private chat gave one answer); the plugin-veto branch (`requestFinal` when a plugin claims the turn final); Telegram receipt loss over 10 % (cannot be forced against live Telegram API) — all covered by unit tests (650/650).
+
 # 0.9.78
 
 - Fix: in a forum topic a colleague agent bot created, messages addressed to this bot were dropped at the door — the first one (every topic message formally answers the «topic created» root, and that root was the bot's) and the bot's own follow-up replying to its earlier message. The topic root and a reply to one's own message no longer count as «a reply to another bot»; a reply to another bot's message stays not ours, even with this bot mentioned. People writing with a mention in such a topic were dropped the same way and are taken now.

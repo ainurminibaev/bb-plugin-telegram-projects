@@ -112,3 +112,8 @@ test("С83: a question posted into the topic the work came from is answered ther
   assert.deepEqual(delivered, [`${ask.id}:да`]);
   assert.ok(edits.some(([chat, m, id]) => chat === -1001 && m === "editMessageReplyMarkup" && id === -1001));
 });
+
+test("a long owner question keeps its final paragraph", () => {
+  const body = "Проверить макет?\n".repeat(300) + "Последний вопрос?";
+  assert.ok(ownerQuestion({store: {} as never, bot: 71, owner: 72, place: "группы", body}).includes(body));
+});

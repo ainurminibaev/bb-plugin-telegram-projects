@@ -106,15 +106,25 @@ export function localSeconds(value:string,timeZone:string,end:boolean) {
 
 export const FILE_REMOVED="файл удалён по сроку";
 
-/** A stored message as the agent sees it in search results. */
-function toResult(r:any) {
+/** A bounded excerpt always points back to the exact message, including its chat. */
+export function messageExcerpt(text:string,limit:number,chat:number,message:number) {
+  if (text.length<=limit) return text;
+  const chars=Array.from(text);
+  if (chars.length<=limit) return text;
+  return chars.slice(0,limit).join("")+
+    `…[обрезано: показано ${limit} из ${chars.length} знаков; полный текст — bb telegram-projects search-history --message ${chat}:${message}]`;
+}
+
+/** A single-message lookup returns complete fields. Search lists use labelled excerpts. */
+function toResult(r:any,full:boolean) {
+  const field=(value:string)=>full ? value : messageExcerpt(value,2000,r.chat,r.message);
   return {chat:r.chat,chatTitle:r.chat_title,topic:r.topic,message:r.message,
         date:new Date(r.date*1000).toISOString(),author:r.sender_name,authorId:r.sender,replyTo:r.reply_to??undefined,
         album:r.album??undefined,file:r.file_id ? {kind:r.file_kind,name:r.file_name??undefined,size:r.file_size??undefined} :
           r.file_removed ? {kind:r.file_kind,name:r.file_name??undefined,removed:FILE_REMOVED} : undefined,
-        text:String(r.text).slice(0,2000),
+        text:field(String(r.text)),
         // The form with links and formatting, only where it differs from the text; the same length limit.
-        markdown:r.markdown && r.markdown!==r.text ? String(r.markdown).slice(0,2000) : undefined,transcript:r.transcript ? String(r.transcript).slice(0,2000) : undefined,
+        markdown:r.markdown && r.markdown!==r.text ? field(String(r.markdown)) : undefined,transcript:r.transcript ? field(String(r.transcript)) : undefined,
         link:String(r.chat).startsWith("-100") && r.message>0 ? `https://t.me/c/${String(r.chat).slice(4)}/${r.topic ? r.topic+"/" : ""}${r.message}` : undefined};
 }
 
@@ -194,12 +204,17 @@ export function openArchive(db:Database) {
         return [w,cyrToLat(w),latToCyr(w)].some(v=>{const t=trigrams(v);return t.length && t.filter(g=>r.search.includes(g)).length>=Math.ceil(t.length*0.6);});
       });
       const found=(words.length ? rows.filter(matches) : rows).slice(0,q.last ?? 30);
-      return found.reverse().map(toResult);
+      return found.reverse().map(r=>toResult(r,false));
     },
     /** С81: one message by its number, as a search result; the agent reads the text of a message it was answered to. */
     message(bot:number,chat:number,message:number) {
       const r=db.prepare("SELECT * FROM archive WHERE bot=? AND chat=? AND message=?").get(bot,chat,message) as any;
-      return r ? toResult(r) : undefined;
+      return r ? toResult(r,true) : undefined;
+    },
+    recentTopicText(bot:number,chat:number,topic:number,before:number) {
+      const rows=db.prepare("SELECT text FROM archive WHERE bot=? AND chat=? AND topic=? AND message<? ORDER BY message DESC LIMIT 3")
+        .all(bot,chat,topic,before) as {text:string}[];
+      return rows.reverse().map(row=>row.text);
     },
     /** С103: when the bot itself last wrote in this chat (and topic, when given), in Telegram seconds. */
     lastSent(bot:number,chat:number,topic?:number) {

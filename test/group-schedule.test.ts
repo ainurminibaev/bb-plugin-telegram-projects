@@ -24,7 +24,7 @@ test("a schedule's result goes to the topic where it was set; silent runs and ot
   await run(); // starts at the present
   ev("client/turn/requested",{requestId:"a",originPluginId:"automations"});
   ev("turn/input/accepted",{clientRequestId:"a"},"ta");
-  ev("item/completed",{item:{type:"agentMessage",text:"Статус: всё по плану"}},"ta");
+  ev("item/completed",{item:{type:"agentMessage",text:"Статус: всё по плану [лист](/макет\n• По просьбе Миры уточнили сроки)"}},"ta");
   ev("turn/completed",{status:"completed"},"ta");
   ev("client/turn/requested",{requestId:"b",originPluginId:"telegram-projects"});
   ev("turn/input/accepted",{clientRequestId:"b"},"tb");
@@ -36,10 +36,10 @@ test("a schedule's result goes to the topic where it was set; silent runs and ot
   ev("turn/completed",{status:"completed"},"tc");
   ev("client/turn/requested",{requestId:"d",initiator:"system",systemMessageKind:"child-completed"});
   ev("turn/input/accepted",{clientRequestId:"d"},"td");
-  ev("item/completed",{item:{type:"agentMessage",text:"Подтред посчитал: 16 файлов"}},"td");
+  ev("item/completed",{item:{type:"agentMessage",text:"Подтред посчитал: 16 файлов [лист](/макет\n• По просьбе Миры уточнили сроки)"}},"td");
   ev("turn/completed",{status:"completed"},"td");
   await run(); await run();
-  assert.deepEqual(sent.map(p=>[p.chat_id,p.message_thread_id,p.text]),[[-1001,7,"Статус: всё по плану"],[-1001,7,"Подтред посчитал: 16 файлов"]]);
+  assert.deepEqual(sent.map(p=>[p.chat_id,p.message_thread_id,p.text]),[[-1001,7,"Статус: всё по плану [лист](/макет\n• По просьбе Миры уточнили сроки)"],[-1001,7,"Подтред посчитал: 16 файлов [лист](/макет\n• По просьбе Миры уточнили сроки)"]]);
   // A subthread's notice that joined a running Telegram task: the task's own delivery answers, nothing twice.
   store.put("group:in:5:77",{state:"submitted",route:{threadId:"t"}});
   ev("client/turn/requested",{requestId:"e",initiator:"system",systemMessageKind:"child-completed"});

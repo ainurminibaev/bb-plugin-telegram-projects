@@ -22,13 +22,17 @@ test("worker delivers only its completed turn into the bound forum topic",async(
  store.put("group:thread:t","group:policy:-1001:3");
  store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
  assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"}},7,5));
- const events:any[]=[];
+ const events:any[]=[{type:"client/turn/requested",data:{requestId:"B",initiator:"agent",senderThreadId:"thr_sender"},
+   seq:1,scope:{kind:"thread"}}];
  const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
  send:async(q:any)=>{
    function event(type:string,data:any,turnId:string){events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId}});}
-   for(const [id,text,input] of [["other","private",[]],["group","answer",q.input]] as const){
+   for(const [id,text,input] of [["other","private",[]],["group","answer [лист](/макет\n• По просьбе Миры уточнили сроки)",q.input]] as const){
      event("client/turn/requested",{requestId:id,originPluginId:id==="group"?"telegram-projects":undefined,input},id);
      event("turn/input/accepted",{clientRequestId:id},id);
+     if (id==="group") {
+       event("turn/input/accepted",{clientRequestId:"B"},id);
+     }
      event("item/completed",{item:{type:"agentMessage",text}},id);
      event("turn/completed",{status:"completed"},id);
    }
@@ -41,7 +45,7 @@ test("worker delivers only its completed turn into the bound forum topic",async(
  assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"}},7,5));
  assert.equal(rows.has("group:in:5:8"),false);
  await tick();
- assert.deepEqual(sent,[[-1001,{chat_id:-1001,message_thread_id:3,reply_parameters:{message_id:10,allow_sending_without_reply:false},text:"answer",parse_mode:"HTML",link_preview_options:{is_disabled:true}}]]);
+ assert.deepEqual(sent,[[-1001,{chat_id:-1001,message_thread_id:3,reply_parameters:{message_id:10,allow_sending_without_reply:false},text:"answer [лист](/макет\n• По просьбе Миры уточнили сроки)",parse_mode:"HTML",link_preview_options:{is_disabled:true}}]]);
 });
 
 test("a private project and another topic cannot claim the same group thread",()=>{
@@ -453,6 +457,7 @@ for (const kind of ["photo","document"] as const) test(`forum ${kind} album subm
 });
 
 test("a group message that arrives while the thread works joins the running turn and gets its own answer",async()=>{
+ for (const starter of ["person","thread"] as const) {
  const rows=new Map<string,any>();
  const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
    list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
@@ -463,7 +468,7 @@ test("a group message that arrives while the thread works joins the running turn
  let status="idle", enclose=true;
  const event=(type:string,data:any,turnId:string)=>events.push({type,data,seq:events.length+1,scope:{kind:"turn",turnId}});
  const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible",status}),
-   events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
+   events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0) && e.seq<Number(q.beforeSeq??Infinity) && (!q.types || q.types.includes(e.type))).sort((a,b)=>q.order==="desc" ? b.seq-a.seq : a.seq-b.seq).slice(0,Number(q.limit??100))},
    send:async(q:any)=>{sends.push(q);
      const id="r"+sends.length;
      event("client/turn/requested",{requestId:id,originPluginId:"telegram-projects",input:q.input},sends.length===1||q.mode!=="steer-if-active"?id:"r1");
@@ -481,14 +486,59 @@ test("a group message that arrives while the thread works joins the running turn
      }
    }}};
  const sent:any[]=[];
- const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{if(_m==="setMessageReaction")return {} as T;sent.push(p.text);return {} as T},new AbortController().signal);
- assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"долгая задача"}},7,5));
- await tick();
+ const tick=()=>processGroupInputs(store,sdk as any,7,5,id=>async <T>(_m:string,p:any)=>{if(_m==="setMessageReaction")return {} as T;sent.push([p.reply_parameters?.message_id,p.text]);return {} as T},new AbortController().signal);
+ if (starter==="person") {
+   assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"долгая задача"}},7,5));
+   await tick();
+ }
+ event("client/turn/requested",{requestId:"B",initiator:"agent",senderThreadId:"thr_sender"},"r1");
+ event("turn/input/accepted",{clientRequestId:"B"},"r1");
  status="active";
  assert.ok(acceptGroupUpdate(store,{update_id:9,message:{message_id:11,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"а сколько времени?"}},7,5));
  await tick(); await tick(); await tick();
- assert.equal(sends[1].mode,"steer-if-active");
- assert.deepEqual(sent.sort(),["быстрый ответ","долгий ответ"],"each message gets its own answer; the enclosed one is not the long answer");
+ assert.equal(sends.at(-1).mode,"steer-if-active");
+ assert.deepEqual(sent.sort(),starter==="person" ? [[10,"долгий ответ"],[11,"быстрый ответ"]] : [[11,"быстрый ответ"]]);
+ }
+});
+
+test("independent group inputs share a final only for the same author and topic",async()=>{
+ for (const secondSender of [7,9]) {
+   const rows=new Map<string,any>();
+   const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+     list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+   store.put("group:project:project",true);
+   store.put("group:thread:t","group:policy:-1001:3");
+   store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",ownerOnly:false,requireMention:false});
+   store.put("rights:5:access",[{id:9,name:"Анна"}]);
+   const events:any[]=[], sent:any[]=[];
+   const event=(type:string,data:any)=>events.push({seq:events.length+1,type,data,scope:{kind:"turn",turnId:"T"}});
+   let submits=0;
+   const sdk={threads:{get:async()=>({id:"t",projectId:"project",visibility:"visible",status:"idle"}),
+     events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0) && e.seq<Number(q.beforeSeq??Infinity) &&
+       (!q.types || q.types.includes(e.type))).sort((a,b)=>q.order==="desc" ? b.seq-a.seq : a.seq-b.seq).slice(0,Number(q.limit??100))},
+     send:async(q:any)=>{
+       assert.equal(q.mode,"queue-if-active");
+       event("client/turn/requested",{requestId:String(++submits),originPluginId:"telegram-projects",input:q.input});
+       if (submits===2) {
+         for (const id of ["1","2"]) event("turn/input/accepted",{clientRequestId:id});
+         event("item/completed",{item:{type:"agentMessage",text:"Общий итог"}});
+         event("turn/completed",{status:"completed"});
+       }
+     }}};
+   const tick=()=>processGroupInputs(store,sdk as any,7,5,()=>async <T>(m:string,p:any)=>{
+     if (m==="sendMessage") sent.push([p.reply_parameters.message_id,p.text]);
+     return {message_id:123} as T;
+   },new AbortController().signal);
+   for (const [message,sender] of [[10,7],[11,secondSender]]) {
+     assert.ok(acceptGroupUpdate(store,{update_id:message,message:{message_id:message,chat:{type:"supergroup",id:-1001},
+       from:{id:sender},message_thread_id:3,text:"@bot вопрос",entities:[{type:"mention",offset:0,length:4}]}},7,5));
+     await tick();
+   }
+   await tick();
+   assert.deepEqual(sent,secondSender===7 ? [[11,"Общий итог"]] : []);
+   if (secondSender===7) assert.equal(store.list("group:in:5:").length,0,"both requests are settled");
+   assert.equal(submits,2);
+ }
 });
 
 test("0.9.73 fix: a deferred task the bridge gives itself runs although the bot replied to its original message",async()=>{
@@ -585,12 +635,14 @@ test("a message the thread never took up is given once more, then closed with an
 });
 
 test("the rules in force come with the turn: in full once per version, then one line (0.9.59)",async()=>{
+ for (const ownerForum of [false,true]) {
  const rows=new Map<string,any>();
  const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
    list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
  store.put("group:project:group-project",true);
  store.put("group:thread:t","group:policy:-1001:3");
- store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true,projectId:"group-project"});
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true,projectId:"group-project",...(ownerForum && {ownerSharedProject:true,ownerId:7})});
+ if (ownerForum) store.put("group:shared-thread:t",true);
  const events:any[]=[]; const inputs:any[]=[];
  const sdk={threads:{get:async({threadId}:{threadId:string})=>({id:threadId,projectId:"group-project",visibility:"visible"}),
    events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0))},
@@ -600,17 +652,22 @@ test("the rules in force come with the turn: in full once per version, then one 
      ev("item/completed",{item:{type:"agentMessage",text:"ok"}});ev("turn/completed",{status:"completed"});}}};
  let rules={version:"v1aaaaaaaaaa",text:"Принцип: делай там, где просят."};
  const tick=()=>processGroupInputs(store as any,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal,
-   undefined,undefined,undefined,false,undefined,undefined,async()=>rules);
- const say=(id:number)=>acceptGroupUpdate(store,{update_id:id,message:{message_id:id,chat:{type:"supergroup",id:-1001},from:{id:7},message_thread_id:3,text:"Q"+id}},7,5);
+   undefined,undefined,undefined,false,async()=>true,undefined,async()=>rules);
+ const say=(id:number)=>acceptGroupUpdate(store,{update_id:id,message:{message_id:id,chat:{type:"supergroup",id:-1001},from:{id:7,is_bot:false},is_topic_message:true,message_thread_id:3,text:"Q"+id}},7,5);
  const ruleText=(i:number)=>inputs[i].map((x:any)=>x.text??"").join("\n");
  say(10); await tick();
+ const routingRule=/Итог хода в этом разговоре уходит человеку, чьё сообщение начало ход; ответ другому треду отправляй командой bb thread tell, не итогом/;
+ assert.match(ruleText(0),routingRule);
  assert.match(ruleText(0),/Правила обновлены \(версия v1aaaaaaaaaa\)[\s\S]*делай там, где просят/);
  say(11); await tick();
  assert.match(ruleText(1),/Правила организации без изменений \(версия v1aaaaaaaaaa\)/);
+ assert.doesNotMatch(ruleText(1),routingRule);
  assert.doesNotMatch(ruleText(1),/делай там, где просят/);
  rules={version:"v2bbbbbbbbbb",text:"Принцип: новое правило."};
  say(12); await tick();
  assert.match(ruleText(2),/Правила обновлены \(версия v2bbbbbbbbbb\)[\s\S]*новое правило/);
+ assert.match(ruleText(2),routingRule);
+ }
 });
 
 test("0.9.66: the agent already wrote into this topic during the turn — the final answer is not posted again; no service line without text",async()=>{
@@ -707,8 +764,82 @@ test("0.9.76: a voice gets 👀 at once and its reaction by meaning from the tra
  assert.equal(reactions.at(-1),"🔥");
 });
 
-test("0.9.76: after a labelled answer to a person, the same turn's unlabelled final goes to that person — unless the turn has another addressee (another person's turn, someone's request joined); notices do not count",async()=>{
- for (const [withNotice,requestedBefore,personTurn,fromBB,sentByCommand,plugin] of [[true,false,false,false,false,false],[true,true,false,false,false,false],[false,false,true,false,false,false],[false,false,false,false,false,false],[false,false,false,true,false,false],[true,false,false,false,true,false],[false,false,false,false,false,true]] as const) {
+test("a plugin veto requests only the finished result once and settles the original message",async()=>{
+ for (const labelled of [false,true]) {
+ for (const outcome of ["result","plugin again","wrong label","no receipt"] as const) {
+   const rows=new Map<string,any>();
+   const store={get:<T>(k:string)=>structuredClone(rows.get(k)) as T,put:(k:string,v:unknown)=>{rows.set(k,structuredClone(v))},
+     del:(k:string)=>{rows.delete(k)},list:<T>(p:string)=>[...rows].filter(([k])=>k.startsWith(p)).map(([key,value])=>({key,value:structuredClone(value) as T})),atomic:(fn:()=>void)=>fn()};
+   store.put("group:project:project",true);
+   store.put("group:thread:t","group:policy:-1001:3");
+   store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",ownerOnly:true,requireMention:false});
+   const events:any[]=[], delivered:any[]=[], submissions:any[]=[];
+   const event=(type:string,data:any,turn:string)=>events.push({seq:events.length+1,type,data,scope:{kind:"turn",turnId:turn}});
+   const say=(body:string,turn:string)=>event("item/completed",{item:{type:"agentMessage",text:body}},turn);
+   event("client/turn/requested",{requestId:"guard",originPluginId:"limit-guard",initiator:"system"},"one");
+   const sdk={threads:{get:async()=>({id:"t",projectId:"project",visibility:"visible",status:labelled ? "active" : "idle"}),
+     events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0) && e.seq<Number(q.beforeSeq??Infinity) &&
+       (!q.types || q.types.includes(e.type))).sort((a,b)=>q.order==="desc" ? b.seq-a.seq : a.seq-b.seq).slice(0,Number(q.limit??100))},
+     send:async(q:any)=>{
+       submissions.push([q.mode,q.input[0].text]);
+       const turn=submissions.length===1 ? "one" : "two";
+       if (turn==="two" && outcome==="no receipt") return;
+       event("client/turn/requested",{requestId:turn,originPluginId:"telegram-projects",input:q.input},turn);
+       event("turn/input/accepted",{clientRequestId:turn},turn);
+       if (turn==="one") {
+         if (labelled) {
+           const label=q.input.map((b:any)=>b.text).join("\n").match(/\[telegram-answer:([a-f0-9-]+)\]/)[1];
+           say(`[telegram-answer:${label}]\nПроверяю\n[/telegram-answer]`,turn);
+         }
+         event("turn/input/accepted",{clientRequestId:"guard"},turn);
+         say("Принял, работаю короткими шагами",turn);
+       } else {
+         assert.equal(q.input.length,2);
+         assert.equal(q.input[1].visibility,"agent-only");
+         assert.doesNotMatch(q.input.map((block:any)=>block.text).join("\n"),/Как дела\?/);
+         const label=q.input[0].text.match(/\[telegram-answer:([a-f0-9-]+)\]/)[1];
+         if (outcome==="plugin again") {
+           event("client/turn/requested",{requestId:"guard-2",originPluginId:"limit-guard"},turn);
+           event("turn/input/accepted",{clientRequestId:"guard-2"},turn);
+           say("Принял, работаю короткими шагами",turn);
+         } else {
+           const selector=outcome==="wrong label" ? "wrong" : label;
+           say(`[telegram-answer:${selector}]\nРабота закончена\n[/telegram-answer]`,turn);
+         }
+       }
+       event("turn/completed",{status:"completed"},turn);
+     }}};
+   const tick=()=>processGroupInputs(store,sdk as any,7,5,()=>async <T>(m:string,p:any)=>{
+     if (m==="sendMessage") delivered.push([p.reply_parameters.message_id,p.text]);
+     return {message_id:20} as T;
+   },new AbortController().signal,undefined,undefined,undefined,false,undefined,undefined,undefined,undefined,undefined,undefined,
+     ()=>delivered.map(()=>({message:20,replyTo:10})));
+   assert.ok(acceptGroupUpdate(store,{update_id:8,message:{message_id:10,chat:{type:"supergroup",id:-1001},
+     from:{id:7},message_thread_id:3,text:"Как дела?"}},7,5));
+   await tick();
+   assert.deepEqual(delivered,labelled ? [[10,"Проверяю"]] : []);
+   await tick();
+   await tick();
+   if (outcome==="no receipt") {
+     const key="group:in:5:8";
+     store.put(key,{...store.get<any>(key),submittedAt:0});
+   }
+   await tick();
+   await tick();
+   assert.equal(submissions.length,2);
+   assert.equal(submissions.filter(([,text])=>text.includes("Как дела?")).length,1);
+   assert.equal(submissions[1][0],"queue-if-active");
+   assert.match(submissions[1][1],/Итог по сообщению №10.*Работу не повторяй/);
+   const final=outcome==="result" ? "Работа закончена" : "Не удалось получить итог по вашему сообщению.";
+   assert.deepEqual(delivered,[...(labelled ? [[10,"Проверяю"]] : []),[10,final]]);
+   assert.equal(store.list("group:in:5:").length,0);
+ }
+ }
+});
+
+test("a labelled reply leaves the final with the proven starter of the turn",async()=>{
+ for (const starter of ["own","another person","BB","unknown"] as const) {
+ for (const joined of ["none","agent","child","queued plugin","command result","duplicate send","previous turn send","next turn send"] as const) {
  const rows=new Map<string,any>();
  const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
    list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
@@ -716,30 +847,38 @@ test("0.9.76: after a labelled answer to a person, the same turn's unlabelled fi
  store.put("group:thread:t","group:policy:-1001:3");
  store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
  const route={kind:"group",chatId:-1001,topicId:3,senderId:7,threadId:"t",messageId:10,updateId:8,text:"посчитай файлы"};
- // requestedBefore: the notice was requested before the labelled answer (seq 4), taken into the turn after it.
- store.put("group:turn-watch:5:t:T1",{threadId:"t",turn:"T1",afterSeq:5,route,ownerId:7,at:Date.now()});
- // personTurn: the turn is another person's request (its own route) — its final is that person's, not ours.
- if (personTurn) { const routes=new ReplyRoutes(store as any); routes.record("t","other",{kind:"telegram",chatId:-1001,topicId:3,updateId:4,messageId:9} as any); routes.accept("t","T1","other"); }
+ store.put("group:turn-watch:5:t:T1",{threadId:"t",turn:"T1",afterSeq:5,route,ownerId:7,at:Date.now(),labelAt:1000});
+ const routes=new ReplyRoutes(store as any);
+ if (starter!=="unknown") {
+   routes.record("t","first",starter==="BB" ? {kind:"bb"} :
+     {kind:"telegram",chatId:-1001,topicId:3,updateId:starter==="own" ? 8 : 4,messageId:starter==="own" ? 10 : 9});
+   routes.accept("t","T1","first");
+ }
+ if (joined==="command result" || joined==="duplicate send" || joined==="previous turn send" || joined==="next turn send") {
+   store.put(sentInTurnKey("t"),{chat:-1001,topic:3,sent:[{at:joined==="previous turn send" ? 999 : joined==="next turn send" ? 2001 : 1500,t:sameWords(
+     joined==="duplicate send" ? "Нашёл 8 файлов .md." : "Итог уже передан.")}]});
+ }
  const ev=(seq:number,type:string,data:any,turn?:string)=>({seq,type,data,scope:turn ? {kind:"turn",turnId:turn} : {kind:"thread"}});
  const events=[
-   ...(withNotice ? [ev(requestedBefore ? 4 : 6,"client/turn/requested",{requestId:"n1",initiator:"system",systemMessageKind:"child-completed"}),
-     ev(7,"turn/input/accepted",{clientRequestId:"n1"},"T1")] : []),
-   ...(fromBB ? [ev(6,"client/turn/requested",{requestId:"from-bb",initiator:"user"}),ev(7,"turn/input/accepted",{clientRequestId:"from-bb"},"T1")] : []),
-   ...(plugin ? [ev(6,"client/turn/requested",{requestId:"watch",initiator:"user",originPluginId:"thread-watch"}),ev(7,"turn/input/accepted",{clientRequestId:"watch"},"T1")] : []),
-   ev(8,"item/completed",{item:{type:"agentMessage",text:"Нашёл 8 файлов .md.\n<!-- bb-telegram-child-result:thr_c:T9 -->"}},"T1"),
-   ev(9,"turn/completed",{status:"completed"},"T1")];
+   ev(2,"turn/input/accepted",{clientRequestId:"first"},"T1"),
+   ...(joined==="queued plugin" ? [ev(6,"client/turn/requested",{requestId:"queued",originPluginId:"codex-watch"})] : []),
+   ...((joined!=="agent" && joined!=="child") ? [] : [ev(6,"client/turn/requested",joined==="agent" ?
+     {requestId:"join",initiator:"agent",senderThreadId:"thr_sender"} :
+     {requestId:"join",initiator:"system",originPluginId:"provider-codex",systemMessageKind:"child-completed"}),
+     ev(7,"turn/input/accepted",{clientRequestId:"join"},"T1")]),
+   ev(8,"item/completed",{item:{type:"agentMessage",text:joined==="command result" ? "Отправил выше" : "Нашёл 8 файлов .md.\n<!-- bb-telegram-child-result:thr_c:T9 -->"}},"T1"),
+   {...ev(9,"turn/completed",{status:"completed"},"T1"),createdAt:2000}];
  const sdk={threads:{get:async()=>({id:"t",projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>events.filter(e=>e.seq>Number(q.afterSeq??0) && (!q.types || q.types.includes(e.type)))},send:async()=>{}}};
- if (sentByCommand) store.put(sentInTurnKey("t"),{chat:-1001,topic:3,at:Date.now(),sent:[{t:"итог",at:Date.now()+1}]});
  const sent:any[]=[];
  await processGroupInputs(store,sdk as any,7,5,()=>async <T>(m:string,p:any)=>{if(m==="sendMessage") sent.push(p); return {message_id:1} as T},new AbortController().signal);
- if (fromBB || sentByCommand || plugin) assert.equal(sent.length,0,fromBB ? "an input from BB joined: not ours" : plugin ? "a plugin's question joined: its answer is not for the person" : "already sent here by command");
- else if (withNotice || !personTurn) {
+ if (starter==="own" && joined!=="duplicate send" && joined!=="command result") {
    assert.equal(sent.length,1,"the result is posted");
    assert.match(String(sent[0].text),/Нашёл 8 файлов/);
    assert.doesNotMatch(String(sent[0].text),/bb-telegram-child-result/);
    assert.equal(sent[0].reply_parameters?.message_id,10,"as a reply to the same message");
- } else assert.equal(sent.length,0,"another person's turn: its final is not ours");
+ } else assert.equal(sent.length,0,"only the proven starter receives the final");
  assert.equal(rows.has("group:turn-watch:5:t:T1"),false,"the watch ends with the turn");
+ }
  }
 });
 
@@ -1000,4 +1139,35 @@ test("0.9.77 review: a person's message joining the owner's running turn marks t
    text:"@bot и ещё",entities:[{type:"mention",offset:0,length:4}]}},7,5));
  await processGroupInputs(store as any,sdk as any,7,5,()=>async <T>()=>({message_id:1} as T),new AbortController().signal);
  assert.equal(rows.get("group:turn-mixed:t:T-owner"),31,"the least trusted stays");
+});
+
+test("0.9.79: two answers with the same label in one turn — «прочитаю и пришлю», then the result — both reach the person, in order; a word-for-word repeat does not",async()=>{
+ const rows=new Map<string,any>();
+ const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+   list:<T>(prefix:string)=>[...rows].filter(([k])=>k.startsWith(prefix)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+ store.put("group:project:group-project",true);
+ store.put("group:thread:t","group:policy:-1001:3");
+ store.put("group:policy:-1001:3",{chatId:-1001,topicId:3,threadId:"t",botId:5,botUsername:"bot",requireMention:false,ownerOnly:true});
+ const route={kind:"group",chatId:-1001,topicId:3,senderId:7,threadId:"t",messageId:10,updateId:8,text:"пришли список разделов"};
+ // The turn is this message's own: its unlabelled final goes to it too.
+ { const routes=new ReplyRoutes(store as any); routes.record("t","req",{kind:"telegram",chatId:-1001,topicId:3,updateId:8,messageId:10} as any); routes.accept("t","T1","req"); }
+ store.put("group:turn-watch:5:t:T1",{threadId:"t",turn:"T1",afterSeq:5,route,ownerId:7,at:Date.now(),label:"b317b4ed",labelled:"Прочитаю план и пришлю список разделов."});
+ const ev=(seq:number,type:string,data:any)=>({seq,type,data,scope:{kind:"turn",turnId:"T1"}});
+ const events=[
+   {seq:1,type:"client/turn/requested",data:{requestId:"req",originPluginId:"telegram-projects"},scope:{kind:"thread"}},
+   ev(2,"turn/input/accepted",{clientRequestId:"req"}),
+   ev(6,"item/completed",{item:{type:"agentMessage",text:"[telegram-answer:b317b4ed]\nПрочитаю план и пришлю список разделов.\n[/telegram-answer]"}}),
+   ev(7,"item/completed",{item:{type:"agentMessage",text:"[telegram-answer:b317b4ed]\n- «План стенда» — единственный раздел.\n[/telegram-answer]"}}),
+   ev(8,"item/completed",{item:{type:"agentMessage",text:"[telegram-answer:b317b4ed]\nЕщё: подразделов нет.\n[/telegram-answer]"}}),
+   ev(9,"item/completed",{item:{type:"agentMessage",text:"Итог: список выше."}}),
+   ev(10,"turn/completed",{status:"completed"})];
+ const sdk={threads:{get:async()=>({id:"t",projectId:"group-project",visibility:"visible"}),events:{list:async(q:any)=>{
+   const r=events.filter(e=>e.seq>Number(q.afterSeq??0) && (q.beforeSeq===undefined || e.seq<Number(q.beforeSeq)) && (!q.types || q.types.includes(e.type)));
+   return q.order==="desc" ? r.reverse() : r;}},send:async()=>{}}};
+ const sent:any[]=[];
+ const tick=()=>processGroupInputs(store as any,sdk as any,7,5,()=>async <T>(m:string,p:any)=>{if(m==="sendMessage") sent.push(p); return {message_id:1} as T},new AbortController().signal);
+ for (let i=0;i<5;i++) await tick();
+ assert.deepEqual(sent.map(x=>String(x.text).replace(/\s+/g," ").trim()),["• «План стенда» — единственный раздел.","Ещё: подразделов нет.","Итог: список выше."],
+   "the repeat of the first is dropped; the rest in the order written, from one batch of events");
+ assert.equal(sent[0].reply_parameters?.message_id,10,"as a reply to the same message");
 });

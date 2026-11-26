@@ -154,9 +154,9 @@ export function sendTargets(store:Store,bot:number,owner:number,caller:Conversat
 export function rememberAsk(store:Store,bot:number,target:number,origin:SendTarget,question:string) {
   // The same question to the same person from the same place stays one open question: one answer comes back once.
   const same=openAsks(store,bot,target).find(a=>a.origin.chat===origin.chat && a.origin.topic===origin.topic &&
-    a.question===question.slice(0,500));
+    a.question===question);
   if (same) { store.put(askPrefix(bot)+same.id,{...same,at:Date.now()}); return same; }
-  const ask:Ask={id:randomUUID().slice(0,8),target,origin,question:question.slice(0,500),at:Date.now()};
+  const ask:Ask={id:randomUUID().slice(0,8),target,origin,question:question,at:Date.now()};
   store.put(askPrefix(bot)+ask.id,ask);
   return ask;
 }
@@ -199,7 +199,7 @@ export function ownerReport(store:Store,bot:number,caller:{kind:"group";chat:num
   const title=store.get<{title?:string}>(`visibility:${bot}:group:${caller.chat}`)?.title ?? "группа";
   const topicName=caller.topic ? groupTopics(store,bot,caller.chat).find(t=>t.topic===caller.topic)?.name : undefined;
   store.put(gapKey,now);
-  return {text:`Из группы «${title}»${caller.topic ? ", тема «"+(topicName || caller.topic)+"»" : ""}:\n${text.length>3500 ? text.slice(0,3500)+"…" : text}`};
+  return {text:`Из группы «${title}»${caller.topic ? ", тема «"+(topicName || caller.topic)+"»" : ""}:\n${text}`};
 }
 
 /** agents-in-chats п.6: the agent's curator as the addressee of a question (consent on work); undefined target with the reason otherwise. */

@@ -1,6 +1,6 @@
 import {ownerMayAttach} from "./attach-rules";
 import { uploadLimit } from "./telegram-files";
-import {voiceTranscripts} from "./archive";
+import {messageExcerpt,voiceTranscripts} from "./archive";
 import {maxEncodedImages,readSavedImage,type ImageAttachment} from "./group-attachments";
 import {albumCaption,albumKind,albumKey,albumChanged,albumChangedNotice,collectAlbum,copyAlbum,releaseAlbums,sendAlbum, type AlbumMedia} from "./media-album";
 import {claimBusyExact,exactOutboxPrefix,finishBusyExact,startBusyExact,type BusyExactEvidence} from "./busy-exact-outbox";
@@ -74,7 +74,8 @@ export const inputSchema = z.object({
   originalText: z.literal(true).optional(),
   callback: z.string().max(64).optional(),
   replyTo: z.number().int().optional(),
-  replyExcerpt: z.string().max(2000).optional(),
+  replyExcerpt: z.string().max(16000).optional(),
+  replyOriginal: z.string().max(16000).optional(),
   attachment: z.object({
     fileId: z.string().min(1).max(512),
     name: z.string().max(512),
@@ -1024,7 +1025,7 @@ export class ChatBridge {
           taken = queue.some(q => JSON.stringify(q).includes(sent.token));
         }
       }
-      const wiped = {...r.input, text: undefined, replyExcerpt: undefined, voice: undefined, attachment: undefined};
+      const wiped = {...r.input, text: undefined, replyExcerpt: undefined, replyOriginal: undefined, voice: undefined, attachment: undefined};
       if (taken) { this.s.put(key, {input: wiped, state: "done", at: Date.now()}); this.s.del(dispatchKey(r.input.updateId)); continue; }
       if ((r.attempts ?? 1) < 2) {
         this.s.del(dispatchKey(r.input.updateId));
@@ -1127,7 +1128,7 @@ export class ChatBridge {
           attachmentThreadId:r.attachmentThreadId ?? (parts.length > 1 ? this.binding(r.input.topicId)?.threadId : undefined),
           phase:parts.length > 1 ? "preparing" : r.phase });
         for (const part of batch.slice(1)) this.s.put("chat:in:" + part.input.updateId, {
-          state:"done", at:part.at, input:{...part.input,text:undefined,replyExcerpt:undefined,voice:undefined,attachment:undefined}
+          state:"done", at:part.at, input:{...part.input,text:undefined,replyExcerpt:undefined,replyOriginal:undefined,voice:undefined,attachment:undefined}
         });
       });
       this.recentInputAt = Date.now();   // С72: an incoming message keeps the 2 s pace for a while
@@ -1145,7 +1146,7 @@ export class ChatBridge {
           if (current?.state !== "uncertain" &&
               !(this.d.signal.aborted && (current?.phase === "attachment-download" || current?.phase === "preparing"))) {
             this.s.put(key, {
-              input: { ...r.input, text: undefined, replyExcerpt: undefined, voice: undefined, attachment: undefined },
+              input: { ...r.input, text: undefined, replyExcerpt: undefined, replyOriginal: undefined, voice: undefined, attachment: undefined },
               state: "done",
               at: Date.now(),
             });
@@ -1772,7 +1773,11 @@ export class ChatBridge {
   private withReplyContext(input: ChatInput, text: string) {
     // С81: the owner's answer names the message it answers; the agent reads its text by number when needed.
     if (!input.replyTo || !input.replyExcerpt) return text;
-    this.s.put(`reply:quote:${input.chatId}:${input.replyTo}`, {t: input.replyExcerpt.trim().slice(0, 200), at: Date.now()});
+    const excerpt=messageExcerpt(input.replyExcerpt,2000,input.chatId,input.replyTo);
+    this.s.put(`reply:quote:${input.chatId}:${input.replyTo}`, {
+      t:input.replyExcerpt,original:input.replyOriginal,at:Date.now()
+    });
+    if (excerpt!==input.replyExcerpt) return text+"\n\n[Цитата сообщения № "+input.replyTo+"]\n"+excerpt;
     return text + "\n\n[Ответ на сообщение Telegram № " + input.replyTo + "; текст: bb telegram-projects search-history --message " + input.replyTo + "]";
   }
   private async preparePart(input: ChatInput, b: Binding, text: string, batched: boolean, albumImages?:ImageAttachment[]): Promise<string | undefined> {
@@ -2171,7 +2176,7 @@ export class ChatBridge {
       if (prior && prior !== b.threadId) throw Error("batch_binding_changed");
       const texts: string[] = [];
       for (const [index,part] of parts.entries()) {
-        const prepared = await this.preparePart(part,b,part.text?.trim() ?? "",true,albumImages);
+        const prepared = await this.preparePart(part,b,part.text ?? "",true,albumImages);
         if (prepared === undefined || this.d.signal.aborted) return;
         voiceSaid[index] = prepared;
         const includesOriginal = parts.some(other => other.messageId === part.replyTo);
@@ -2184,12 +2189,13 @@ export class ChatBridge {
       const inbox = this.s.get<Inbox>(key);
       if (inbox) this.s.put(key,{...inbox,phase:undefined});
     } else {
-      const prepared = await this.preparePart(input,b,text,false,albumImages);
+      const body=cmd==="/say" ? text : (input.text ?? "");
+      const prepared = await this.preparePart(input,b,body,false,albumImages);
       if (prepared === undefined) return;
       text = prepared;
     }
     if (albumChanged(this.s,input.albumKey)) return;
-    if (!text) {
+    if (!text.trim()) {
       this.enqueue(
         input.topicId,
         this.tr(
@@ -2209,9 +2215,9 @@ export class ChatBridge {
     const originalDigest=(this.s.get("group:shared-project:"+b.projectId) ||
       this.s.get("group:topic-manager-project:"+b.projectId) ||
       (b.threadId && input.chatId===this.d.owner() &&
-       this.d.captureOwnerGroupPost?.(b.threadId,input.chatId))) && input.originalText && (!parts || parts.length===1) && text===input.text?.trim() &&
+       this.d.captureOwnerGroupPost?.(b.threadId,input.chatId))) && input.originalText && (!parts || parts.length===1) && text.trim()===input.text?.trim() &&
       !input.forwarded && !input.attachment && !input.voice && !input.replyTo
-      ? createHash("sha256").update(text).digest("hex") : undefined;
+      ? createHash("sha256").update(text.trim()).digest("hex") : undefined;
     // Questions to the owner from other conversations (С43): the owner's turn knows them and returns the answer.
     const ownerAsks=input.chatId===this.d.owner() ? [takeChatLines(this.s,input.chatId),ownerAskNotes(this.s,input.chatId,Date.now(),input.replyTo)].filter(Boolean).join("\n") : "";
     if (ownerAsks) text=text+"\n\n"+ownerAsks;
@@ -3774,7 +3780,7 @@ export class ChatBridge {
           }
           const source=this.replyTarget(o)?.replyTo;
           const payload = {
-            ...(source && !o.editId ? {reply_parameters:{message_id:source,allow_sending_without_reply:true}} : {}),
+            ...(index===0 && source && !o.editId ? {reply_parameters:{message_id:source,allow_sending_without_reply:true}} : {}),
             message_thread_id: o.topicId || undefined,
             disable_notification: !key.startsWith("chat:out:question:"),
             link_preview_options: { is_disabled: true },

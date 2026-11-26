@@ -15,7 +15,7 @@ import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration
 import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
 import {conversationOf,conversationOfThread,guardGroupMemory,groupMemoryAnswer,groupMemoryNotice,movedConversationOf,movedConversationRefusal,readableChats} from "./archive-access";
 import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefusal,sendTargets,curatorTarget,conversationMayAttach} from "./send-command";
-import {editFormatted,sendFormattedFile,sendFormattedText,sendOutboundMessage} from "./outbound-message";
+import {TextPartFailure,editFormatted,sendFormattedFile,sendFormattedText,sendOutboundMessage} from "./outbound-message";
 import {editedInTurnKey,sameWords,sentInTurnKey} from "./group-worker";
 import {maxAlbumItems,sendAlbum} from "./media-album";
 import {cleanAssistantText,renderTelegramParts} from "./telegram-ux";
@@ -60,7 +60,7 @@ import { groupModelCommand } from "./group-model";
 import { ChatBridge } from "./chat";
 import { handoffDispatch } from "./handoff";
 import { StateTransfer } from "./state-transfer";
-import { acceptGroupUpdate, contextMediaPrefix, offsetForServer, routeUpdate, skipExcludedForumUpdate, unboundAddressedGroupMessage, type GroupTopicPolicy } from "./ingress";
+import { acceptGroupUpdate, clearWaitingOnUpdate, contextMediaPrefix, offsetForServer, routeUpdate, skipExcludedForumUpdate, unboundAddressedGroupMessage, type GroupTopicPolicy } from "./ingress";
 import { accessList, accessModeKey, activeGroupSettings, defaultGroupSettings, agentBots, agentBotsKey, installKindKey, groupSettings, hasAccess, migrateLegacyRights, saveGroupSettings,markOwnerMemoryChoice, senderRole, setAccess } from "./rights";
 import { handleConsentCallback, watchConsents } from "./consent";
 import { handleSetupUpdate, notifyGroupsAdded, welcomeScreen } from "./setup-screens";
@@ -79,6 +79,8 @@ import {
   taskKindsOn,
   type Events,
 } from "./events";
+import {WaitingMarks,type WaitingConfig} from "./waiting-mark";
+import {interactionOpen,codexAsyncQuestions} from "./codex-async-question";
 import { makeChatControlPublisher, writeJsonAtomic } from "./json-file";
 import { chmod, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -519,6 +521,10 @@ export default async function plugin(bb: BbPluginApi) {
     reactionSet: {
       type: "string", label: "Reactions to choose from: «👍=agreed; 😁=funny; …» (empty: the default set)", default: "",
     },
+    waitingMarkEnabled: {type:"boolean",label:"Track topics waiting for the owner",default:false},
+    waitingMarkChatId: {type:"string",label:"Owner forum chat ID",default:""},
+    waitingMarkExcludedTopics: {type:"string",label:"Excluded topic IDs or names (comma-separated)",default:""},
+    waitingNotifyCommand: {type:"string",label:"Waiting state notification command",default:""},
     decideCommand: {
       type: "string", label: "Quick decision command", default: "vallis-decide",
     },
@@ -679,6 +685,44 @@ export default async function plugin(bb: BbPluginApi) {
   // Owner and bot are learned at runtime: pairing sets the owner, the first getMe the bot.
   const ownerId = () => store.get<number>("owner:id");
   const botId = () => store.get<number>("bot:id");
+  let waitingConfig:WaitingConfig|undefined;
+  const waiting=new WaitingMarks(store,()=>lifetime.signal.aborted ? undefined : waitingConfig,()=>({bot:botId(),owner:ownerId()}),
+    undefined,(bot,chat,topic,before)=>archive?.recentTopicText(bot,chat,topic,before));
+  function configureWaiting(cfg:WaitingConfig) {
+    const changed=cfg.waitingMarkEnabled && (!waitingConfig?.waitingMarkEnabled ||
+      cfg.waitingMarkChatId!==waitingConfig.waitingMarkChatId || cfg.waitingMarkExcludedTopics!==waitingConfig.waitingMarkExcludedTopics ||
+      cfg.companionDir!==waitingConfig.companionDir);
+    if (waitingConfig?.waitingMarkEnabled && !cfg.waitingMarkEnabled) waiting.reset();
+    waitingConfig={waitingMarkEnabled:cfg.waitingMarkEnabled,waitingMarkChatId:cfg.waitingMarkChatId,
+      waitingMarkExcludedTopics:cfg.waitingMarkExcludedTopics,waitingNotifyCommand:cfg.waitingNotifyCommand,
+      decideCommand:cfg.decideCommand,companionDir:cfg.companionDir};
+    store.waiting=cfg.waitingMarkEnabled ? waiting : undefined;
+    if (changed) {
+      const snap=waiting.snapshot();
+      if (snap.chatId) for (const t of snap.topics) if (t.excluded) waiting.clear(snap.chatId,t.topicId);
+      waiting.publish();
+    }
+  }
+  let scanning=false;
+  async function observeWaiting(signal:AbortSignal) {
+    if (scanning || !store.waiting) return;
+    scanning=true;
+    try {
+      const {chatId,topics}=waiting.snapshot();
+      if (!chatId) return;
+      for (const t of topics) {
+        if (!t.threadId || !waiting.eligible(chatId,t.topicId) || signal.aborted) continue;
+        const seq=waiting.seq(chatId,t.topicId), ids:string[]=[];
+        const tree=await bb.sdk.threads.experimental_listDescendants({threadIds:[t.threadId],signal});
+        for (const threadId of [t.threadId,...(tree.threads[0]?.descendantIds ?? [])]) {
+          const open=await bb.sdk.threads.interactions.list({threadId,signal});
+          for (const i of open) if (interactionOpen(i) && (i.payload.kind==="approval" || i.payload.kind==="user_question" || codexAsyncQuestions(i)))
+            ids.push(i.id);
+        }
+        waiting.interactions(chatId,t.topicId,ids,seq);
+      }
+    } finally {scanning=false;}
+  }
   // The former catalog of operations and adapters runs only when explicitly re-enabled.
   const legacyOperations = process.env.BB_TELEGRAM_LEGACY_OPERATIONS === "1";
   const profilePeople = () => {
@@ -744,10 +788,12 @@ export default async function plugin(bb: BbPluginApi) {
         // The message is not in the conversation's memory (older than it, another bot's, archive off): say so plainly,
         // so the agent asks the person instead of guessing.
         if (!found) {
-          const saved=store.get<string|{t:string}>(`reply:quote:${chat}:${args.message.message}`);
+          const saved=store.get<string|{t:string;original?:string}>(`reply:quote:${chat}:${args.message.message}`);
+          if (typeof saved==="object" && saved.original!==undefined)
+            return JSON.stringify({message:args.message.message,text:saved.original});
           const quote=typeof saved==="string" ? saved : saved?.t;
           return JSON.stringify(quote ? {message:args.message.message,quote,
-            note:"Текста в памяти переписки нет, цитата из Telegram (до 200 знаков)."} :
+            note:"Полного текста в архиве нет. Доступна только сохранённая цитата из Telegram."} :
             {message:args.message.message,unavailable:true,
               note:"Текст исходного сообщения недоступен. Спроси человека, о каком сообщении речь, — не угадывай."});
         }
@@ -1163,6 +1209,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function deliverOwnerAnswer(ask:import("./send-command").Ask,answer:string,via:"button"|"text",who?:string) {
     const bot=botId(), owner=ownerId();
     if (!bot || !owner || !answer.trim()) return false;
+    if (ask.target===owner) store.waiting?.clear(ask.origin.chat,ask.origin.topic);
     // П28: an ordinary thread asked — the answer comes to it as a turn.
     if (ask.originThread) {
       await bb.sdk.threads.send({threadId:ask.originThread,mode:"queue-if-active",input:[{type:"text",mentions:[],
@@ -1968,10 +2015,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (!cfg.enabled || !cfg.chatEnabled) return { ok: false, reason: "bridge_off" };
       const body = text.trim();
       if (!body) return { ok: false, reason: "empty_text" };
-      const cut = body.length > 3500 ? body.slice(0, 3500) + "…" : body;
       try {
         await sendFormattedText(telegram(botToken, lifetime.signal, 15_000, () => owner, apiRoot),
-          { chatId: owner, topicId: 0, markdown: (source ? `От: ${source}\n` : "") + cut });
+          { chatId: owner, topicId: 0, markdown: (source ? `От: ${source}\n` : "") + body });
         return { ok: true };
       } catch (error) { return { ok: false, reason: "telegram_failed: " + String((error as Error).message).slice(0, 120) }; }
     },
@@ -2528,6 +2574,9 @@ export default async function plugin(bb: BbPluginApi) {
         usage: "bb telegram-projects sync --json",
       },
       {
+        name:"waiting",summary:"Read or update owner forum waiting marks",usage:"bb telegram-projects waiting --json | clear|exclude|include --topic <id|name>",
+      },
+      {
         name: "bind-owner-chat",
         summary: "Bind the owner's chat to a project, as /project does",
         usage: "bb telegram-projects bind-owner-chat --project <project-id>",
@@ -2541,6 +2590,11 @@ export default async function plugin(bb: BbPluginApi) {
       },
     ],
     async run(argv,ctx) {
+      if (argv[0]==="waiting") {
+        configureWaiting(await settings.get());
+        const caller=ctx.threadId ? await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal).catch(()=>undefined) : "local";
+        return waiting.command(caller,argv);
+      }
       if (!["search-history","send","topic","message","delete","edit"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
           (ctx.threadId && (await sharedGroupThreads(store,bb.sdk.threads,[ctx.threadId])).has(ctx.threadId))))
         return {exitCode: 1, stderr: "bridge_admin_command_unavailable_in_group"};
@@ -2841,14 +2895,13 @@ export default async function plugin(bb: BbPluginApi) {
           // success: a non-zero code and the reason in words, so no caller takes it for «sent».
           if (day && caller && !ownPlace && !opt.answer && plain.trim() && holdFirstToday(store,`${target.chat}:${target.topic}`,day))
             return {exitCode:1,stderr:`first_today_hold: сегодня бот здесь ещё не писал — сообщение НЕ отправлено (${day.localTime}). `+FIRST_TODAY_HINT};
-          // П28: an ordinary thread of this BB writes to the owner: who it is, the text as sent, cut at 3500 characters.
+          // П28: an ordinary thread of this BB writes to the owner: who it is, the text as sent.
           if (!caller && (target.chat===owner || handedBy) && !opt.answer && (opt.text || opt["text-file"])) {
             const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
             const thread=await bb.sdk.threads.get({threadId:ctx.threadId}).catch(()=>undefined) as {title?:string;projectId?:string}|undefined;
             const project=thread?.projectId ? await bb.sdk.projects.get({projectId:thread.projectId}).catch(()=>undefined) as {name?:string}|undefined : undefined;
             const from=[thread?.title || "тред", project?.name].filter(Boolean).join(" · ");
-            const cut=body.length>3500 ? body.slice(0,3500)+"…\n(полностью — в треде)" : body;
-            opt.text=`От: ${from}\n${ask ? cleanQuestion(cut)+"\nОтветьте кнопкой или ответом на это сообщение." : cut}`;
+            opt.text=`От: ${from}\n${ask ? cleanQuestion(body)+"\nОтветьте кнопкой или ответом на это сообщение." : body}`;
             delete opt["text-file"];
             if (ask) ownerAsk={thread:ctx.threadId};
           }
@@ -2903,18 +2956,33 @@ export default async function plugin(bb: BbPluginApi) {
             store.put(`send:ask:${bot}:${asked.id}`,{...asked,originThread:ownerAsk.thread,...(handedBy && {postedChat:handedBy.chat})});
             remembered=asked.id;
           }
+          const topicAsk=ask && caller?.kind==="group" && caller.chat===target.chat && caller.topic===target.topic &&
+            !!store.waiting?.own(target.chat,target.topic) && target.topic>=2 && !opt.answer;
           if (ask && caller && !opt.answer) {
             const origin=caller.kind==="owner" ? {chat:owner,topic:0} : caller.kind==="group" ? {chat:caller.chat,topic:caller.topic ?? 0} : {chat:caller.subject,topic:0};
-            const asked=rememberAsk(store,bot,target.chat,origin,text ?? opt.file ?? "");
+            const asked=rememberAsk(store,bot,topicAsk ? owner : target.chat,origin,text ?? opt.file ?? "");
+            if (topicAsk) store.put(`send:ask:${bot}:${asked.id}`,{...asked,postedChat:target.chat});
             remembered=asked.id;
             // The answer will go under the request this question came from.
             const turn=ctx.threadId ? store.get<import("./owner-ask").TurnMessage>(turnMessageKey(ctx.threadId)) : undefined;
-            if (turn && turn.chat===origin.chat && turn.topic===origin.topic) store.put(`send:ask:${bot}:${asked.id}`,{...asked,replyTo:turn.message});
+            if (turn && turn.chat===origin.chat && turn.topic===origin.topic) store.put(`send:ask:${bot}:${asked.id}`,{...asked,...(topicAsk && {postedChat:target.chat}),replyTo:turn.message});
           }
           // A person's own message goes to the owner as it is, before the question (С67).
           if (ownerAsk?.turn && ownerAsk.turn.chat>0) await forwardOriginal(chat=>telegram(botToken,lifetime.signal,60_000,()=>chat,apiRoot),owner,ownerAsk.turn,store);
-          const buttons=ownerAsk && remembered ? askButtons(remembered) : undefined;
-          let messageId:number|undefined; let unverified=false;
+          const buttons=(ownerAsk || topicAsk) && remembered ? askButtons(remembered) : undefined;
+          const messageIds:number[]=[];
+          let unverified=false;
+          const mismatches:{incomplete:boolean;note:string}[]=[];
+          const checks={
+            onUnverified:()=>{unverified=true;},
+            onTextMismatch:({received,expected}:{received:number;expected:number})=>{
+              const incomplete=received*10<expected*9;
+              mismatches.push({incomplete,note:incomplete
+                ? `принято не полностью: дошло ${received} из ${expected} знаков`
+                : `Telegram принял сообщение с отличиями: в ответе ${received} знаков, ожидалось ${expected}`});
+            },
+          };
+          let messageId:number|undefined;
           // Unknown ≠ not delivered: the same files to the same place a short while after a send are a repeat, not sent
           // without --again (a repeat after «not confirmed» gave doubles).
           const fileHashes=await Promise.all([...new Set(files)].map(async path=>({path,name:safeTelegramFilename(path.split("/").at(-1) ?? "file"),
@@ -2934,13 +3002,17 @@ export default async function plugin(bb: BbPluginApi) {
               if (bytes.length>uploadLimit()) return {exitCode:1,stderr:"file_too_large: "+path};
               media.push({kind:"document",name:safeTelegramFilename(path.split("/").at(-1) ?? "file"),data:new Blob([new Uint8Array(bytes)],{type:"application/octet-stream"})});
             }
-            if (text?.trim()) messageId=(await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text})).at(-1);
+            if (text?.trim()) {
+              messageIds.push(...await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text,...checks}));
+              messageId=messageIds.at(-1);
+            }
             for (let i=0;i<media.length;i+=maxAlbumItems) {
               const chunk=media.slice(i,i+maxAlbumItems);
               try {
-                const first=chunk.length>1 ? (await sendAlbum(tg,{chatId:target.chat,topicId:target.topic,replyTo:replyTo ?? 0},chunk)).messageIds[0]
-                  : await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,file:{name:chunk[0].name!,kind:"document",data:chunk[0].data as Blob,sha256:"",bytes:(chunk[0].data as Blob).size},replyTo});
-                messageId??=first;
+                const ids=chunk.length>1 ? (await sendAlbum(tg,{chatId:target.chat,topicId:target.topic,replyTo:i===0 && !text?.trim() ? replyTo ?? 0 : 0},chunk)).messageIds
+                  : [await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,file:{name:chunk[0].name!,kind:"document",data:chunk[0].data as Blob,sha256:"",bytes:(chunk[0].data as Blob).size},replyTo:i===0 && !text?.trim() ? replyTo : undefined})];
+                messageIds.push(...ids);
+                messageId??=ids[0];
                 remember(files.slice(i,i+maxAlbumItems),"delivered");
               } catch (error) {
                 const went=[text?.trim() ? "текст" : "", i>0 ? `файлы 1–${i} из ${files.length}` : ""].filter(Boolean).join(" и ") || "ничего";
@@ -2948,9 +3020,7 @@ export default async function plugin(bb: BbPluginApi) {
                 // Telegram took them or did not answer: they may be in the chat — never «send again».
                 if (outcome!=="rejected") {
                   remember(files.slice(i,i+maxAlbumItems),outcome);
-                  unverified=true;
-                  if (outcome==="delivered" && i+maxAlbumItems<files.length) continue;
-                  if (outcome==="delivered") break;
+                  if (outcome==="delivered") { checks.onUnverified(); continue; }
                   return {exitCode:1,stderr:unsettledSendText({went,outcome,from:files[i],rest:files.slice(i)})};
                 }
                 // Telegram refused: nothing of this part was posted, so only the rest is sent again (a full repeat would double it).
@@ -2961,29 +3031,44 @@ export default async function plugin(bb: BbPluginApi) {
           } else if (file) {
             try {
               // The text as the file's caption is formatted as any message (not raw Markdown).
-              messageId=await sendFormattedFile(tg,{chatId:target.chat,topicId:target.topic,markdown:text,file,replyTo});
+              messageId=await sendFormattedFile(tg,{chatId:target.chat,topicId:target.topic,markdown:text,file,replyTo,
+                ...(buttons && store.waiting?.own(target.chat,target.topic) && {replyMarkup:buttons})}, messageIds,checks);
               remember(files,"delivered");
             } catch (error) {
+              if (error instanceof TextPartFailure) throw error;
               const outcome=sendOutcome(error);
               const textSent=(error as {textSent?:boolean})?.textSent===true;
               const onlyFile=textSent ? " Текст уже ушёл отдельным сообщением: если повторять, то только файл, без --text." : "";
               if (outcome==="rejected") return {exitCode:1,stderr:String((error as Error).message)+onlyFile};
-              remember(files,outcome); unverified=true;
-              if (outcome==="unknown") return {exitCode:1,stderr:unsettledSendText({went:textSent ? "текст" : "ничего подтверждённого",outcome,from:opt.file!,rest:files})+onlyFile};
+              remember(files,outcome);
+              if (outcome==="delivered") checks.onUnverified();
+              else return {exitCode:1,stderr:unsettledSendText({went:textSent ? "текст" : "ничего подтверждённого",outcome,from:opt.file!,rest:files})+onlyFile};
             }
           } else {
             try {
-              messageId=!text?.trim() ? await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file,replyTo})
-                : (await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text,...(buttons && {replyMarkup:buttons})})).at(-1);
+              const ids=!text?.trim() ? [await sendOutboundMessage(tg,{chatId:target.chat,topicId:target.topic,text,file,replyTo})]
+                : await sendFormattedText(tg,{chatId:target.chat,topicId:target.topic,replyTo,markdown:text,...checks,...(buttons && {replyMarkup:buttons})});
+              messageIds.push(...ids);
+              messageId=ids.at(-1);
             } catch (error) {
+              if (error instanceof TextPartFailure) throw error;
               // 0.9.77: the same honest outcome as for files — Telegram's «ok» is delivered, no answer is unknown.
               const outcome=sendOutcome(error);
               if (outcome==="rejected") throw error;
               if (outcome==="unknown") return {exitCode:1,stderr:"send_outcome_unknown: Telegram не ответил — исход не подтверждён, сообщение могло дойти. "+
                 "НЕ повторяй отправку сразу: скажи в чате, что сообщение могло прийти, и повтори только если его там нет."};
-              unverified=true;
+              checks.onUnverified();
             }
             if (messageId===undefined && !unverified) return {exitCode:1,stderr:"send_nothing_sent: после оформления текст пуст — ничего не отправлено"};
+          }
+          if (store.waiting && messageId && !unverified) {
+            if (ask) {
+              waiting.mark(target.chat,target.topic,"ask",messageId);
+              if (target.chat===owner && caller?.kind==="group") waiting.mark(caller.chat,caller.topic ?? 0,"ask",messageId);
+            } else if (text && !opt.answer) {
+              const turn=caller?.kind==="group" && caller.chat===target.chat && caller.topic===target.topic && started?.scope.kind==="turn" ? started.scope.turnId : undefined;
+              waiting.delivered(target.chat,target.topic,messageId,text,ctx.threadId,turn);
+            }
           }
           if (ownerAsk && remembered && messageId) rememberAskMessage(store,bot,messageId,remembered);
           if (opt.answer) closeAsk(store,bot,opt.answer);
@@ -2994,7 +3079,10 @@ export default async function plugin(bb: BbPluginApi) {
             store.put(sentInTurnKey(ctx.threadId),{chat:target.chat,topic:target.topic,at:Date.now(),
               sent:[...(same ? (prev.sent ?? []).filter(x=>Date.now()-x.at<6*3600_000) : []),{t:sameWords(text),at:Date.now()}].slice(-10)});
           }
-          return {exitCode:0,stdout:JSON.stringify({sent:true,messageId,...(unverified && {note:"Telegram принял отправку, но его ответ не совпал с ожидаемым: считай доставленным, не повторяй"}),...(remembered && {ask:remembered}),
+          const incomplete=mismatches.some(m=>m.incomplete);
+          const note=mismatches.length ? mismatches.map(m=>m.note).join(". ")+". Не повторяй отправку автоматически."
+            : unverified ? "Telegram принял отправку, но его ответ не совпал с ожидаемым: считай доставленным, не повторяй" : undefined;
+          return {exitCode:incomplete ? 1 : 0,...(incomplete ? {stderr:note} : {}),stdout:JSON.stringify({sent:true,messageId,messageIds,...(note && {note}),...(remembered && {ask:remembered}),
             ...(day && {firstToday:day.firstToday,localTime:day.localTime})})};
         } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
       }
@@ -3244,6 +3332,7 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         while (!signal.aborted) {
           const cfg = await settings.get();
+          configureWaiting(cfg);
           if (cfg.enabled && cfg.chatEnabled && !stateTransferBusy) {
             rich = cfg.richReplies;
             currentUrl = new URL(cfg.appUrl).origin;
@@ -3325,6 +3414,7 @@ export default async function plugin(bb: BbPluginApi) {
                   (chatId,topicId)=>{ orgTimeZone=String(cfg.timeZone ?? "").trim(); return todayOf(chatId,topicId); },
                   (chatId,topicId,messageId)=>archive && botId() ? archive.wroteAfter(botId()!,chatId,topicId,messageId) : []);
                 const scheduleFull=!feedUp || Date.now()-lastScheduleFull>=60_000;
+                if (store.waiting && (scheduleFull || scheduleDirty.size)) void observeWaiting(signal).catch(()=>{});
                 if (scheduleFull) lastScheduleFull=Date.now();
                 const scheduleOnly=scheduleFull ? undefined : new Set(scheduleDirty);
                 scheduleDirty.clear();
@@ -3496,6 +3586,8 @@ export default async function plugin(bb: BbPluginApi) {
           } finally { ingressPolling = false; }
           ingressError = null;
           for (const u of updates) {
+            // Commands and callbacks may consume the update before group ingress.
+            if (store.waiting) clearWaitingOnUpdate(store,u,ownerId());
             const moved=groupMigration(u);
             if (moved && botId()) {migrateGroupChat(store,botId()!,moved.from,moved.to);archive?.moveChat(botId()!,moved.from,moved.to);}
             try { if (botId()) { archive?.record(botId()!,u); learnTopicName(store,botId()!,u); } } catch { /* the archive never blocks a message */ }
@@ -3636,7 +3728,7 @@ export default async function plugin(bb: BbPluginApi) {
                 acceptAfterSecond:unbound.date-1},signal).catch(()=>false);
             }
             if (cfg.chatEnabled) void checkChatAgents(u,signal).catch(()=>{});   // in the background: no message waits
-            if (cfg.chatEnabled && acceptGroupUpdate(store, u, ownerId(), botId())) continue;
+            if (cfg.chatEnabled && acceptGroupUpdate(store, u, ownerId(), botId(),true)) continue;
             const route = routeUpdate(u, ownerId(), store.get("pair:code"));
             if (route.kind === "pair") {
               if (profilePath!==undefined && route.userId!==readEmployeeProfile(profilePath).owner) {store.put("ingress:offset",u.update_id+1);continue;}
