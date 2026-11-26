@@ -2897,14 +2897,17 @@ for (const primary of ["bb", "telegram"]) test("busy owner can receive a reply d
       {seq:1, type:"client/turn/requested", scope:{kind:"thread"}, data:{
         requestId:"owner-question", originPluginId:"telegram-projects", input:send.input}},
       {seq:2, type:"turn/input/accepted", scope, data:{clientRequestId:"owner-question"}},
-      reply("[telegram-answer:" + label + "]\nUnrelated turn\n[/telegram-answer]", 3, {kind:"turn",turnId:"other"}),
+      reply("[telegram-answer:deadbeef]\nUnknown label\n[/telegram-answer]", 3, {kind:"turn",turnId:"other"}),
+      reply("[telegram-answer:" + label + "]\nFollow-up from another turn\n[/telegram-answer]", 31, {kind:"turn",turnId:"other"}),
       reply("[telegram-answer:" + label + "]\nYour answer\n[/telegram-answer]", 4),
       reply("Original result", 5),
     ]);
     await f.bridge.observe(); await f.bridge.flush();
     assert.equal(f.sent.filter(x => x.text === "Your answer").length, 1);
     assert.equal(f.sent.find(x => x.text === "Your answer")?.reply_parameters?.message_id, question.messageId);
-    assert.equal(f.sent.some(x => x.text?.includes("Unrelated turn")), false);
+    // 0.9.81: a valid label works in any turn of the same conversation within 24h; an unknown label is dropped.
+    assert.equal(f.sent.some(x => x.text?.includes("Follow-up from another turn")), true);
+    assert.equal(f.sent.some(x => x.text?.includes("Unknown label")), false);
     assert.equal(routes.destination("thr_one", scope.turnId)?.kind, primary);
     f.setEvents([{seq:6, type:"turn/completed", scope, data:{status:"completed"}}]);
     await f.bridge.observe(); await f.bridge.flush();

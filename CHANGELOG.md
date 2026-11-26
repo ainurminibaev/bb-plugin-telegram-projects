@@ -1,3 +1,9 @@
+# 0.9.81
+
+- Promised replies reach the person across turns (inventory № 40): every incoming Telegram message gets an answer label valid for 24 hours in any turn of the same conversation (both owner DM and groups/topics). Turns started outside Telegram (by another thread or a schedule) receive a short agent-only note with the last recent human requests and their labels; unlabelled finals of such turns still never go to Telegram, and place rights / forward protections are unchanged.
+
+Not checked live: label expiration after 24 hours and a non-Telegram turn started by a schedule — covered by unit tests (662/662).
+
 # 0.9.80
 
 - С112: an approved person who is a member of the target group (checked live via `getChatMember` at send time) can ask the agent to write into that group; non-members get a plain refusal. Forwarded messages never grant cross-group send or delete rights to anyone, and a bare forward joining an active turn drops its cross-group rights.

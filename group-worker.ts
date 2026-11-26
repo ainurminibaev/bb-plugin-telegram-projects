@@ -16,6 +16,7 @@ import {readGroupImage,readGroupPdf,readGroupDocument} from "./group-pdf";
 import {outboundMessagePayload,plainFromHtml} from "./outbound-message";
 import {routedArtifactKind,routedCaption} from "./routed-message";
 import {ReplyRoutes, routeMarker, busyAnswerText, isBusyAnswer, stripTelegramMarkers} from "./reply-routing";
+import {extractPromiseAnswer, markPromiseDelivered, normalizePromiseWords, promiseWatchKey, recordPromiseLabel, resolvePromiseLabel, type PromiseWatch} from "./promise-labels";
 import {voiceTranscripts} from "./archive";
 import {askNotes} from "./send-command";
 import {turnMessageKey} from "./owner-ask";
@@ -427,6 +428,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         busyAnswerText(e.data.item.text,w.label) : undefined;
       if (again && sameWords(again)!==sameWords(w.labelled ?? "")) {
         w.labelled=again;
+        if (w.label) markPromiseDelivered(store,w.threadId,w.label,again);
         const updateId=nextSyntheticId(store);
         store.put(`group:in:${botId}:${updateId}`,{ownerId:w.ownerId,revision:w.revision,state:"ready",turnId:w.turn,
           answer:again,...(w.replyTo && {replyTo:w.replyTo}),route:{...w.route,updateId}} satisfies Job);
@@ -463,6 +465,56 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   }
   const pending=store.list<Job>(`group:in:${botId}:`);
   pending.sort((a,b)=>a.value.route.updateId-b.value.route.updateId);
+  // 0.9.81: watch non-Telegram turns on group/topic threads for explicit [telegram-answer:<label>] replies (24h TTL).
+  // Unlabelled finals of such turns never leave for Telegram.
+  for (const {key,value:w} of store.list<PromiseWatch>(`promise:watch:${botId}:`)) {
+    if (signal.aborted) return;
+    if (Date.now()-w.at>6*3600_000) {store.del(key);continue;}
+    const policyKey=store.get<string>("group:thread:"+w.threadId);
+    const policy=policyKey ? store.get<GroupTopicPolicy>(policyKey) : undefined;
+    if (!policy || policy.botId!==botId || (policy.ownerId!==undefined && policy.ownerId!==owner) ||
+        policy.chatId!==w.chatId || policy.topicId!==w.topicId || isTopicPaused(store,botId,w.chatId,w.topicId)) {
+      store.del(key); continue;
+    }
+    let events;
+    try {
+      events=await sdk.threads.events.list({threadId:w.threadId,afterSeq:String(w.cursor),order:"asc",limit:"100",signal,
+        types:["item/completed","turn/completed"]});
+    } catch {continue;}
+    let completed=false;
+    for (const e of events as any[]) {
+      w.cursor=Math.max(w.cursor,e.seq);
+      const prevSeq=store.get<number>("group:last-seq:"+w.threadId) ?? 0;
+      if (e.seq>prevSeq) store.put("group:last-seq:"+w.threadId,e.seq);
+      if (e.type==="item/completed" && e.data.item?.type==="agentMessage" && !e.data.item.parentToolCallId) {
+        const ans=extractPromiseAnswer(String(e.data.item.text ?? ""));
+        if (ans) {
+          const entry=resolvePromiseLabel(store,w.threadId,ans.label,{
+            chatId:policy.chatId,topicId:policy.topicId,botId,ownerId:owner,kind:"group",
+          });
+          if (entry && e.seq>(entry.afterSeq ?? 0) &&
+              !routes.cancelled({kind:"telegram",chatId:entry.chatId,topicId:entry.topicId,updateId:entry.updateId,messageId:entry.messageId}) &&
+              normalizePromiseWords(ans.body)!==entry.lastDeliveredWords) {
+            markPromiseDelivered(store,w.threadId,ans.label,ans.body);
+            const updateId=nextSyntheticId(store);
+            store.put(`group:in:${botId}:${updateId}`,{
+              ownerId:owner,revision:policy.revision,state:"ready",turnId:e.scope?.turnId,
+              answer:ans.body,replyTo:entry.messageId,
+              route:{kind:"group",chatId:entry.chatId,topicId:entry.topicId,senderId:owner,
+                threadId:w.threadId,messageId:entry.messageId,updateId,text:""},
+            } satisfies Job);
+          }
+        }
+      }
+      if (e.type==="turn/completed") completed=true;
+    }
+    if (completed) {
+      let stillActive=false;
+      try { stillActive=(await sdk.threads.get({threadId:w.threadId,signal}) as {status?:string}).status==="active"; } catch {}
+      if (!stillActive) {store.del(key); continue;}
+    }
+    store.put(key,w);
+  }
   jobs: for (const {key} of pending) {
     const job=store.get<Job>(key);
     if (!job) continue;
@@ -819,6 +871,14 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (key && (before===undefined || trust(r.senderId)<trust(before))) store.put(key,r.senderId);
       }
       job.cursor=latest[0]?.seq ?? 0;
+      if (job.cursor>(store.get<number>("group:last-seq:"+r.threadId) ?? 0)) store.put("group:last-seq:"+r.threadId,job.cursor);
+      if (r.updateId>0 && r.messageId>0) {
+        recordPromiseLabel(store,{
+          label:job.busyLabel,threadId:r.threadId,chatId:r.chatId,topicId:r.topicId,
+          messageId:r.messageId,updateId:r.updateId,botId,ownerId:owner,revision:job.revision,
+          senderName,excerpt:String(r.ownText ?? r.text ?? ""),afterSeq:job.cursor,kind:"group",
+        });
+      }
       delete r.examples;
       job.state="submitted"; job.submittedAt=Date.now();
       store.put(key,job);
@@ -850,7 +910,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
                 job.answer=finalUnavailable; job.stage="failed"; job.state="ready";
               }
             }
-            job.cursor=e.seq;
+            job.cursor=e.seq; if (e.seq>(store.get<number>("group:last-seq:"+r.threadId) ?? 0)) store.put("group:last-seq:"+r.threadId,e.seq);
             if (job.state==="ready") break;
             continue;
           }
@@ -868,6 +928,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
             const enclosed=e.type==="item/completed" && e.data.item.type==="agentMessage" && !e.data.item.parentToolCallId ?
               busyAnswerText(e.data.item.text,label) : undefined;
             if (enclosed) {
+              markPromiseDelivered(store,r.threadId,label,enclosed);
               job.turnId=turn; job.answer=enclosed; job.state="ready";
               // The turn goes on after this answer: if a subthread's completion joins it, its final is that result.
               // The watch follows the rest of the turn: further answers with this label always; the unlabelled final
@@ -924,7 +985,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
             }
           }
         }
-        job.cursor=e.seq;
+        job.cursor=e.seq; if (e.seq>(store.get<number>("group:last-seq:"+r.threadId) ?? 0)) store.put("group:last-seq:"+r.threadId,e.seq);
         if (job.state!=="submitted") break;
       }
       // A message the thread never took up (no turn, the thread idle) is given once more, then closed honestly.

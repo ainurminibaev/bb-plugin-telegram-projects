@@ -1,3 +1,4 @@
+import { markPromiseDelivered, normalizePromiseWords, recordPromiseLabel, resolvePromiseLabel } from "./promise-labels";
 import {ownerMayAttach} from "./attach-rules";
 import { uploadLimit } from "./telegram-files";
 import {messageExcerpt,voiceTranscripts} from "./archive";
@@ -2264,6 +2265,15 @@ export class ChatBridge {
       // The token of this submission: if the call fails, the bridge checks later whether BB took the message after all.
       const dispatchToken = /\[bb-telegram-reply-route:([a-f0-9-]{36})\]/.exec(String((metadata[0] as {text?: string} | undefined)?.text ?? ""))?.[1];
       if (dispatchToken) this.s.put(dispatchKey(input.updateId), {token: dispatchToken, threadId: b.threadId, at: Date.now()});
+      const busyLabel = busy ? /\[telegram-answer:([a-f0-9-]+)\]/.exec(String((metadata[1] as {text?: string} | undefined)?.text ?? ""))?.[1] : undefined;
+      if (input.updateId > 0 && input.messageId && this.d.owner()) {
+        recordPromiseLabel(this.s, {
+          label: busyLabel, threadId: b.threadId, chatId: input.chatId, topicId: input.topicId,
+          messageId: input.messageId, updateId: input.updateId, botId: 0,
+          ownerId: this.d.owner()!, senderName: "Владелец", excerpt: text,
+          afterSeq: b.cursor ?? 0, kind: "owner",
+        });
+      }
       const dispatched = await this.d.sdk.threads.send({
         threadId: b.threadId,
         mode: busy || followUp ? "steer-if-active" : "queue-if-active",
@@ -3226,8 +3236,27 @@ export class ChatBridge {
               this.s.del(interimKey);
             }
             if (text.startsWith("[telegram-answer:")) {
-              const reply = /^\[telegram-answer:([a-f0-9]{8}|[a-f0-9-]{36})\][ \t]*\r?\n([\s\S]+?)\r?\n\[\/telegram-answer\]$/.exec(text);
+              const reply = /^\[telegram-answer:([a-f0-9]{8}|[a-f0-9-]{36})\][ \t]*(?:\r?\n)?([\s\S]+?)(?:\r?\n)?\[\/telegram-answer\]$/.exec(text);
               const route = reply && this.routes.busyAnswer(b.threadId, event.scope.turnId, reply[1]);
+              const promiseEntry = !route && reply && this.d.owner() && !/\[\/?telegram-answer[\]:]/.test(reply[2])
+                ? resolvePromiseLabel(this.s, b.threadId, reply[1], {
+                    chatId: this.d.owner()!, topicId: b.topicId, botId: 0,
+                    ownerId: this.d.owner()!, kind: "owner",
+                  })
+                : undefined;
+              if (promiseEntry && event.seq > (promiseEntry.afterSeq ?? 0) && hasAssistantReply(reply![2]) &&
+                  normalizePromiseWords(reply![2]) !== promiseEntry.lastDeliveredWords) {
+                const pRoute = {kind:"telegram" as const, chatId:promiseEntry.chatId, topicId:promiseEntry.topicId,
+                  updateId:promiseEntry.updateId, messageId:promiseEntry.messageId};
+                if (!this.routes.cancelled(pRoute)) {
+                  markPromiseDelivered(this.s, b.threadId, reply![1], reply![2].trim());
+                  const prefix="event:"+b.revision+":";
+                  this.enqueue(b.topicId, reply![2].trim(), undefined, prefix+"promise:"+reply![1]+":"+event.seq,
+                    false, undefined, pRoute);
+                }
+                b.cursor = event.seq;
+                continue;
+              }
               if (route && route.chatId === this.d.owner() && route.topicId === b.topicId &&
                   !/\[\/?telegram-answer[\]:]/.test(reply[2])) {
                 if (this.observeNativeBusyResult(b,event.scope.turnId,reply[1],reply[2].trim(),event.seq,

@@ -81,6 +81,7 @@ import {
   type Events,
 } from "./events";
 import {WaitingMarks,type WaitingConfig} from "./waiting-mark";
+import {PROMISE_NOTE_MARKER,formatRecentLabelsNote,promiseWatchKey,recentPromiseLabels,type PromiseWatch} from "./promise-labels";
 import {interactionOpen,codexAsyncQuestions} from "./codex-async-question";
 import { makeChatControlPublisher, writeJsonAtomic } from "./json-file";
 import { chmod, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
@@ -652,8 +653,63 @@ export default async function plugin(bb: BbPluginApi) {
   };
   // One dispatch handler for the whole bridge: a second registration could replace the first.
   let scheduleAccess: ((ctx: Parameters<typeof handoffDispatch>[1]) => Promise<{action: "reject"; message: string} | undefined>) | undefined;
-  bb.experimental_hooks.on("message.dispatch", async ctx =>
-    (await scheduleAccess?.(ctx)) ?? handoffDispatch(store, ctx) ?? bridge?.admitDispatch(ctx) ?? {action: "proceed"});
+  const promiseNoteSteered = new Map<string, number>();
+  const isPromiseNoteInput = (ctx: Parameters<typeof handoffDispatch>[1]) =>
+    ctx.originPluginId === "telegram-projects" &&
+    ctx.input.blocks.some(b => b.type === "text" && typeof b.text === "string" && b.text.startsWith(PROMISE_NOTE_MARKER));
+  const steerPromiseNote = (threadId: string, note: string) => {
+    const now = Date.now();
+    if (now - (promiseNoteSteered.get(threadId) ?? 0) < 3000) return;
+    promiseNoteSteered.set(threadId, now);
+    void (async () => {
+      for (const delay of [120, 250, 500]) {
+        if (lifetime.signal.aborted) return;
+        await new Promise(r => setTimeout(r, delay));
+        if (lifetime.signal.aborted) return;
+        try {
+          const t = await bb.sdk.threads.get({threadId, signal: lifetime.signal}) as {status?: string};
+          if (t.status !== "active") continue;
+          await bb.sdk.threads.send({
+            threadId, mode: "steer",
+            input: [{type: "text", visibility: "agent-only", text: note, mentions: []}],
+          });
+          return;
+        } catch { /* thread idle or rejected start-turn; never start a new turn */ }
+      }
+    })();
+  };
+  const noteNonTelegramTurn = (ctx: Parameters<typeof handoffDispatch>[1]) => {
+    if (ctx.originPluginId === "telegram-projects") return;
+    const threadId = ctx.thread.id;
+    const labels = recentPromiseLabels(store, threadId);
+    if (!labels.length) return;
+    const bot = botId(), owner = ownerId();
+    if (!bot || !owner) return;
+    const policyKey = store.get<string>("group:thread:" + threadId);
+    const policy = policyKey ? store.get<GroupTopicPolicy>(policyKey) : undefined;
+    const isGroup = !!policy && policy.botId === bot && (policy.ownerId === undefined || policy.ownerId === owner);
+    const isOwnerDm = !isGroup && store.list<{threadId?: string}>("chat:binding:").some(r => r.value?.threadId === threadId);
+    if (!isGroup && !isOwnerDm) return;
+    if (isGroup && !store.get(promiseWatchKey(bot, threadId))) {
+      const cursor = store.get<number>("group:last-seq:" + threadId) ?? 0;
+      store.put(promiseWatchKey(bot, threadId), {
+        threadId, chatId: policy.chatId, topicId: policy.topicId, botId: bot, ownerId: owner, cursor, at: Date.now(),
+      } satisfies PromiseWatch);
+      wake?.();
+    }
+    const note = formatRecentLabelsNote(labels);
+    if (note) steerPromiseNote(threadId, note);
+  };
+  bb.experimental_hooks.on("message.dispatch", async ctx => {
+    if (isPromiseNoteInput(ctx)) {
+      return ctx.attempt === "join-turn"
+        ? {action: "proceed"}
+        : {action: "reject", message: "promise_note_only_joins_active_turn"};
+    }
+    const decision = (await scheduleAccess?.(ctx)) ?? handoffDispatch(store, ctx) ?? (await bridge?.admitDispatch(ctx)) ?? {action: "proceed"};
+    if (decision.action === "proceed") noteNonTelegramTurn(ctx);
+    return decision;
+  });
   let flight: Promise<void> | null = null;
   let lastError: string | null = null;
   // No Tasks on this BB: found once, checked again when the plugin reloads; the CLI is not called every cycle.
