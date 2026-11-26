@@ -14,7 +14,7 @@ import {topicStateKey,isTopicPaused} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
 import {FILE_REMOVED,archiveQuery,openArchive,voiceTranscripts,type Archive} from "./archive";
-import {conversationOf,conversationOfThread,guardGroupMemory,groupMemoryAnswer,groupMemoryNotice,movedConversationOf,movedConversationRefusal,readableChats} from "./archive-access";
+import {conversationOf,conversationOfThread,createMembershipCache,guardGroupMemory,groupMemoryAnswer,groupMemoryNotice,movedConversationOf,movedConversationRefusal,readableChats,resolveReadableChats} from "./archive-access";
 import {closeAsk,findGroup,findPerson,findTopic,ownerReport,rememberAsk,sendRefusal,sendTargets,curatorTarget,conversationMayAttach} from "./send-command";
 import {TextPartFailure,editFormatted,sendFormattedFile,sendFormattedText,sendOutboundMessage} from "./outbound-message";
 import {editedInTurnKey,sameWords,sentInTurnKey} from "./group-worker";
@@ -832,6 +832,9 @@ export default async function plugin(bb: BbPluginApi) {
   }).strict();
   // The same reading for the agent tool and for the plugin command: a thread started before an
   // update does not get new agent tools, but every thread can run the command.
+  const archiveMemberCache=createMembershipCache(60_000);
+  const archiveMemberLookup=(signal:AbortSignal)=>(chat:number,person:number)=>
+    telegram(botToken,signal,5_000,()=>chat,apiRoot)<{status:string;is_member?:boolean}>("getChatMember",{chat_id:chat,user_id:person});
   async function readArchive(args:z.infer<typeof archiveToolInput>,threadId:string,signal:AbortSignal) {
       const owner=ownerId(),bot=botId();
       if (!owner || !bot || !archive) throw Error("archive_unavailable");
@@ -840,7 +843,11 @@ export default async function plugin(bb: BbPluginApi) {
         const moved=await movedConversationOf(store,bb.sdk.threads,threadId,signal);
         throw Error(moved ? movedConversationRefusal(moved,movedTitle(moved.chatId)) : "telegram_conversation_required");
       }
-      const readable=readableChats(store,archive,bot,owner,conversation);
+      const singleChat=args.message ? (args.message.chat ?? (conversation.kind==="group" ? conversation.chat : conversation.kind==="person" ? conversation.subject : owner))
+        : args.file ? args.file.chat
+        : typeof args.chat==="string" && /^-?\d+$/.test(args.chat.trim()) ? Number(args.chat.trim()) : undefined;
+      const readable=await resolveReadableChats(store,archive,bot,owner,conversation,
+        archiveMemberLookup(signal),archiveMemberCache,singleChat!==undefined ? [singleChat] : undefined);
       const cfg=await settings.get();
       if (args.message) {
         const chat=args.message.chat ?? (conversation.kind==="group" ? conversation.chat : conversation.kind==="person" ? conversation.subject : owner);
@@ -3240,7 +3247,8 @@ export default async function plugin(bb: BbPluginApi) {
         if (!conversation) return {exitCode:1,stderr:"telegram_conversation_required"};
         const chat=opt.chat!==undefined ? (/^-?\d+$/.test(opt.chat) ? Number(opt.chat) : findGroup(store,bot,opt.chat)) :
           conversation.kind==="group" ? conversation.chat : conversation.kind==="person" ? conversation.subject : owner;
-        if (!readableChats(store,archive,bot,owner,conversation)(chat)) return {exitCode:1,stderr:"not_available_in_this_conversation"};
+        const canRead=await resolveReadableChats(store,archive,bot,owner,conversation,archiveMemberLookup(lifetime.signal),archiveMemberCache,[chat]);
+        if (!canRead(chat)) return {exitCode:1,stderr:"not_available_in_this_conversation"};
         const topic=opt.topic!==undefined ? Number(opt.topic) : conversation.kind==="group" && opt.chat===undefined ? conversation.topic : undefined;
         const m=/^(\d+)\s*(h|d|ч|д)$/i.exec(opt.since ?? "24h");
         const since=m ? Math.floor(Date.now()/1000)-Number(m[1])*(/[dд]/i.test(m[2]) ? 86400 : 3600) : Math.floor(Date.parse(opt.since ?? "")/1000);

@@ -179,3 +179,104 @@ export function readableChats(store:Store,archive:Pick<Archive,"groupsOf">,bot:n
   const member=new Set(archive.groupsOf(bot,c.subject));
   return (chat:number)=>chat===c.subject || shared(chat) || member.has(chat);
 }
+
+export type ArchiveMemberLookup = (chat: number, person: number) => Promise<{ status: string; is_member?: boolean }>;
+
+export function isActiveGroupMember(member: { status?: string; is_member?: boolean } | undefined): boolean {
+  if (!member) return false;
+  return (
+    member.status === "creator" ||
+    member.status === "administrator" ||
+    member.status === "member" ||
+    (member.status === "restricted" && member.is_member === true)
+  );
+}
+
+export type MembershipCache = {
+  get: (bot: number, chat: number, person: number) => boolean | undefined;
+  set: (bot: number, chat: number, person: number, ok: boolean) => void;
+  clear: () => void;
+};
+
+/** Short in-memory cache of confirmed Telegram group membership (default 60 s). Transient API errors are never cached. */
+export function createMembershipCache(ttlMs = 60_000, now: () => number = Date.now): MembershipCache {
+  const entries = new Map<string, { ok: boolean; expiresAt: number }>();
+  const key = (bot: number, chat: number, person: number) => `${bot}:${chat}:${person}`;
+  return {
+    get(bot, chat, person) {
+      const k = key(bot, chat, person);
+      const hit = entries.get(k);
+      if (!hit) return undefined;
+      if (now() >= hit.expiresAt) {
+        entries.delete(k);
+        return undefined;
+      }
+      return hit.ok;
+    },
+    set(bot, chat, person, ok) {
+      if (entries.size >= 2000) {
+        const t = now();
+        for (const [k, v] of entries) if (t >= v.expiresAt) entries.delete(k);
+        if (entries.size >= 2000) entries.clear();
+      }
+      entries.set(key(bot, chat, person), { ok, expiresAt: now() + ttlMs });
+    },
+    clear() {
+      entries.clear();
+    },
+  };
+}
+
+/**
+ * 0.9.85: live membership check (getChatMember) for a non-owner person reading the archive (search, exact message ID,
+ * attachment download, reactions). Silent new members see their group; removed/left members lose access even if they
+ * wrote there earlier; API failures fail closed; owner and group conversations keep their existing rules without calls.
+ */
+export async function resolveReadableChats(
+  store: Store,
+  archive: Pick<Archive, "groupsOf">,
+  bot: number,
+  owner: number,
+  c: Conversation,
+  lookup?: ArchiveMemberLookup,
+  cache?: MembershipCache,
+  onlyChats?: number[],
+): Promise<(chat: number) => boolean> {
+  if (c.kind !== "person") return readableChats(store, archive, bot, owner, c);
+  if (!lookup) return (chat: number) => chat === c.subject;
+
+  const candidates = new Set<number>();
+  if (onlyChats) {
+    for (const id of onlyChats) if (Number.isSafeInteger(id) && id < 0) candidates.add(id);
+  } else {
+    for (const { value: g } of store.list<{ chat: number }>(`visibility:${bot}:group:`)) {
+      if (Number.isSafeInteger(g.chat) && g.chat < 0) candidates.add(g.chat);
+    }
+    for (const { value: p } of store.list<GroupTopicPolicy>("group:policy:")) {
+      if (p.botId === bot && Number.isSafeInteger(p.chatId) && p.chatId < 0) candidates.add(p.chatId);
+    }
+    for (const id of archive.groupsOf(bot, c.subject)) {
+      if (Number.isSafeInteger(id) && id < 0) candidates.add(id);
+    }
+  }
+
+  const allowed = new Set<number>();
+  await Promise.all(
+    [...candidates].map(async (chat) => {
+      const cached = cache?.get(bot, chat, c.subject);
+      if (cached !== undefined) {
+        if (cached) allowed.add(chat);
+        return;
+      }
+      try {
+        const res = await lookup(chat, c.subject);
+        const ok = isActiveGroupMember(res);
+        cache?.set(bot, chat, c.subject, ok);
+        if (ok) allowed.add(chat);
+      } catch {
+        // Fail closed on API error and do not cache the transient failure.
+      }
+    }),
+  );
+  return (chat: number) => chat === c.subject || allowed.has(chat);
+}

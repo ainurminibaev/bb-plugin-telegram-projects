@@ -1,3 +1,7 @@
+# 0.9.85
+
+- Archive access for non-owner private chats (`readArchive`: search, exact message ID, attachment download, and `reactions`): group membership is verified live via Telegram `getChatMember` with a 60 s in-memory cache. Silent new members of a `separate`-memory group can read its archive; left/kicked members lose access even if they wrote there earlier; API failures fail closed without caching.
+
 # 0.9.84
 
 - С117 / С114: bot rights in a group are checked via `getChatMember` at group connection (`notifyGroupsAdded`) and on demand via `bb telegram-projects check-rights [--chat C] [--json]`. Missing rights (administrator, delete messages, pin messages, and manage topics in forums) are reported in one clear line with the exact Telegram UI path (С77).
