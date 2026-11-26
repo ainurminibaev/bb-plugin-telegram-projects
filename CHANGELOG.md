@@ -1,3 +1,7 @@
+# 0.9.84
+
+- С117 / С114: bot rights in a group are checked via `getChatMember` at group connection (`notifyGroupsAdded`), at setup completion, and on demand via `bb telegram-projects check-rights [--chat C] [--json]`. Missing rights (administrator, delete messages, pin messages, and manage topics in forums) are reported in one clear line with the exact Telegram UI path (С77).
+
 # 0.9.83
 
 - Unaddressed group messages via quick decision service (agents-in-chats.md): when `unaddressedFastDecide` is enabled (default `false`), an unaddressed human message in a shared group/topic does not start the main model directly — the bridge asks the server's quick decision service (`vallis-decide`) with chat, topic, message, author, mentions, short topic window, leader info, and the agent's role/zones. A leader joins on `relevant` or `my_zone_only`; a non-leader joins only on `my_zone_only` after waiting a few seconds and verifying no agent has replied yet. Direct mentions skip the quick decision service; service failure or timeout falls back safely to the existing mode table.

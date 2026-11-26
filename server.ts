@@ -84,6 +84,7 @@ import {WaitingMarks,type WaitingConfig} from "./waiting-mark";
 import {acceptActionButtonCallback,buildActionKeyboard,newActionButtonToken,parseActionButtons,rememberActionButtons} from "./action-buttons";
 import {PROMISE_NOTE_MARKER,formatRecentLabelsNote,promiseWatchKey,recentPromiseLabels,type PromiseWatch} from "./promise-labels";
 import {fastDecideEnabledKey} from "./fast-decide";
+import {checkBotGroupRights,formatBotRightsReport,type BotGroupRightsCheck} from "./bot-rights";
 import {interactionOpen,codexAsyncQuestions} from "./codex-async-question";
 import { makeChatControlPublisher, writeJsonAtomic } from "./json-file";
 import { chmod, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
@@ -2629,6 +2630,11 @@ export default async function plugin(bb: BbPluginApi) {
         usage: "bb telegram-projects status --json",
       },
       {
+        name: "check-rights",
+        summary: "Check the bot's real Telegram rights in connected groups (С117, С114)",
+        usage: "bb telegram-projects check-rights [--chat <id|title>] [--json]",
+      },
+      {
         name: "sync",
         summary: "Sync now",
         usage: "bb telegram-projects sync --json",
@@ -2655,7 +2661,7 @@ export default async function plugin(bb: BbPluginApi) {
         const caller=ctx.threadId ? await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal).catch(()=>undefined) : "local";
         return waiting.command(caller,argv);
       }
-      if (!["search-history","send","topic","message","delete","edit","reactions"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
+      if (!["search-history","send","topic","message","delete","edit","reactions","check-rights"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
           (ctx.threadId && (await sharedGroupThreads(store,bb.sdk.threads,[ctx.threadId])).has(ctx.threadId))))
         return {exitCode: 1, stderr: "bridge_admin_command_unavailable_in_group"};
       if(argv[0]==="message"){
@@ -3161,6 +3167,53 @@ export default async function plugin(bb: BbPluginApi) {
           return {exitCode:incomplete ? 1 : 0,...(incomplete ? {stderr:note} : {}),stdout:JSON.stringify({sent:true,messageId,messageIds,...(note && {note}),...(remembered && {ask:remembered}),
             ...(day && {firstToday:day.firstToday,localTime:day.localTime})})};
         } catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
+      }
+      if(argv[0]==="check-rights"){
+        // С117 / С114: verify the bot's real Telegram rights (getChatMember) in connected groups.
+        const bot=botId(),owner=ownerId();
+        if (!bot) return {exitCode:1,stderr:"bot_not_configured"};
+        if (!(await botToken())) return {exitCode:1,stderr:"bot_token_missing"};
+        const username=store.get<string>("bot:username") ?? "";
+        const rest=argv.slice(1);
+        let asJson=false,chatArg:string|undefined;
+        for (let i=0;i<rest.length;i++) {
+          if (rest[i]==="--json") asJson=true;
+          else if (rest[i]==="--chat" && rest[i+1]!==undefined) chatArg=rest[++i];
+          else return {exitCode:2,stderr:"unexpected_argument "+rest[i]+"; usage: check-rights [--chat C] [--json]"};
+        }
+        const caller=ctx.threadId ? await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal).catch(()=>undefined) : undefined;
+        const targets=new Map<number,string>();
+        if (chatArg!==undefined) {
+          let chatId:number;
+          try { chatId=/^-?\d+$/.test(chatArg) ? Number(chatArg) : findGroup(store,bot,chatArg); }
+          catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
+          if (caller && owner && archive && !readableChats(store,archive,bot,owner,caller)(chatId))
+            return {exitCode:1,stderr:"not_available_in_this_conversation"};
+          const title=store.get<{title?:string}>(`visibility:${bot}:group:${chatId}`)?.title ?? "";
+          targets.set(chatId,title);
+        } else if (caller?.kind==="group") {
+          const title=store.get<{title?:string}>(`visibility:${bot}:group:${caller.chat}`)?.title ?? "";
+          targets.set(caller.chat,title);
+        } else {
+          for (const {value:g} of store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`)) {
+            if (Number.isSafeInteger(g.chat) && g.chat<0) targets.set(g.chat,g.title ?? "");
+          }
+          for (const {value:p} of store.list<GroupTopicPolicy>("group:policy:")) {
+            if (p.botId===bot && p.chatId<0 && !targets.has(p.chatId)) {
+              const title=store.get<{title?:string}>(`visibility:${bot}:group:${p.chatId}`)?.title ?? "";
+              targets.set(p.chatId,title);
+            }
+          }
+        }
+        const checks:BotGroupRightsCheck[]=[];
+        for (const [chatId,title] of targets) {
+          const tgChat=telegram(botToken,lifetime.signal,15_000,()=>chatId,apiRoot);
+          checks.push(await checkBotGroupRights(tgChat,bot,username,chatId,{title}));
+        }
+        const ok=checks.every(c=>c.ok);
+        const privacyMode=store.get<boolean>(privacyKey(bot)) ?? null;
+        if (asJson) return {exitCode:0,stdout:JSON.stringify({ok,bot:username,privacyMode,groups:checks})};
+        return {exitCode:0,stdout:formatBotRightsReport(checks)};
       }
       if(argv[0]==="reactions"){
         // С119: bb telegram-projects reactions [--chat C] [--topic T] [--since 24h|ISO] — people's reactions to the bot's
