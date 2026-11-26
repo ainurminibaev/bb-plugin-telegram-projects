@@ -224,7 +224,11 @@ export function routeUpdate(
         (e.type === "bot_command" && value.split("@")[1] === username.slice(1));
     });
     const replyAuthor=m.reply_to_message?.from;
-    const repliesToDifferentBot=replyAuthor?.is_bot===true && replyAuthor.id!==group.botId;
+    // 0.9.78: in a forum every message of a topic formally answers its «topic created» root; when a bot created the topic
+    // that root is the bot's — it is no reply to that bot. Nor is a reply to one's own earlier message: the author goes on
+    // with what they said (a colleague bot continues its message with a mention of this bot).
+    const repliesToDifferentBot=replyAuthor?.is_bot===true && replyAuthor.id!==group.botId &&
+      !(topicId>0 && m.reply_to_message.message_id===topicId) && replyAuthor.id!==from.id;
     // С55: the owner talks to the agent without a mention, unless the message plainly goes to someone else:
     // a reply to another person's message or a mention of another person.
     const toSomeoneElse=(!!replyAuthor && replyAuthor.id!==group.botId && m.reply_to_message.message_id!==topicId) ||

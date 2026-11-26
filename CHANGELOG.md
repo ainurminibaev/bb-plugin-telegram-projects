@@ -1,3 +1,9 @@
+# 0.9.78
+
+- Fix: in a forum topic a colleague agent bot created, messages addressed to this bot were dropped at the door — the first one (every topic message formally answers the «topic created» root, and that root was the bot's) and the bot's own follow-up replying to its earlier message. The topic root and a reply to one's own message no longer count as «a reply to another bot»; a reply to another bot's message stays not ours, even with this bot mentioned. People writing with a mention in such a topic were dropped the same way and are taken now.
+
+Not checked live: a topic made by another bot needs the second stand bot, which is down; covered by a test on the real update form.
+
 # 0.9.77
 
 - Incoming ledger: what the agent wrote before working on and then wrote again is interim — it never closes a message as its answer (the answer is the turn's final or an explicit send); the first of two messages in one turn gets the turn's final, not a note between calls.

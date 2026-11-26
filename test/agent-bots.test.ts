@@ -54,3 +54,23 @@ test("with the setting empty (the default) no bot is taken: the agent path is no
   assert.equal(rows.has(`group:agent-chain:${forum.id}:3`), false, "no chain counting either");
   assert.equal(routeUpdate(msg(32, {id: COLLEAGUE_BOT, is_bot: true}), OWNER, undefined, plain).kind, "ignore");
 });
+
+test("0.9.78: a topic a colleague bot created — its mention of this bot is taken, the first message and its own follow-up; a person's too; a reply to another bot is not", () => {
+  // In a forum every message of a topic formally answers the «topic created» root; here the colleague bot made the topic.
+  const root = {message_id: 3, from: {id: COLLEAGUE_BOT, is_bot: true}, forum_topic_created: {name: "Пилот"}, message_thread_id: 3, chat: forum};
+  const colleagues37 = {message_id: 37, from: {id: COLLEAGUE_BOT, is_bot: true}, message_thread_id: 3, chat: forum, text: "пилот ведём здесь"};
+  const at = (id: number, from: any, text: string, reply: any) => {
+    const u = msg(id, from, text);
+    (u.message as any).reply_to_message = reply;
+    return u;
+  };
+  // With the topic's creation: the colleague's first message, answering only the root.
+  assert.equal(routeUpdate(at(37, {id: COLLEAGUE_BOT, is_bot: true}, "@test_bot пилот ведём здесь", root), OWNER, undefined, policy).kind, "group");
+  // The next one: an explicit reply to the colleague's own message, with this bot mentioned.
+  assert.equal(routeUpdate(at(45, {id: COLLEAGUE_BOT, is_bot: true}, "@test_bot обновил документ", colleagues37), OWNER, undefined, policy).kind, "group");
+  // A person in the same topic: with the mention — taken.
+  assert.equal(routeUpdate(at(46, {id: OWNER}, "@test_bot как дела с пилотом?", root), OWNER, undefined, policy).kind, "group");
+  // A person's reply to the colleague bot is talk with that bot — not ours, even with this bot mentioned.
+  assert.equal(routeUpdate(at(47, {id: PERSON}, "спасибо, принято", colleagues37), OWNER, undefined, {...policy, ownerOnly: false}).kind, "ignore");
+  assert.equal(routeUpdate(at(48, {id: PERSON}, "@test_bot это ему", colleagues37), OWNER, undefined, {...policy, ownerOnly: false}).kind, "ignore");
+});
