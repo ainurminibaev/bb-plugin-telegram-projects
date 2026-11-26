@@ -2653,7 +2653,7 @@ export default async function plugin(bb: BbPluginApi) {
         const caller=ctx.threadId ? await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal).catch(()=>undefined) : "local";
         return waiting.command(caller,argv);
       }
-      if (!["search-history","send","topic","message","delete","edit"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
+      if (!["search-history","send","topic","message","delete","edit","reactions"].includes(argv[0]) && (groupCliRestricted(store, ctx.projectId, ctx.threadId) ||
           (ctx.threadId && (await sharedGroupThreads(store,bb.sdk.threads,[ctx.threadId])).has(ctx.threadId))))
         return {exitCode: 1, stderr: "bridge_admin_command_unavailable_in_group"};
       if(argv[0]==="message"){
