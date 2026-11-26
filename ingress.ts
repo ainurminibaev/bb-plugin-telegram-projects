@@ -235,8 +235,13 @@ export function routeUpdate(
     // С55: the owner talks to the agent without a mention, unless the message plainly goes to someone else:
     // a reply to another person's message or a mention of another person.
     const toSomeoneElse=(!!replyAuthor && replyAuthor.id!==group.botId && m.reply_to_message.message_id!==topicId) ||
-      entities.some((e: any) => (e.type==="mention" && text.slice(e.offset, e.offset + e.length).toLowerCase()!==username) ||
-        (e.type==="text_mention" && e.user?.id!==group.botId));
+      entities.some((e: any) => {
+        const value=text.slice(e.offset, e.offset + e.length).toLowerCase();
+        const cmdBot=e.type==="bot_command" ? value.split("@")[1] : undefined;
+        return (e.type==="mention" && value!==username) ||
+          (e.type==="text_mention" && e.user?.id!==group.botId) ||
+          (!!cmdBot && cmdBot!==username.slice(1));
+      });
     // Agents in chats: with another agent of the organization here, the owner's message without a mention goes only
     // to the topic's leader; an agent that leads by an explicit choice also hears people without a mention.
     const ownerUnaddressed=group.requireMention && !addressed && from.id===owner && group.leadMode!=="mention" &&
@@ -463,8 +468,9 @@ export function acceptGroupUpdate(store: Store, update: any, owner: number | und
         who.username ? "@"+who.username : who.first_name);
     // One leader per topic and chat: a colleague announcing it leads here makes this agent step back.
     if (message.from?.is_bot) {
-      noteBotMessageInTopic(store, botId, chatId, topicId, message.message_id);
-      noteColleagueLead(store, botId, chatId, topicId, message.from.id, String(message.text ?? ""), agentBots(store),
+      const orgBots=agentBots(store);
+      if (!edit && orgBots.includes(message.from.id)) noteBotMessageInTopic(store, botId, chatId, topicId, message.message_id);
+      noteColleagueLead(store, botId, chatId, topicId, message.from.id, String(message.text ?? ""), orgBots,
         Number.isSafeInteger(message.date) ? message.date : undefined);
     }
   }

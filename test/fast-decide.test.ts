@@ -322,3 +322,72 @@ test("fast-decide: processGroupInputs fallback on service failure and direct men
   assert.equal(calls, 2);
   assert.equal(sentTurns.length, 2);
 });
+
+test("fast-decide: visibility chatTitle, /cmd@other_bot ignored, third-party bot does not cancel non-leader wait", async () => {
+  const p = basePolicy({ leadMode: "mention", fastDecideEnabled: true });
+  // /cmd@beta_bot goes to another bot → ignored without fastDecide
+  const cmdOther = routeUpdate(
+    msgUpdate("/status@beta_bot", MEMBER, {
+      entities: [{ type: "bot_command", offset: 0, length: 16 }],
+    }),
+    OWNER,
+    undefined,
+    p,
+  );
+  assert.equal(cmdOther.kind, "ignore");
+
+  // Third-party bot (not in agentBots) must NOT cancel non-leader wait, and chatTitle comes from visibility key
+  const store = memStore();
+  store.put(fastDecideEnabledKey, true);
+  store.put(`visibility:${BOT}:group:${CHAT}`, { title: "Общая группа" });
+  store.put("rights:agent-bots", [COLLEAGUE_BOT]);
+  setAccess(store, BOT, [{ id: MEMBER, name: "Alex" }]);
+  const policy = basePolicy({ leadMode: "mention", leadExplicit: false });
+  store.put(`group:policy:${CHAT}:${TOPIC}`, policy);
+  store.put("group:thread:thr_test_fd", `group:policy:${CHAT}:${TOPIC}`);
+  store.put("group:project:proj_fd", true);
+  store.put(`topic:mode:${BOT}:${CHAT}:${TOPIC}`, { mode: "mention", by: COLLEAGUE_BOT, at: Date.now() });
+  store.put(`chat:agent-name:${COLLEAGUE_BOT}`, "@beta_bot");
+
+  const sentTurns: string[] = [];
+  const prompts: string[] = [];
+  const fakeSdk = {
+    threads: {
+      get: async () => ({ id: "thr_test_fd", projectId: "proj_fd", visibility: "visible", status: "idle" }),
+      send: async (arg: any) => { sentTurns.push(String(arg.input?.[0]?.text ?? "")); return { turnId: "t1" }; },
+      events: { list: async () => [] },
+    },
+  } as any;
+  const fakeTg = () => async () => ({ message_id: 999 });
+
+  const u1 = msgUpdate("Нужно проверить смету");
+  u1.update_id = 700; u1.message.message_id = 300;
+  assert.equal(acceptGroupUpdate(store, u1, OWNER, BOT), true);
+  await processGroupInputs(
+    store, fakeSdk, OWNER, BOT, fakeTg, new AbortController().signal,
+    undefined, undefined, undefined, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    { choose: async (input) => { prompts.push(input); return "my_zone_only"; }, nonLeaderWaitMs: 40 },
+  );
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /Чат: Общая группа/);
+  assert.match(prompts[0], /@beta_bot/);
+
+  // Unrelated third-party bot (id=77777, not in agentBots) posts message 301 → must NOT cancel wait
+  acceptGroupUpdate(store, {
+    update_id: 701,
+    message: {
+      message_id: 301, date: 1700000010, chat: { id: CHAT, type: "supergroup", title: "Общая группа" },
+      message_thread_id: TOPIC, is_topic_message: true,
+      from: { id: 77777, is_bot: true, first_name: "CI Bot" }, text: "build green",
+    },
+  }, OWNER, BOT);
+  assert.equal(anyBotRepliedAfter(store, BOT, CHAT, TOPIC, 300), false);
+
+  await new Promise(r => setTimeout(r, 60));
+  await processGroupInputs(
+    store, fakeSdk, OWNER, BOT, fakeTg, new AbortController().signal,
+    undefined, undefined, undefined, false, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    { choose: async () => "my_zone_only", nonLeaderWaitMs: 40 },
+  );
+  assert.equal(sentTurns.length, 1);
+});

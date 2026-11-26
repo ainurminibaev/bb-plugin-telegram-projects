@@ -1,4 +1,4 @@
-import {curators,topicNote} from "./topic-mode";
+import {agentNameKey,chatModeKey,curators,topicMode,topicNote,type TopicModeRecord} from "./topic-mode";
 import {markHanded} from "./turn-window";
 import {albumCaption,albumChanged,albumKind,deliverAlbumWarnings,sendAlbum,type AlbumMedia} from "./media-album";
 import {beginTopicSend,isTopicPaused} from "./topic-lifecycle";
@@ -618,8 +618,12 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         const recent=fastDecide?.recentTopicText?.(r.chatId,r.topicId,r.messageId) ??
           (store.get<{id:number;text:string}[]>(`group:context:${r.chatId}:${r.topicId}`) ?? [])
             .filter(line=>line.id<r.messageId).slice(-6).map(line=>line.text);
-        const chatTitle=store.get<string>(`group:title:${r.chatId}`) ?? String(r.chatId);
+        const chatTitle=store.get<{title?:string}>(`visibility:${botId}:group:${r.chatId}`)?.title ?? String(r.chatId);
         const topicTitle=forumName(store,botId,r.chatId,r.topicId) ?? (r.topicId ? `тема ${r.topicId}` : "General");
+        const leaderBy=!r.fastDecide.isLeader
+          ? (topicMode(store,botId,r.chatId,r.topicId).record?.by ?? store.get<TopicModeRecord>(chatModeKey(botId,r.chatId))?.by)
+          : undefined;
+        const leaderName=leaderBy && agentBots(store).includes(leaderBy) ? store.get<string>(agentNameKey(leaderBy)) : undefined;
         const verdict=await decideUnaddressed({
           chatTitle,
           chatId:r.chatId,
@@ -631,6 +635,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           mentions:r.fastDecide.mentions ?? [],
           recentMessages:recent,
           isLeader:r.fastDecide.isLeader,
+          leaderName,
           agentName:fastDecide?.agentName || policy.botUsername,
           agentRole:fastDecide?.agentRole ?? "",
           agentZones:fastDecide?.agentZones ?? [],
