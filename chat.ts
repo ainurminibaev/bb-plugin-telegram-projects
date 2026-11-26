@@ -2212,6 +2212,10 @@ export class ChatBridge {
       }
     }
     if (!parts) text = this.withReplyContext(input,text);
+    const messages=parts ?? [input];
+    const forwardedOnly=messages.some(p=>p.forwarded) && !messages.some(p=>!p.forwarded && p.text?.trim());
+    const ownRoute={kind:"telegram" as const,chatId:input.chatId,topicId:input.topicId,updateId:input.updateId,
+      messageId:input.messageId,...(forwardedOnly && {forwardedOnly:true as const})};
     const originalDigest=(this.s.get("group:shared-project:"+b.projectId) ||
       this.s.get("group:topic-manager-project:"+b.projectId) ||
       (b.threadId && input.chatId===this.d.owner() &&
@@ -2242,11 +2246,10 @@ export class ChatBridge {
       if (open.length) text = text + "\n\n" + openQuestionsNote(open, open.length === 1 && (open[0] as any).payload?.kind !== "approval");
       const thread = await this.validThread(b, b.threadId);
       this.watchInput(b);
-      const own = {kind: "telegram" as const, chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId};
       const followUp = input.albumId ? undefined : await this.forwardFollowUp(b, parts ?? [input]);
       const busy = thread.status === "active" && !followUp;
-      const metadata = busy ? this.routes.busyIngress(b.threadId, own, originalDigest) :
-        [this.routes.ingress(b.threadId, followUp?.route ?? own, undefined, undefined, followUp ? undefined : originalDigest)];
+      const metadata = busy ? this.routes.busyIngress(b.threadId, ownRoute, originalDigest) :
+        [this.routes.ingress(b.threadId, followUp?.route ?? ownRoute, undefined, undefined, followUp ? undefined : originalDigest)];
       if (followUp && !busy) this.routes.markFollowUp(metadata[0]);
       if (albumChanged(this.s,input.albumKey)) return;
       let rulesVersion: string | undefined;
@@ -2271,7 +2274,7 @@ export class ChatBridge {
           ...(albumImages??[]),...metadata],
       });
       // С79: a queued message is shown by the «seen» reaction alone; no service line reaches the person.
-      if (!input.albumId) this.rememberDispatch(b.threadId, parts ?? [input], followUp?.route ?? own);
+      if (!input.albumId) this.rememberDispatch(b.threadId, parts ?? [input], followUp?.route ?? ownRoute);
       if (rulesVersion) this.s.put("chat:rules-version:" + b.threadId, rulesVersion);
     } else {
       if (!b.ready) {
@@ -2301,7 +2304,7 @@ export class ChatBridge {
         prompt = "[cli-agents-selection:" + selection.token + "]\n" + text;
       }
       const marker = this.routes.ingress(null,
-        {kind: "telegram", chatId: input.chatId, topicId: input.topicId, updateId: input.updateId, messageId: input.messageId},
+        ownRoute,
         undefined,undefined,prompt===text ? originalDigest : undefined);
       if (albumChanged(this.s,input.albumKey)) return;
       const t = await this.d.sdk.threads.spawn({
@@ -2314,8 +2317,7 @@ export class ChatBridge {
         ...(b.model ? { model: b.model } : {}),
       });
       this.routes.bindIngress(marker, t.id);
-      if (!input.albumId) this.rememberDispatch(t.id, parts ?? [input], {kind: "telegram", chatId: input.chatId, topicId: input.topicId,
-        updateId: input.updateId, messageId: input.messageId});
+      if (!input.albumId) this.rememberDispatch(t.id, parts ?? [input], ownRoute);
       b = { ...b, threadId: t.id, cursor: 0, ready: false };
       this.save(b);
       this.watchInput(b);

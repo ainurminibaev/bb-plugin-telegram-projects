@@ -1,3 +1,10 @@
+# 0.9.80
+
+- С112: an approved person who is a member of the target group (checked live via `getChatMember` at send time) can ask the agent to write into that group; non-members get a plain refusal. Forwarded messages never grant cross-group send or delete rights to anyone, and a bare forward joining an active turn drops its cross-group rights.
+- Owner forum verification (`verifyOwnerForum`): transient Telegram API failures (network, 5xx, 429, timeouts) no longer revoke and drop the owner's message — the job stays queued and retries with exponential backoff; only a definitive audience/membership refusal revokes it.
+
+Not checked live: a non-owner approved person asking to write into another group (member and non-member — on the second stand BB the owner is the second account); an artificial Telegram API failure during `verifyOwnerForum` (cannot be forced against live Telegram API) — both covered by unit tests (657/657).
+
 # 0.9.79
 
 - A turn a person started gets its final: the group's final goes to the verified person who started the turn (a route comparison dropped it); two messages of one person give one final; a message of another thread joining the turn no longer cancels the delivery; when a plugin's request claims the turn's final, the finished result is asked for once and one line goes to the person (inventory № 42).

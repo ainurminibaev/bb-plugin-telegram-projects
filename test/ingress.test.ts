@@ -169,7 +169,7 @@ test("group policy binds a specific chat and topic and keeps the real sender", (
         // 0.9.75: a message the agent answers without a mention carries its arrival time (it may join a forward's window).
         const {arrivedAt,quietAck,...rest}=result as any;
         if (accept) {
-          assert.deepEqual(rest,{kind:"group",...(sender===10 && {ownerTopicText:text}),chatId:chat,topicId:topic,threadId:"group-worker",senderId:sender,messageId:8,updateId:9,text});
+          assert.deepEqual(rest,{kind:"group",typedComment:true,...(sender===10 && {ownerTopicText:text}),chatId:chat,topicId:topic,threadId:"group-worker",senderId:sender,messageId:8,updateId:9,text});
           assert.equal(arrivedAt!==undefined,!requireMention);
           // 0.9.77: in a shared place where the agent answers without a mention, a person's message nobody addressed
           // to it gets no «seen» sign at intake (the owner's own messages keep it).

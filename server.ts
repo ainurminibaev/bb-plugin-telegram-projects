@@ -8,7 +8,8 @@ import {bbMentionsOn,bbText,type BbMentionsSetting} from "./bb-mentions";
 import {learnTopicName,rememberForumName,describeForumTopic,inheritedForumPolicy,inheritableForumTopic,forumDefaults,forumDefaultsKey,forumOptOutKey,forumAutoOffKey,forumAutoKey,reviveArchivedForumTopic,type ForumDefaults} from "./forum-defaults";
 import {handleDelegatedForumCommand} from "./forum-delegation";
 import {applyForumTopicChange,handleOwnerForumCommand,missingRightRefusal} from "./forum-commands";
-import {authorOfTurn,turnStartedByMessage,deleteLog,deleteRefusal,ownMessageChat} from "./delete-command";
+import {ReplyRoutes} from "./reply-routing";
+import {sendParticipants,authorOfTurn,turnStartedByMessage,deleteLog,deleteRefusal,ownMessageChat} from "./delete-command";
 import {topicStateKey,isTopicPaused} from "./topic-lifecycle";
 import {acceptPrivateEmployeeUpdate,greetPendingApproved,privatePolicyKey} from "./employee-private";
 import {basicGroupChats,groupMigration,migrateGroupChat} from "./group-migration";
@@ -20,7 +21,7 @@ import {editedInTurnKey,sameWords,sentInTurnKey} from "./group-worker";
 import {maxAlbumItems,sendAlbum} from "./media-album";
 import {cleanAssistantText,renderTelegramParts} from "./telegram-ux";
 import {acceptOwnerAskCallback,answerTurnText,askButtons,cleanQuestion,forwardOriginal,ownerQuestion,queueAnswerTurn,rememberAskMessage,turnMessageKey} from "./owner-ask";
-import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,groupThreadMatches} from "./group-binding";
+import {sharedGroupThreads,sharedGroupThreadKey,sharedOwnerForum,verifyOwnerForumState,groupThreadMatches} from "./group-binding";
 import {maxImageBytes} from "./group-attachments";
 import { checkOwnerForum, ownerPrivateTopicInput, ownerTopicInput, ownerTopicTool } from "./owner-topic";
 import { privacyKey, privacySummary, rememberMembership, sendVisibilityUpdates } from "./group-visibility";
@@ -2842,12 +2843,18 @@ export default async function plugin(bb: BbPluginApi) {
           // begun from BB (a schedule, another thread, a subthread) — 0.9.77 review.
           const started=(await bb.sdk.threads.events.list({threadId:ctx.threadId,order:"desc",limit:"1",types:["turn/started"],signal:lifetime.signal}))[0];
           const author=authorOfTurn(store,ctx.threadId,started?.scope.kind==="turn" ? started.scope.turnId : undefined);
-          const ownMessage=turnStartedByMessage(store,ctx.threadId,started?.scope.kind==="turn" ? started.scope.turnId : undefined);
+          const turn=started?.scope.kind==="turn" ? started.scope.turnId : undefined;
+          const forwarded=new ReplyRoutes(store).hasForwardedInput(ctx.threadId,turn);
+          const ownMessage=caller?.kind==="owner" ? !forwarded :
+            turnStartedByMessage(store,ctx.threadId,turn);
           // A thread whose group conversation moved to another thread is told so in words, not left with an empty list.
           const moved=caller || !ctx.threadId ? undefined : await movedConversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal);
           if (moved && (opt.targets || !(opt.person && ["owner","владелец"].includes(opt.person.trim().toLowerCase()))))
             return {exitCode:1,stderr:movedConversationRefusal(moved,movedTitle(moved.chatId))};
-          if (opt.targets) return {exitCode:0,stdout:JSON.stringify(sendTargets(store,bot,owner,caller,p=>archive?.groupsOf(bot,p) ?? [],author,ownMessage))};
+          const participants=sendParticipants(store,ctx.threadId,started?.scope.kind==="turn" ? started.scope.turnId : undefined);
+          const lookup=(chat:number,person:number)=>telegram(botToken,lifetime.signal,5_000,()=>chat,apiRoot)
+            <{status:string;is_member?:boolean}>("getChatMember",{chat_id:chat,user_id:person});
+          if (opt.targets) return {exitCode:0,stdout:JSON.stringify(await sendTargets(store,bot,owner,caller,p=>archive?.groupsOf(bot,p) ?? [],author,ownMessage,lookup,participants))};
           let target:{chat:number;topic:number}; let curatorAsked=false;
           const answer=store.get<import("./send-command").Ask>(`send:ask:${bot}:${opt.answer}`);
           if (opt.answer) { if (!answer) return {exitCode:1,stderr:"no_open_question_for_this_answer"}; target=answer.origin; }
@@ -2864,14 +2871,16 @@ export default async function plugin(bb: BbPluginApi) {
           else return {exitCode:2,stderr:"target_required: --chat, --topic, --person or --answer; see --targets"};
           const relayTo=opt.for ? findPerson(store,bot,opt.for) : undefined;
           // A question to the curator is allowed from any conversation, like one to the owner; his chat must be open.
-          const refusal=sendRefusal(store,bot,owner,curatorAsked ? {kind:"owner"} : caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author,ask,relayTo,ownMessage);
+          const refusal=await sendRefusal(store,bot,owner,curatorAsked ? {kind:"owner"} : caller,target,p=>archive?.groupsOf(bot,p) ?? [],opt.answer,author,ask,curatorAsked ? !forwarded : ownMessage,lookup,participants);
           if (refusal) return {exitCode:1,stderr:refusal};
-          // С90: the relayed words are marked: the addressee mentioned, «по просьбе <requester>».
+          if (caller?.kind==="person" && target.chat<0 && relayTo!==undefined && !archive?.groupsOf(bot,relayTo).includes(target.chat))
+            return {exitCode:1,stderr:"relay_needs_addressee_in_this_group: укажи группу, в которой состоит адресат"};
+          // С90: mention the requested addressee.
           if (caller?.kind==="person" && target.chat<0 && relayTo!==undefined && (opt.text || opt["text-file"])) {
             const people=accessList(store,bot);
-            const to=people.find(p=>p.id===relayTo), from=people.find(p=>p.id===caller.subject);
+            const to=people.find(p=>p.id===relayTo);
             const body=opt["text-file"] && opt["text-file"]!=="-" ? await readFile(opt["text-file"],"utf8") : opt.text ?? "";
-            opt.text=`[${to?.name ?? "коллега"}](tg://user?id=${relayTo}), ${body.trim()}\n\n— по просьбе ${from?.name ?? "коллеги"}`;
+            opt.text=`[${to?.name ?? "коллега"}](tg://user?id=${relayTo}), ${body.trim()}`;
             delete opt["text-file"];
           }
           // A question to the owner from another conversation (С43, С67): where it comes from, who asks and their status,
@@ -3396,12 +3405,9 @@ export default async function plugin(bb: BbPluginApi) {
                 void typing?.();
                 await presentProjectProposals(store,owner,bot,telegram(botToken,signal,15000,ownerId,apiRoot));
                 collectDecisionResults(store,owner,bot);
-                const verifyOwnerForum=async (policy:GroupTopicPolicy)=> {
-                  try {
-                    return await sharedOwnerForum(groupTransport(policy.chatId),policy.chatId,owner,bot) &&
-                      ownerId()===owner && botId()===bot && !stateTransferBusy;
-                  } catch { return false; }
-                };
+                const verifyOwnerForum=(policy:GroupTopicPolicy)=>verifyOwnerForumState(
+                  ()=>sharedOwnerForum(groupTransport(policy.chatId),policy.chatId,owner,bot),
+                  ()=>ownerId()===owner && botId()===bot && !stateTransferBusy);
                 await deliverGroupResults(store,bb.sdk,o=>o.owner===ownerId() && o.bot===botId() && !stateTransferBusy,
                   groupTransport,signal,verifyOwnerForum);
                 reactionsFrom(cfg);

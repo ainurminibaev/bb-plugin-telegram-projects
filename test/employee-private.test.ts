@@ -121,7 +121,7 @@ test("С62: on approval the person gets a conversation at once and the agent is 
   assert.deepEqual(h.binds,[ALICE],"the conversation exists before the person writes again");
   assert.deepEqual(h.greetings,[{subject:ALICE,talkedBefore:false}]);
   assert.equal(h.sent.some(x=>x.chat===ALICE && x.text==="Доступ разрешён."),false,"the agent's greeting replaces the plain notice");
-  assert.equal(sendRefusal(h.store as any,BOT,OWNER,{kind:"person",subject:ALICE},{chat:ALICE,topic:0},()=>[]),undefined);
+  assert.equal((await sendRefusal(h.store as any,BOT,OWNER,{kind:"person",subject:ALICE},{chat:ALICE,topic:0},()=>[])),undefined);
   await greetPendingApproved(h.d as any);
   assert.equal(h.greetings.length,1,"no second greeting");
 });
@@ -135,7 +135,7 @@ test("С62: people approved earlier get one greeting once; whoever already talke
   }
   h.store.put(`rights:${BOT}:access`,[{id:ALICE,name:"P21"},{id:BOB,name:"P22"}]);
   // Approved but not bound yet: writing first is allowed.
-  assert.equal(sendRefusal(h.store as any,BOT,OWNER,{kind:"owner"},{chat:ALICE,topic:0},()=>[]),undefined);
+  assert.equal((await sendRefusal(h.store as any,BOT,OWNER,{kind:"owner"},{chat:ALICE,topic:0},()=>[])),undefined);
   await greetPendingApproved(h.d as any);
   // Bob already has a conversation: nothing is sent to him; Alice gets a plain greeting.
   assert.deepEqual(h.greetings,[{subject:ALICE,talkedBefore:false}]);

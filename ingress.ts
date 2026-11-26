@@ -181,7 +181,7 @@ export function messageTopic(m: any): number {
 }
 
 export type Ingress =
-  | {kind: "group"; quietAck?: true; ownerTopicText?: string; ownerUnaddressed?: true; leaderUnaddressed?: true; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; ownText?: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; collectUntil?:number; arrivedAt?:number; voiceText?:string; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string; windowUpTo?:number}
+  | {kind: "group"; forwarded?: true; typedComment?: true; quietAck?: true; ownerTopicText?: string; ownerUnaddressed?: true; leaderUnaddressed?: true; chatId: number; topicId: number; senderId: number; senderName?: string; threadId: string; messageId: number; updateId: number; text: string; ownText?: string; voice?: ChatInput["voice"]; searchBefore?:number; examples?:GroupExample[]; waitUntil?:number; collectUntil?:number; arrivedAt?:number; voiceText?:string; precedingExamples?:GroupExample[]; ambiguousMedia?:true; albumKey?:string; windowUpTo?:number}
   | { kind: "chat"; input: ChatInput; callbackId?: string }
   | { kind: "tasks"; topicId: number }
   | { kind: "pair"; userId: number }
@@ -271,7 +271,7 @@ export function routeUpdate(
     // agent may not answer it at all (0.9.77; people saw 👀 on talk between themselves).
     // People with access talk between themselves too: only the owner's own message keeps the sign.
     const quietAck = !group.requireMention && !addressed && from.id !== owner;
-    return {kind: "group", ...(quietAck && {quietAck:true as const}), ...(ownerTopicText && {ownerTopicText}), ...(ownerUnaddressed && {ownerUnaddressed:true as const}), ...(leaderUnaddressed && {leaderUnaddressed:true as const}), chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
+    return {kind: "group", ...(forwarded ? {forwarded:true as const} : text.trim() ? {typedComment:true as const} : {}), ...(quietAck && {quietAck:true as const}), ...(ownerTopicText && {ownerTopicText}), ...(ownerUnaddressed && {ownerUnaddressed:true as const}), ...(leaderUnaddressed && {leaderUnaddressed:true as const}), chatId: group.chatId, topicId, senderId: from.id, ...(senderName && {senderName}),
       threadId: group.threadId, messageId: m.message_id, updateId: u.update_id, text:prompt, ...(voice && {voice}), ...(examples.length && {examples}), ...collect};
   }
   if (!m || m.chat?.type !== "private" || from?.id !== m.chat?.id)

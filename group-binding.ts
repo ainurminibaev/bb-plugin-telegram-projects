@@ -1,6 +1,6 @@
 import type {BbPluginApi} from "@get-bb/plugin-sdk";
 import type {GroupTopicPolicy} from "./ingress";
-import type {Store,Telegram} from "./model";
+import {TelegramFailure,type Store,type Telegram} from "./model";
 
 export const sharedGroupScopeKey=(chat:number,topic:number)=>`group:shared-scope:${chat}:${topic}`;
 export const sharedGroupThreadKey=(threadId:string)=>"group:shared-thread:"+threadId;
@@ -54,4 +54,20 @@ export async function sharedOwnerForum(tg:Telegram,chatId:number,owner:number,bo
   return ownerMember.user?.id===owner && ownerMember.status==="creator" &&
     botMember.user?.id===bot && botMember.user.is_bot===true &&
     ["administrator","member"].includes(botMember.status) && count===2;
+}
+
+/**
+ * 0.9.80: distinguish a definitive audience/membership refusal from a transient Telegram API failure.
+ * Only an explicit false from sharedOwnerForum or a 400/403 refusal revokes; network, 5xx, 429 and timeouts retry.
+ */
+export async function verifyOwnerForumState(check:()=>Promise<boolean>,active:()=>boolean):Promise<boolean|"retry"> {
+  if (!active()) return false;
+  try {
+    const ok=await check();
+    return ok && active();
+  } catch (error) {
+    if (error instanceof TelegramFailure && (error.ambiguous || error.code==="telegram_429" || error.code==="telegram_network" || /^telegram_5\d\d$/.test(error.code))) return "retry";
+    if (error instanceof Error && (error.name==="AbortError" || error.name==="TimeoutError")) return "retry";
+    return false;
+  }
 }

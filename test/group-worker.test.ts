@@ -3,6 +3,8 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {saveLocalTelegramFile} from "../telegram-files";
 import test from "node:test";
+import {authorOfTurn,turnStartedByMessage,deleteRefusal} from "../delete-command";
+import {sendRefusal} from "../send-command";
 import {ReplyRoutes} from "../reply-routing";
 import assert from "node:assert/strict";
 import {acceptGroupUpdate} from "../ingress";
@@ -1015,6 +1017,63 @@ test("0.9.75: two forwards and a comment of the owner in a place without mention
  assert.equal(inputs[0].split("вторая мысль").length,2,"a merged voice's transcript is there once");
 });
 
+test("С112: a forward gives no cross-group or deletion authority; a typed comment carries its sender’s rights",async t=>{
+ let now=Date.now();
+ t.mock.method(Date,"now",()=>now);
+ for (const sender of [7,8]) for (const busy of [false,true]) for (const comment of [false,true]) {
+   const rows=new Map<string,any>();
+   const store={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v)},del:(k:string)=>{rows.delete(k)},
+     list:<T>(p:string)=>[...rows].filter(([k])=>k.startsWith(p)).map(([key,v])=>({key,value:v as T})),atomic:(fn:()=>void)=>fn()};
+   store.put("group:project:project",true);
+   store.put("group:thread:t","group:policy:-1001:0");
+   store.put("group:policy:-1001:0",{chatId:-1001,topicId:0,threadId:"t",botId:5,botUsername:"bot",ownerOnly:true,requireMention:false});
+   store.put("rights:5:access",[{id:8,name:"Анна"}]);
+   store.put("visibility:5:group:-1002",{chat:-1002});
+   const post=(id:number,text:string,extra:object)=>acceptGroupUpdate(store,{update_id:id,message:{
+     chat:{type:"supergroup",id:-1001},from:{id:sender},message_id:id,text,...extra}},7,5);
+   assert.ok(post(10,"Чужая просьба",sender===7 ? {forward_date:1} : {forward_origin:{type:"hidden_user",sender_user_name:"Антон"}}));
+   if (comment) assert.ok(post(11,"Мой комментарий",{}));
+   now+=60_000;
+   const routes=new ReplyRoutes(store);
+   const initial={kind:"telegram" as const,chatId:-1001,topicId:0,updateId:3};
+   if (busy) {
+     routes.record("t","own",initial);
+     routes.accept("t","turn","own");
+     store.put("group:turn-author:t:3",sender);
+     assert.equal(turnStartedByMessage(store,"t","turn"),true);
+   }
+   const prompts:string[]=[];
+   const sdk={threads:{get:async()=>({id:"t",projectId:"project",visibility:"visible",status:busy ? "active" : "idle"}),
+     events:{list:async(q:any)=>busy && q.types?.includes("turn/started") ? [{scope:{kind:"turn",turnId:"turn"}}] : []},
+     send:async(q:any)=>{
+       prompts.push(q.input[0].text);
+       if (busy) assert.equal(turnStartedByMessage(store,"t","turn"),comment);
+     }}};
+   await processGroupInputs(store,sdk as any,7,5,()=>async<T>()=>({} as T),new AbortController().signal);
+   assert.equal(prompts.length,1);
+   const [prompt]=prompts;
+   assert.match(prompt,/Пересланное[\s\S]*Чужая просьба/);
+   if (comment) assert.match(prompt,/Чужая просьба[\s\S]*Собственный комментарий отправителя\]\nМой комментарий/);
+   const [{value}]=store.list<any>("reply:ingress:");
+   routes.record("t","request",value.route);
+   if (!busy) routes.accept("t","turn","request");
+   if (busy && !comment) {
+     routes.record("t","later",initial);
+     routes.accept("t","turn","later");
+     routes.accept("t","next-turn","later");
+     assert.equal(turnStartedByMessage(store,"t","next-turn"),true);
+   }
+   const own=turnStartedByMessage(store,"t","turn");
+   const author=authorOfTurn(store,"t","turn",7);
+   assert.equal(own,comment);
+   assert.equal(author,comment ? sender : undefined);
+   const caller={kind:"group" as const,chat:-1001};
+   assert.equal(await sendRefusal(store,5,7,caller,{chat:-1002,topic:0},()=>[-1001,-1002],undefined,author,false,own,
+     async()=>({status:"member"}))===undefined,comment);
+   assert.equal(deleteRefusal({caller,owner:7,bot:5,chat:-1001,sender:9,author})===undefined,comment && sender===7);
+ }
+});
+
 test("С113: the bot just added — the agent introduces itself once, as a plain message; Telegram forbids writing — one line to the curator",async()=>{
  for (const forbidden of [false,true]) {
  const rows=new Map<string,any>();
@@ -1170,4 +1229,241 @@ test("0.9.79: two answers with the same label in one turn — «прочитаю
  assert.deepEqual(sent.map(x=>String(x.text).replace(/\s+/g," ").trim()),["• «План стенда» — единственный раздел.","Ещё: подразделов нет.","Итог: список выше."],
    "the repeat of the first is dropped; the rest in the order written, from one batch of events");
  assert.equal(sent[0].reply_parameters?.message_id,10,"as a reply to the same message");
+});
+
+test("0.9.80: verifyOwnerForumState retries on transient Telegram API failures and revokes only on definitive refusal", async () => {
+  const { verifyOwnerForumState } = await import("../group-binding");
+  const { TelegramFailure } = await import("../model");
+  assert.equal(await verifyOwnerForumState(async () => true, () => true), true);
+  assert.equal(await verifyOwnerForumState(async () => false, () => true), false);
+  assert.equal(await verifyOwnerForumState(async () => true, () => false), false);
+  for (const err of [
+    new TelegramFailure("telegram_400"),
+    new TelegramFailure("telegram_401"),
+    new TelegramFailure("telegram_403"),
+    new TelegramFailure("telegram_rights"),
+    new TelegramFailure("topic_missing"),
+    new Error("unexpected"),
+  ]) {
+    assert.equal(await verifyOwnerForumState(async () => { throw err; }, () => true), false, String(err));
+  }
+  const abortErr = Object.assign(new Error("aborted"), { name: "AbortError" });
+  const timeoutErr = Object.assign(new Error("timed out"), { name: "TimeoutError" });
+  for (const err of [
+    new TelegramFailure("telegram_502", 30, true),
+    new TelegramFailure("telegram_429", 10, false),
+    new TelegramFailure("telegram_network", 30, true),
+    abortErr,
+    timeoutErr,
+  ]) {
+    assert.equal(await verifyOwnerForumState(async () => { throw err; }, () => true), "retry", String(err));
+  }
+});
+
+test("0.9.80: transient verifyOwnerForum error keeps owner forum message in queue with backoff and delivers after recovery; real false revokes", async () => {
+  const rows = new Map<string, any>();
+  const store = {
+    get: <T>(k: string) => rows.get(k) as T,
+    put: (k: string, v: unknown) => { rows.set(k, v); },
+    del: (k: string) => { rows.delete(k); },
+    list: <T>(prefix: string) => [...rows].filter(([k]) => k.startsWith(prefix)).map(([key, v]) => ({ key, value: v as T })),
+    atomic: (fn: () => void) => fn(),
+  };
+  store.put("group:shared-thread:t", true);
+  store.put("group:thread:t", "group:policy:-1001234567890:3");
+  store.put("group:policy:-1001234567890:3", {
+    chatId: -1001234567890, topicId: 3, threadId: "t", projectId: "p-owner",
+    botId: 5, botUsername: "bot", ownerId: 7, ownerOnly: true, requireMention: false,
+    ownerSharedProject: true, revision: "r1",
+  });
+  const route = { kind: "group", chatId: -1001234567890, topicId: 3, senderId: 7, threadId: "t", messageId: 10, updateId: 100, text: "привет" };
+  store.put("group:in:5:100", { ownerId: 7, revision: "r1", state: "ready", answer: "Ответ владельцу", route });
+
+  const sdk = {
+    threads: {
+      get: async () => ({ id: "t", projectId: "p-owner", visibility: "visible", parentThreadId: null }),
+      events: { list: async () => [] },
+      send: async () => {},
+    },
+  };
+  const sent: any[] = [];
+  let verdict: boolean | "retry" = "retry";
+  const tick = () => processGroupInputs(
+    store as any, sdk as any, 7, 5,
+    () => async <T>(m: string, p: any) => { if (m === "sendMessage") sent.push(p); return { message_id: 20 } as T; },
+    new AbortController().signal,
+    undefined, undefined, undefined, false,
+    async () => verdict,
+  );
+
+  // 1) Transient error: not revoked, stays in queue with backoff
+  await tick();
+  assert.equal(sent.length, 0);
+  const deferred = store.get<any>("group:in:5:100");
+  assert.ok(deferred, "job must stay queued on transient verify error");
+  assert.equal(deferred.verifyFailures, 1);
+  assert.ok(deferred.verifyRetryAt > Date.now(), "backoff retryAt set");
+  assert.equal(store.get("group:receipt:5:100"), undefined, "not revoked");
+
+  // Still waiting during backoff
+  verdict = true;
+  await tick();
+  assert.equal(sent.length, 0, "skipped while backoff active");
+
+  // Backoff elapsed: delivers cleanly
+  deferred.verifyRetryAt = Date.now() - 1;
+  store.put("group:in:5:100", deferred);
+  await tick();
+  assert.equal(sent.length, 1);
+  assert.match(String(sent[0].text), /Ответ владельцу/);
+  assert.equal(store.get<any>("group:receipt:5:100")?.state, "done");
+
+  // 2) Definitive false: revokes immediately as before
+  const route2 = { ...route, messageId: 11, updateId: 101 };
+  store.put("group:in:5:101", { ownerId: 7, revision: "r1", state: "ready", answer: "Не должно уйти", route: route2 });
+  verdict = false;
+  await tick();
+  assert.equal(sent.length, 1);
+  assert.equal(store.get("group:in:5:101"), undefined);
+  assert.equal(store.get<any>("group:receipt:5:101")?.state, "revoked");
+});
+
+test("0.9.80: verifyOwnerForum retry limit (24h) closes job as revoked instead of retrying forever", async () => {
+  const rows = new Map<string, any>();
+  const store = {
+    get: <T>(k: string) => rows.get(k) as T,
+    put: (k: string, v: unknown) => { rows.set(k, v); },
+    del: (k: string) => { rows.delete(k); },
+    list: <T>(prefix: string) => [...rows].filter(([k]) => k.startsWith(prefix)).map(([key, v]) => ({ key, value: v as T })),
+    atomic: (fn: () => void) => fn(),
+  };
+  store.put("group:shared-thread:t", true);
+  store.put("group:thread:t", "group:policy:-1001234567890:3");
+  store.put("group:policy:-1001234567890:3", {
+    chatId: -1001234567890, topicId: 3, threadId: "t", projectId: "p-owner",
+    botId: 5, botUsername: "bot", ownerId: 7, ownerOnly: true, requireMention: false,
+    ownerSharedProject: true, revision: "r1",
+  });
+  const route = { kind: "group", chatId: -1001234567890, topicId: 3, senderId: 7, threadId: "t", messageId: 12, updateId: 102, text: "привет" };
+  store.put("group:in:5:102", {
+    ownerId: 7, revision: "r1", state: "ready", answer: "Просроченное", route,
+    verifyFirstAt: Date.now() - 25 * 3600_000, verifyFailures: 10,
+  });
+  const sdk = {
+    threads: {
+      get: async () => ({ id: "t", projectId: "p-owner", visibility: "visible", parentThreadId: null }),
+      events: { list: async () => [] },
+      send: async () => {},
+    },
+  };
+  const sent: any[] = [];
+  await processGroupInputs(
+    store as any, sdk as any, 7, 5,
+    () => async <T>(m: string, p: any) => { if (m === "sendMessage") sent.push(p); return { message_id: 21 } as T; },
+    new AbortController().signal,
+    undefined, undefined, undefined, false,
+    async () => "retry",
+  );
+  assert.equal(sent.length, 0);
+  assert.equal(store.get("group:in:5:102"), undefined);
+  assert.equal(store.get<any>("group:receipt:5:102")?.state, "revoked");
+});
+
+test("0.9.80: deliverGroupResults defers on transient verifyOwnerForum error and delivers after recovery", async () => {
+  const { deliverGroupResults } = await import("../group-result");
+  const rows = new Map<string, any>();
+  const store = {
+    get: <T>(k: string) => rows.get(k) as T,
+    put: (k: string, v: unknown) => { rows.set(k, v); },
+    del: (k: string) => { rows.delete(k); },
+    list: <T>(prefix: string) => [...rows].filter(([k]) => k.startsWith(prefix)).map(([key, v]) => ({ key, value: v as T })),
+    atomic: (fn: () => void) => fn(),
+  };
+  store.put("group:shared-thread:t", true);
+  store.put("group:thread:t", "group:policy:-1001234567890:3");
+  store.put("group:policy:-1001234567890:3", {
+    chatId: -1001234567890, topicId: 3, threadId: "t", projectId: "p-owner",
+    botId: 5, botUsername: "bot", ownerId: 7, ownerOnly: true, requireMention: false,
+    ownerSharedProject: true, revision: "r1",
+  });
+  store.put("group:origin:task-1", {
+    owner: 7, bot: 5, sender: 7, chatId: -1001234567890, topicId: 3, messageId: 10,
+    threadId: "t", projectId: "p-owner", revision: "r1",
+  });
+  store.put("group:result:task-1", { state: "queued", text: "Итог подтреда" });
+  store.put("group:result-queue:task-1", true);
+
+  const sdk = {
+    threads: { get: async () => ({ id: "t", projectId: "p-owner", visibility: "visible", parentThreadId: null }) },
+  };
+  const sent: any[] = [];
+  let verdict: boolean | "retry" = "retry";
+  const tick = () => deliverGroupResults(
+    store as any, sdk as any, () => true,
+    () => async <T>(m: string, p: any) => { if (m === "sendMessage") sent.push(p); return { message_id: 30 } as T; },
+    new AbortController().signal,
+    async () => verdict,
+  );
+  await tick();
+  assert.equal(sent.length, 0);
+  const res = store.get<any>("group:result:task-1");
+  assert.equal(res.state, "queued");
+  assert.equal(res.verifyFailures, 1);
+  assert.ok(res.verifyRetryAt > Date.now());
+
+  verdict = true;
+  res.verifyRetryAt = Date.now() - 1;
+  store.put("group:result:task-1", res);
+  await tick();
+  assert.equal(sent.length, 1);
+  assert.match(String(sent[0].text), /Итог подтреда/);
+  assert.equal(store.get<any>("group:result:task-1")?.state, "sent");
+});
+
+test("0.9.80: transient verifyOwnerForum error on part 2 of a multipart message resumes at part 2 without duplicating part 1", async () => {
+  const rows = new Map<string, any>();
+  const store = {
+    get: <T>(k: string) => rows.get(k) as T,
+    put: (k: string, v: unknown) => { rows.set(k, v); },
+    del: (k: string) => { rows.delete(k); },
+    list: <T>(prefix: string) => [...rows].filter(([k]) => k.startsWith(prefix)).map(([key, v]) => ({ key, value: v as T })),
+    atomic: (fn: () => void) => fn(),
+  };
+  store.put("group:shared-thread:t", true);
+  store.put("group:thread:t", "group:policy:-1001234567890:3");
+  store.put("group:policy:-1001234567890:3", {
+    chatId: -1001234567890, topicId: 3, threadId: "t", projectId: "p-owner",
+    botId: 5, botUsername: "bot", ownerId: 7, ownerOnly: true, requireMention: false,
+    ownerSharedProject: true, revision: "r1",
+  });
+  const longAnswer = "ЧАСТЬ1 " + "а".repeat(3600) + "\n\nЧАСТЬ2 " + "б".repeat(2000);
+  const route = { kind: "group", chatId: -1001234567890, topicId: 3, senderId: 7, threadId: "t", messageId: 15, updateId: 105, text: "привет" };
+  store.put("group:in:5:105", { ownerId: 7, revision: "r1", state: "ready", answer: longAnswer, route });
+  const sdk = {
+    threads: {
+      get: async () => ({ id: "t", projectId: "p-owner", visibility: "visible", parentThreadId: null }),
+      events: { list: async () => [] },
+      send: async () => {},
+    },
+  };
+  const sent: any[] = [];
+  let calls = 0;
+  const tick = () => processGroupInputs(
+    store as any, sdk as any, 7, 5,
+    () => async <T>(m: string, p: any) => { if (m === "sendMessage") sent.push(p); return { message_id: 50 + sent.length } as T; },
+    new AbortController().signal,
+    undefined, undefined, undefined, false,
+    async () => { calls++; return calls === 2 ? "retry" : true; },
+  );
+  await tick();
+  assert.equal(sent.length, 1, "only part 1 sent before transient error on part 2");
+  const deferred = store.get<any>("group:in:5:105");
+  assert.equal(deferred.part, 1, "part index preserved on deferVerify");
+  deferred.verifyRetryAt = Date.now() - 1;
+  store.put("group:in:5:105", deferred);
+  await tick();
+  assert.equal(sent.length, 2, "part 2 sent on retry without duplicating part 1");
+  assert.match(String(sent[0].text), /^ЧАСТЬ1/);
+  assert.match(String(sent[1].text), /ЧАСТЬ2/);
+  assert.equal(store.get<any>("group:receipt:5:105")?.state, "done");
 });

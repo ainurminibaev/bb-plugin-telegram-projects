@@ -3603,6 +3603,7 @@ test("a forwarded 2476-character private message reaches the agent in full, and 
       if(routed.kind!=="chat") throw Error("missing input");
       await f.bridge.handle(routed.input);
       const prompt=f.calls.find(c=>c[0]==="spawn")[1].input[0].text;
+      assert.equal(f.store.list<any>("reply:ingress:")[0].value.route.forwardedOnly===true,mode==="forward");
       if(mode==="reply"){
         assert.ok(prompt.includes(text.slice(0,2000)+"…[обрезано: показано 2000 из 2476 знаков"));
         assert.ok(prompt.includes("search-history --message "+OWNER_ID+":63]"));

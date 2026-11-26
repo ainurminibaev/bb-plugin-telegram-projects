@@ -11,7 +11,8 @@ import {currentGroup} from "./group-migration";
 // Who may send where follows the calling conversation:
 // - the owner's conversation: any group and topic, any person with access;
 // - a group: its own topics, and people with access who write in this group;
-// - a person's private chat: only itself;
+// - approved authors of a Telegram message: other groups where they are current members;
+// - a person's private chat: also itself;
 // - any conversation: back to the conversation whose open question it is answering.
 // A question sent for another conversation is remembered, so the answer can go back there.
 
@@ -97,8 +98,10 @@ const reachable=(store:Store,bot:number,owner:number,person:number)=>
     store.get<{state?:string}>(`employee:private:access:${bot}:${owner}:${person}`)?.state==="approved");
 
 /** Undefined when allowed, otherwise the reason. */
-export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversation|undefined,target:SendTarget,
-  groupsOf:(person:number)=>number[],askId?:string,author?:number,ask?:boolean,relayTo?:number,ownMessage=true):string|undefined {
+type MembershipLookup=(chat:number,person:number)=>Promise<{status:string;is_member?:boolean}>;
+
+export async function sendRefusal(store:Store,bot:number,owner:number,caller:Conversation|undefined,target:SendTarget,
+  groupsOf:(person:number)=>number[],askId?:string,author?:number,ask?:boolean,ownMessage=true,lookup?:MembershipLookup,participants?:number[]):Promise<string|undefined> {
   // П28: an ordinary thread of this BB writes to the owner only (a group or a person stays a Telegram conversation's business).
   if (!caller) return target.chat===owner && !askId ? undefined : "send_only_from_a_telegram_conversation: an ordinary thread writes only to the owner (--person owner)";
   if (askId) {
@@ -109,19 +112,28 @@ export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversat
   }
   if (target.chat<0) {
     if (!store.get(`visibility:${bot}:group:${target.chat}`)) return "bot_is_not_in_this_group";
-    if (caller.kind==="owner") return;
+    if (caller.kind==="owner") return ownMessage ? undefined : "group_not_allowed_from_forward";
     if (caller.kind==="group" && caller.chat===target.chat) return;
     // С113: on the owner's own request («представься там») a group's conversation (a coordination chat) writes to any
     // group the bot is in — the first message to a new group included.
     if (caller.kind==="group" && author===owner && ownMessage) return;
-    // С90: «скажи такому-то» from an approved person's private chat goes to a group where both of them are,
-    // with the addressee mentioned and «по просьбе …» (--for PERSON); never to a group without the requester.
-    if (caller.kind==="person" && groupsOf(caller.subject).includes(target.chat)) {
-      if (relayTo!==undefined && groupsOf(relayTo).includes(target.chat)) return;
-      return "relay_needs_addressee_in_this_group: передать можно только в группу, где состоите и вы, и адресат: --for ИМЯ";
+    const authors=participants ?? (author===undefined ? [] : [author]);
+    if (ownMessage && authors.length && authors.every(id=>hasAccess(store,bot,owner,id)) &&
+        (caller.kind!=="person" || authors.includes(caller.subject))) {
+      const title=groupTitle(store,bot,target.chat);
+      for (const id of authors) {
+        if (id===owner) continue;
+        const name=accessList(store,bot).find(p=>p.id===id)?.name ?? String(id);
+        const member=await lookup?.(target.chat,id).catch(()=>undefined);
+        if (member && (["member","administrator","creator"].includes(member.status) ||
+            (member.status==="restricted" && member.is_member===true))) continue;
+        if (member && (["left","kicked"].includes(member.status) || (member.status==="restricted" && member.is_member===false)))
+          return `писать в «${title}» по просьбе ${name} нельзя: его нет в этой группе`;
+        return `не удалось проверить, состоит ли ${name} в «${title}»`;
+      }
+      return;
     }
-    return "group_not_allowed_from_this_conversation: из этого разговора писать в другую группу можно только по просьбе владельца — "+
-      "попроси его здесь написать это самому или ответь людям здесь; бот в той группе есть, добавлять его не нужно";
+    return "group_not_allowed_from_this_conversation: написать в другую группу может попросить владелец или одобренный участник той группы своим сообщением";
   }
   // Any conversation may ask the owner (С43): a question whose answer comes back here. A group's conversation may also
   // send the owner a short report («отпиши мне потом»): text only, marked with the group, see OWNER_REPORT_GAP_MS.
@@ -141,13 +153,18 @@ export function sendRefusal(store:Store,bot:number,owner:number,caller:Conversat
 }
 
 /** Where this conversation may send, for the agent to pick names from. */
-export function sendTargets(store:Store,bot:number,owner:number,caller:Conversation|undefined,groupsOf:(person:number)=>number[],author?:number,ownMessage=true) {
-  const groups=store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`).map(r=>r.value)
-    .filter(g=>!sendRefusal(store,bot,owner,caller,{chat:g.chat,topic:0},groupsOf,undefined,author,false,undefined,ownMessage))
-    .map(g=>({chat:g.chat,title:g.title ?? String(g.chat),topics:groupTopics(store,bot,g.chat)}));
-  const people=accessList(store,bot).map(p=>({...p,reachable:reachable(store,bot,owner,p.id)}))
-    .filter(p=>!p.reachable || !sendRefusal(store,bot,owner,caller,{chat:p.id,topic:0},groupsOf,undefined,author))
-    .map(p=>({id:p.id,name:p.name,...(!p.reachable && {note:"has not started the bot: mention them in a group"})}));
+export async function sendTargets(store:Store,bot:number,owner:number,caller:Conversation|undefined,groupsOf:(person:number)=>number[],author?:number,ownMessage=true,lookup?:MembershipLookup,participants?:number[]) {
+  const groups=[];
+  for (const {value:g} of store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`)) {
+    if (!await sendRefusal(store,bot,owner,caller,{chat:g.chat,topic:0},groupsOf,undefined,author,false,ownMessage,lookup,participants))
+      groups.push({chat:g.chat,title:g.title ?? String(g.chat),topics:groupTopics(store,bot,g.chat)});
+  }
+  const people=[];
+  for (const p of accessList(store,bot)) {
+    const open=reachable(store,bot,owner,p.id);
+    if (!open || !await sendRefusal(store,bot,owner,caller,{chat:p.id,topic:0},groupsOf,undefined,author))
+      people.push({id:p.id,name:p.name,...(!open && {note:"has not started the bot: mention them in a group"})});
+  }
   return {groups,people};
 }
 

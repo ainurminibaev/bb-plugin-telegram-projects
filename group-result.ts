@@ -22,7 +22,7 @@ export const groupResultStatus = z.object({
   state:z.enum(["queued","started","sent","revoked","unknown","rejected","cancelled","source_unavailable"]), messageId:z.number().optional(),
 });
 type Status = z.infer<typeof groupResultStatus>;
-type Result = Status & {text:string};
+type Result = Status & {text:string} & {verifyRetryAt?:number;verifyFailures?:number;verifyFirstAt?:number};
 export type GroupOrigin = {
   owner:number; bot:number; sender:number; chatId:number; topicId:number; messageId:number;
   threadId:string; revision:string; projectId:string; executionToken?:string;
@@ -148,7 +148,7 @@ export function queueGroupReminder(store:Store,owner:number,bot:number,args:z.in
 // record uncertainty together before the request can reach Telegram.
 export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
   current:(origin:GroupOrigin)=>boolean, transport:(chatId:number)=>Telegram, signal:AbortSignal,
-  verifyOwnerForum?:(policy:GroupTopicPolicy)=>Promise<boolean>) {
+  verifyOwnerForum?:(policy:GroupTopicPolicy)=>Promise<boolean|"retry">) {
   for (const row of [...store.list("group:result-queue:"), ...store.list("group:reminder-queue:")]) {
     if (signal.aborted) return;
     const reminder=row.key.startsWith("group:reminder-queue:");
@@ -157,7 +157,19 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     const result=store.get<Result>(key);
     if (!result || result.state!=="queued") continue;
     const scheduled=reminder ? store.get<Reminder>(key) : undefined;
-    if (scheduled && Math.max(scheduled.dueAt,scheduled.retryAt ?? 0)>Date.now()) continue;
+    if (Math.max(scheduled?.dueAt ?? 0,scheduled?.retryAt ?? 0,result.verifyRetryAt ?? 0)>Date.now()) continue;
+    const VERIFY_RETRY_MAX_MS=24*3600_000;
+    const deferVerify=()=>{
+      const now=Date.now();
+      const first=result.verifyFirstAt ?? now;
+      if (now-first>=VERIFY_RETRY_MAX_MS) {
+        console.warn(`verifyOwnerForum: result retry limit (24h) reached for task=${taskId}; closing as revoked`);
+        finish("revoked");
+        return;
+      }
+      const failures=(result.verifyFailures ?? 0)+1;
+      store.put(key,{...result,verifyFirstAt:first,verifyFailures:failures,verifyRetryAt:now+Math.min(300_000,5_000*2**(failures-1))});
+    };
     const satisfied=()=>scheduled && (scheduled.waitingFor==="pdf"
       ? !!store.get("group:completed-pdf:"+taskId) : !!store.get("group:result:"+taskId));
     const origin=store.get<GroupOrigin>("group:origin:"+taskId);
@@ -176,7 +188,13 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     const threadAccess=async()=>{
       if (!allowed()) return "revoked";
       const policy=store.get<GroupTopicPolicy>(policyKey)!;
-      if (policy.ownerSharedProject && !await verifyOwnerForum?.(policy)) return "revoked";
+      if (policy.ownerSharedProject) {
+        let verdict:boolean|"retry";
+        try { verdict=verifyOwnerForum ? await verifyOwnerForum(policy) : false; }
+        catch { verdict="retry"; }
+        if (verdict==="retry") {deferVerify(); return "unavailable";}
+        if (!verdict) return "revoked";
+      }
       if (policy.isolated) {
         const worker=groupExecutor(chatId,topicId);
         if (worker?.threadId!==threadId || worker.projectId!==projectId || !origin.executionToken) return "revoked";
@@ -236,8 +254,13 @@ export async function deliverGroupResults(store:Store,sdk:BbPluginApi["sdk"],
     text=stripTelegramMarkers(text).trim();
     if (!text) {finish("cancelled");continue;}
     const policy=store.get<GroupTopicPolicy>(policyKey);
-    if ((policy?.ownerSharedProject && !await verifyOwnerForum?.(policy)) || !allowed()) {
-      finish("revoked");continue;
+    if (!allowed()) {finish("revoked");continue;}
+    if (policy?.ownerSharedProject) {
+      let verdict:boolean|"retry";
+      try { verdict=verifyOwnerForum ? await verifyOwnerForum(policy) : false; }
+      catch { verdict="retry"; }
+      if (verdict==="retry") {deferVerify();continue;}
+      if (!verdict) {finish("revoked");continue;}
     }
     finish("unknown");
     try {

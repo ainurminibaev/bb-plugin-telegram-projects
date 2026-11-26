@@ -19,7 +19,7 @@ import {ReplyRoutes, routeMarker, busyAnswerText, isBusyAnswer, stripTelegramMar
 import {voiceTranscripts} from "./archive";
 import {askNotes} from "./send-command";
 import {turnMessageKey} from "./owner-ask";
-import {turnAuthorKey,turnMixedKey} from "./delete-command";
+import {turnAuthorKey,turnMixedKey,turnParticipantsKey} from "./delete-command";
 import {canInvokeGroup, contextMediaPrefix, releaseGroupAlbums, type GroupAlbumScope, type GroupTopicPolicy, type Ingress} from "./ingress";
 import type {SavedTelegramFile} from "./telegram-files";
 import type {GroupExample} from "./ingress";
@@ -124,7 +124,7 @@ type Job = {
   replyTo?:number;
   /** When the message was given to the thread; a submitted message without a turn does not live forever. */
   submittedAt?:number; resubmitted?:boolean; started?:boolean; refusedNotified?:boolean;
-  executionToken?:string; executorRetryAt?:number;
+  executionToken?:string; executorRetryAt?:number; verifyRetryAt?:number; verifyFailures?:number; verifyFirstAt?:number;
   pdfIndex?:number; failedPdfs?:string[];
   albumSent?:number[];
   imageIndex?:number; failedImages?:string[];
@@ -277,7 +277,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   owner:number, botId:number, transport:(chatId:number)=>Telegram, signal:AbortSignal,
   transcribe?:(voice:NonNullable<GroupInput["voice"]>)=>Promise<string>, fileHostId?:string,
   receiveExample?:(example:GroupExample,route:GroupInput)=>Promise<SavedTelegramFile|ImageAttachment>, visibleProgress=false,
-  verifyOwnerForum?:(policy:GroupTopicPolicy)=>Promise<boolean>,
+  verifyOwnerForum?:(policy:GroupTopicPolicy)=>Promise<boolean|"retry">,
   reactions?:()=>{chooser?:ReactionChooser;options:ReactionOption[]},
   /** The rules in force for a project and their fingerprint, from the platform plugin (0.4.4); null outside an organization. */
   turnRules?:(projectId:string)=>Promise<{version:string;text:string}|null>,
@@ -325,7 +325,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       (policy.ownerId===undefined || policy.ownerId===owner) &&
       !isTopicPaused(store,botId,target.chatId,target.topicId) &&
       canInvokeGroup(policy,owner,scope.senderId) &&
-      (!policy.ownerSharedProject || !!await verifyOwnerForum?.(policy));
+      (!policy.ownerSharedProject || (await verifyOwnerForum?.(policy).catch(()=>"retry"))===true);
   },signal);
   // A busy job starts observing at submission, possibly midway through a BB turn.
   // Its first locally observed acceptance is insufficient proof of who started that turn.
@@ -382,7 +382,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     return first;
   }
   const destinationOf=(r:GroupInput)=>({kind:"telegram" as const,chatId:r.chatId,topicId:r.topicId,
-    updateId:r.updateId,messageId:r.messageId});
+    updateId:r.updateId,messageId:r.messageId,...(r.forwarded && !r.typedComment && {forwardedOnly:true as const})});
   // Separate messages from one verified group author can share one final. This
   // is a delivery decision only; it confers no permissions or delegated claims.
   async function finalFor(r:GroupInput,turn:string,through:number) {
@@ -463,7 +463,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
   }
   const pending=store.list<Job>(`group:in:${botId}:`);
   pending.sort((a,b)=>a.value.route.updateId-b.value.route.updateId);
-  jobs: for (const {key,value:job} of pending) {
+  jobs: for (const {key} of pending) {
+    const job=store.get<Job>(key);
+    if (!job) continue;
     if (signal.aborted) return;
     const r=job.route;
     if (isTopicPaused(store,botId,r.chatId,r.topicId)) continue;
@@ -483,6 +485,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       finish(job.state);
       continue;
     }
+    if (job.verifyRetryAt!==undefined && job.verifyRetryAt>Date.now()) continue;
     const allowed=()=>{
       const p=store.get<GroupTopicPolicy>(`group:policy:${r.chatId}:${r.topicId}`);
       sourceDenied=!sourcesVisible(p?.deliverySources,botId,r.chatId,r.topicId);
@@ -492,7 +495,36 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
     if (!allowed()) {finish("revoked");continue;}
     const topicKey = `group:policy:${r.chatId}:${r.topicId}`;
     const policy=store.get<GroupTopicPolicy>(topicKey)!;
-    const safeToSend=async()=>!policy.ownerSharedProject || !!await verifyOwnerForum?.(policy) && allowed();
+    const checkSafeToSend=async():Promise<"ok"|"revoked"|"retry">=>{
+      if (!allowed()) return "revoked";
+      if (!policy.ownerSharedProject) return "ok";
+      let verdict:boolean|"retry";
+      try { verdict=verifyOwnerForum ? await verifyOwnerForum(policy) : false; }
+      catch { verdict="retry"; }
+      if (verdict==="retry") return "retry";
+      return verdict && allowed() ? "ok" : "revoked";
+    };
+    const VERIFY_RETRY_MAX_MS=24*3600_000;
+    const deferVerify=()=>{
+      const now=Date.now();
+      const first=job.verifyFirstAt ?? now;
+      if (now-first>=VERIFY_RETRY_MAX_MS) {
+        console.warn(`verifyOwnerForum: retry limit (24h) reached for chat=${r.chatId} topic=${r.topicId} msg=${r.messageId}; closing as revoked`);
+        finish("revoked");
+        return;
+      }
+      const failures=(job.verifyFailures ?? 0)+1;
+      job.verifyFirstAt=first;
+      job.verifyFailures=failures;
+      job.verifyRetryAt=now+Math.min(300_000,5_000*2**(failures-1));
+      store.put(key,job);
+    };
+    const clearVerify=()=>{
+      if (job.verifyFailures!==undefined || job.verifyRetryAt!==undefined || job.verifyFirstAt!==undefined) {
+        delete job.verifyFailures; delete job.verifyRetryAt; delete job.verifyFirstAt;
+        store.put(key,job);
+      }
+    };
     const executor=policy.isolated ? groupExecutor(r.chatId,r.topicId) : undefined;
     if (policy.isolated && (!executor || executor.projectId!==policy.projectId || executor.threadId!==r.threadId)) {
       finish("revoked");continue;
@@ -544,7 +576,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       const role=senderRole(store,botId,owner,r.chatId,r.senderId,provider);
       if (executor || role==="none" || !belongsToGroup(thread)) {finish("revoked");continue;}
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
-      if (!allowed() || !await safeToSend()) {finish("revoked");continue;}
+      {const safe=await checkSafeToSend(); if (safe==="revoked") {finish("revoked");continue;} if (safe==="retry") {deferVerify();continue;} clearVerify();}
       const {token,label}=routes.labelledIngress(r.threadId,dest);
       job.busyLabel=label; job.cursor=latest[0]?.seq ?? 0;
       job.state="submitted"; job.submittedAt=Date.now();
@@ -594,7 +626,9 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       if (chain.waiting) continue;                         // a window is still open or a voice is not yet transcribed
       for (const m of chain.members) {
         const mr=m.job.route;
-        r.text += "\n\n"+(mr.ownText ?? mr.text)+(mr.ownText!==undefined && mr.voiceText ? "\n"+mr.voiceText : "");
+        if (mr.forwarded) r.forwarded=true;
+        if (mr.typedComment) r.typedComment=true;
+        r.text += "\n\n"+(r.forwarded && mr.typedComment ? "[Собственный комментарий отправителя]\n" : "")+(mr.ownText ?? mr.text)+(mr.ownText!==undefined && mr.voiceText ? "\n"+mr.voiceText : "");
         if (mr.examples?.length) r.examples=[...(r.examples ?? []),...mr.examples];
         // Topic window: the merged messages are in this turn — the next turn does not bring them again as new.
         if (r.windowUpTo!==undefined) r.windowUpTo=Math.max(r.windowUpTo,mr.messageId);
@@ -761,19 +795,26 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         inForce ? `Правила организации без изменений (версия ${inForce.version}).` : "";
       const permissionMode=permissionModeFor(role,provider,store.get<PermissionMode>(accessModeKey));
       const latest=await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",signal});
-      if (!allowed() || !await safeToSend()) {finish("revoked");continue;}
+      {const safe=await checkSafeToSend(); if (safe==="revoked") {finish("revoked");continue;} if (safe==="retry") {deferVerify();continue;} clearVerify();}
       // A message that arrives while the thread works goes into the running turn and gets its own answer
       // there, as in the owner's chat. If that turn ends without it, the message is sent again in turn order.
       const busy=(thread as {status?:string}).status==="active" && !job.busyOnce;
-      const metadata=busy ? routes.busyIngress(r.threadId,dest,undefined,senderName) : [routes.ingress(r.threadId,dest)];
+      const submission=destinationOf(r);
+      const metadata=busy ? routes.busyIngress(r.threadId,submission,undefined,senderName) : [routes.ingress(r.threadId,submission)];
       if (busy) job.busyLabel=/\[telegram-answer:([a-f0-9-]+)\]/.exec(metadata[1]?.text ?? "")?.[1];
       else delete job.busyLabel;
       // A message joining a running turn lowers that turn's rights to its author's before the agent sees it (review 0.9.77).
-      if (busy && r.senderId!==owner) {
+      if (busy && (r.senderId!==owner || submission.forwardedOnly)) {
         const running=(await sdk.threads.events.list({threadId:r.threadId,order:"desc",limit:"1",types:["turn/started"],signal}))[0];
         // The least trusted of those who joined stays: the owner, then people with access, then anyone else.
         const trust=(id:number)=>id===owner ? 2 : hasAccess(store,botId,owner,id) ? 1 : 0;
         const key=running?.scope.kind==="turn" ? turnMixedKey(r.threadId,running.scope.turnId) : undefined;
+        if (running?.scope.kind==="turn") {
+          if (submission.forwardedOnly) routes.markForwardedTurn(r.threadId,running.scope.turnId);
+          const participants=turnParticipantsKey(r.threadId,running.scope.turnId);
+          const ids=store.get<number[]>(participants) ?? [];
+          if (!ids.includes(r.senderId)) store.put(participants,[...ids,r.senderId]);
+        }
         const before=key ? store.get<number>(key) : undefined;
         if (key && (before===undefined || trust(r.senderId)<trust(before))) store.put(key,r.senderId);
       }
@@ -978,7 +1019,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           } catch {
             if (signal.aborted) return;
           }
-          if (!allowed() || !await safeToSend()) {finish("revoked");continue;}
+          {const safe=await checkSafeToSend(); if (safe==="revoked") {finish("revoked");continue;} if (safe==="retry") {deferVerify();continue;} clearVerify();}
           if (files.length!==unique.length) {
             job.answer="Не удалось подготовить все вложения альбома.";
             store.put(key,job);
@@ -1018,7 +1059,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           store.put(key,job);
           continue;
         }
-        if (!allowed() || !await safeToSend()) {finish("revoked");break;}
+        {const safe=await checkSafeToSend(); if (safe==="revoked") {finish("revoked");break;} if (safe==="retry") {deferVerify();continue jobs;} clearVerify();}
         store.put(key,{...job,state:"sending"});
         const docPayload=(html:boolean)=>outboundMessagePayload({...reply,text:caption!==undefined ? (html ? caption : plainFromHtml(caption)) :
           (kind==="pdf" && artifacts.length>1 ? document.name.slice(0,900) : undefined),html:html && caption!==undefined,
@@ -1056,7 +1097,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
           store.put(key,job);
           continue;
         }
-        if (!allowed() || !await safeToSend()) {finish("revoked");break;}
+        {const safe=await checkSafeToSend(); if (safe==="revoked") {finish("revoked");break;} if (safe==="retry") {deferVerify();continue jobs;} clearVerify();}
         store.put(key,{...job,state:"sending"});
         const photoPayload=(html:boolean)=>outboundMessagePayload({...reply,text:caption!==undefined && !html ? plainFromHtml(caption) : caption,
           html:html && caption!==undefined,file:{kind:"photo",name:image.name,data:image.photo}});
@@ -1075,7 +1116,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
       // The same formatting as a private chat: bold, italic, lists, code and links; plain words if Telegram rejects it.
       const parts=renderTelegramParts(cleanAssistantText(text).trim());
       for (let i=job.part??0;i<parts.length;i++) {
-        if (!allowed() || !await safeToSend()) {finish("revoked");break;}
+        {const safe=await checkSafeToSend(); if (safe==="revoked") {finish("revoked");break;} if (safe==="retry") {deferVerify();continue jobs;} clearVerify();}
         store.put(key,{...job,state:"sending",part:i});
         const send=(html:boolean)=>{
           const {method,body}=outboundMessagePayload({...reply,replyTo:i===0 ? reply.replyTo : undefined,text:html ? parts[i] : plainFromHtml(parts[i]),html});
@@ -1088,7 +1129,7 @@ export async function processGroupInputs(store:Store, sdk:BbPluginApi["sdk"],
         if (job.taskId && Number.isSafeInteger(sent?.message_id))
           store.put(`group:task-message:${botId}:${r.chatId}:${r.topicId}:${sent.message_id}`,job.taskId);
         if (i+1===parts.length) {finish("done",sent?.message_id);store.waiting?.delivered(r.chatId,r.topicId,sent?.message_id,text);}
-        else store.put(key,{...job,state:"ready",part:i+1});
+        else {job.part=i+1; store.put(key,{...job,state:"ready",part:i+1});}
       }
     } catch (error) {
       // С113: Telegram does not let the bot write here (no right to post, removed from the chat) — the answer cannot be

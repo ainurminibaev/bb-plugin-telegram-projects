@@ -22,51 +22,51 @@ function setup(){
 }
 const groupsOf=(p:number)=>p===ALICE ? [TEAM] : [];
 
-test("who may send where follows the calling conversation",()=>{
+test("who may send where follows the calling conversation",async()=>{
   const s=setup() as any;
   const no=(caller:any,t:any)=>sendRefusal(s,BOT,OWNER,caller,t,groupsOf);
-  assert.equal(no({kind:"owner"},{chat:OTHER,topic:3}),undefined,"owner: any group and topic");
-  assert.equal(no({kind:"owner"},{chat:ALICE,topic:0}),undefined,"owner: a person with access who started the bot");
-  assert.match(no({kind:"owner"},{chat:BOB,topic:0})!,/person_has_not_started_the_bot/);
-  assert.equal(no({kind:"group",chat:TEAM},{chat:TEAM,topic:9}),undefined,"group: its own topics");
-  assert.match(no({kind:"group",chat:TEAM},{chat:OTHER,topic:0})!,/group_not_allowed.*только по просьбе владельца/);
+  assert.equal((await no({kind:"owner"},{chat:OTHER,topic:3})),undefined,"owner: any group and topic");
+  assert.equal((await no({kind:"owner"},{chat:ALICE,topic:0})),undefined,"owner: a person with access who started the bot");
+  assert.match((await no({kind:"owner"},{chat:BOB,topic:0}))!,/person_has_not_started_the_bot/);
+  assert.equal((await no({kind:"group",chat:TEAM},{chat:TEAM,topic:9})),undefined,"group: its own topics");
+  assert.match((await no({kind:"group",chat:TEAM},{chat:OTHER,topic:0}))!,/group_not_allowed/);
   // С113: the owner asked in a coordination chat «представься там» — the first message to that group goes.
-  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OTHER,topic:0},groupsOf,undefined,OWNER),undefined,"group: another group on the owner's request");
-  assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OTHER,topic:0},groupsOf,undefined,ALICE)!,/group_not_allowed/,"not on a member's request");
+  assert.equal((await sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OTHER,topic:0},groupsOf,undefined,OWNER)),undefined,"group: another group on the owner's request");
+  assert.match((await sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OTHER,topic:0},groupsOf,undefined,999))!,/group_not_allowed/,"not on a member's request");
   // Valis 25.11: the owner's answer to this group's question (a turn the bridge gives) is no request to write elsewhere.
-  assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OTHER,topic:0},groupsOf,undefined,OWNER,false,undefined,false)!,/group_not_allowed/,"not on the owner's answer to a question");
-  assert.equal(sendTargets(s,BOT,OWNER,{kind:"group",chat:TEAM},groupsOf,OWNER,false).groups.some((g:any)=>g.chat===OTHER),false);
-  assert.ok(sendTargets(s,BOT,OWNER,{kind:"group",chat:TEAM},groupsOf,OWNER).groups.some((g:any)=>g.chat===OTHER),"listed in --targets on the owner's turn");
+  assert.match((await sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OTHER,topic:0},groupsOf,undefined,OWNER,false,false))!,/group_not_allowed/,"not on the owner's answer to a question");
+  assert.equal((await sendTargets(s,BOT,OWNER,{kind:"group",chat:TEAM},groupsOf,OWNER,false)).groups.some((g:any)=>g.chat===OTHER),false);
+  assert.ok((await sendTargets(s,BOT,OWNER,{kind:"group",chat:TEAM},groupsOf,OWNER)).groups.some((g:any)=>g.chat===OTHER),"listed in --targets on the owner's turn");
   // С44: from a group, a person's private chat only when the owner asked in this turn; otherwise answer in the group.
-  assert.match(no({kind:"group",chat:TEAM},{chat:ALICE,topic:0})!,/person_only_on_the_owners_request_from_a_group/);
-  assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,999)!,/person_only_on_the_owners_request/);
-  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,OWNER),undefined,"group: the owner's own request");
-  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,ALICE),undefined,"group: a person asks to be written to privately");
+  assert.match((await no({kind:"group",chat:TEAM},{chat:ALICE,topic:0}))!,/person_only_on_the_owners_request_from_a_group/);
+  assert.match((await sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,999))!,/person_only_on_the_owners_request/);
+  assert.equal((await sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,OWNER)),undefined,"group: the owner's own request");
+  assert.equal((await sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:ALICE,topic:0},groupsOf,undefined,ALICE)),undefined,"group: a person asks to be written to privately");
   // «Спишись с X» from the owner reaches an approved person who has not written in this group yet.
-  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:OTHER},{chat:ALICE,topic:0},groupsOf,undefined,OWNER),undefined,"group: the owner's request, person not seen in this group");
-  assert.match(sendRefusal(s,BOT,OWNER,{kind:"group",chat:OTHER},{chat:ALICE,topic:0},groupsOf,undefined,999)!,/person_not_allowed/);
-  assert.match(no({kind:"group",chat:OTHER},{chat:ALICE,topic:0})!,/person_not_allowed/);
-  assert.match(no({kind:"person",subject:ALICE},{chat:TEAM,topic:0})!,/relay_needs_addressee_in_this_group/);
+  assert.equal((await sendRefusal(s,BOT,OWNER,{kind:"group",chat:OTHER},{chat:ALICE,topic:0},groupsOf,undefined,OWNER)),undefined,"group: the owner's request, person not seen in this group");
+  assert.match((await sendRefusal(s,BOT,OWNER,{kind:"group",chat:OTHER},{chat:ALICE,topic:0},groupsOf,undefined,999))!,/person_not_allowed/);
+  assert.match((await no({kind:"group",chat:OTHER},{chat:ALICE,topic:0}))!,/person_not_allowed/);
+  assert.match((await no({kind:"person",subject:ALICE},{chat:TEAM,topic:0}))!,/group_not_allowed/);
   // П28: an ordinary BB thread (no Telegram conversation) writes only to the owner.
-  assert.equal(sendRefusal(s,BOT,OWNER,undefined,{chat:OWNER,topic:0},groupsOf),undefined);
-  assert.match(sendRefusal(s,BOT,OWNER,undefined,{chat:ALICE,topic:0},groupsOf)!,/send_only_from_a_telegram_conversation/);
-  assert.match(sendRefusal(s,BOT,OWNER,undefined,{chat:TEAM,topic:0},groupsOf)!,/send_only_from_a_telegram_conversation/);
+  assert.equal((await sendRefusal(s,BOT,OWNER,undefined,{chat:OWNER,topic:0},groupsOf)),undefined);
+  assert.match((await sendRefusal(s,BOT,OWNER,undefined,{chat:ALICE,topic:0},groupsOf))!,/send_only_from_a_telegram_conversation/);
+  assert.match((await sendRefusal(s,BOT,OWNER,undefined,{chat:TEAM,topic:0},groupsOf))!,/send_only_from_a_telegram_conversation/);
   // С43: a person's conversation asks the owner only with a question whose answer comes back;
   // a group's conversation may also send the owner a short report (text only, marked, not too often — server).
-  assert.equal(no({kind:"group",chat:TEAM},{chat:OWNER,topic:0}),undefined);
-  assert.match(no({kind:"person",subject:ALICE},{chat:OWNER,topic:0})!,/owner_only_with_a_question: send --person owner --ask/);
-  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"person",subject:ALICE},{chat:OWNER,topic:0},groupsOf,undefined,undefined,true),undefined);
-  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OWNER,topic:0},groupsOf,undefined,ALICE,true),undefined);
-  assert.match(no({kind:"group",chat:TEAM},{chat:-1009,topic:0})!,/bot_is_not_in_this_group/);
+  assert.equal((await no({kind:"group",chat:TEAM},{chat:OWNER,topic:0})),undefined);
+  assert.match((await no({kind:"person",subject:ALICE},{chat:OWNER,topic:0}))!,/owner_only_with_a_question: send --person owner --ask/);
+  assert.equal((await sendRefusal(s,BOT,OWNER,{kind:"person",subject:ALICE},{chat:OWNER,topic:0},groupsOf,undefined,undefined,true)),undefined);
+  assert.equal((await sendRefusal(s,BOT,OWNER,{kind:"group",chat:TEAM},{chat:OWNER,topic:0},groupsOf,undefined,ALICE,true)),undefined);
+  assert.match((await no({kind:"group",chat:TEAM},{chat:-1009,topic:0}))!,/bot_is_not_in_this_group/);
 });
 
-test("a remembered question lets the answer go back where it was asked, once",()=>{
+test("a remembered question lets the answer go back where it was asked, once",async()=>{
   const s=setup() as any;
   const ask=rememberAsk(s,BOT,ALICE,{chat:OWNER,topic:0},"когда будет макет?");
   assert.equal(openAsks(s,BOT,ALICE).length,1);
   assert.match(askNotes(s,BOT,ALICE),/«когда будет макет\?».*--answer /);
-  assert.equal(sendRefusal(s,BOT,OWNER,{kind:"person",subject:ALICE},{chat:OWNER,topic:0},groupsOf,ask.id),undefined);
-  assert.match(sendRefusal(s,BOT,OWNER,{kind:"person",subject:BOB},{chat:OWNER,topic:0},groupsOf,ask.id)!,/no_open_question/);
+  assert.equal((await sendRefusal(s,BOT,OWNER,{kind:"person",subject:ALICE},{chat:OWNER,topic:0},groupsOf,ask.id)),undefined);
+  assert.match((await sendRefusal(s,BOT,OWNER,{kind:"person",subject:BOB},{chat:OWNER,topic:0},groupsOf,ask.id))!,/no_open_question/);
 });
 
 test("names are found by the agent; ambiguity is refused",()=>{
@@ -77,7 +77,7 @@ test("names are found by the agent; ambiguity is refused",()=>{
   assert.throws(()=>findPerson(s,BOT,"алиса"),/person_ambiguous/);
 });
 
-test("a topic is found by its name without the group; the agent can list where it may write",()=>{
+test("a topic is found by its name without the group; the agent can list where it may write",async()=>{
   const s=setup() as any;
   s.put(`group:topic-name:${BOT}:${TEAM}:64`,{name:"Стенд: этап 2"});
   s.put(`group:topic-name:${BOT}:${OTHER}:9`,{name:"Отчёты"});
@@ -87,11 +87,11 @@ test("a topic is found by its name without the group; the agent can list where i
   assert.throws(()=>findTopic(s,BOT,undefined,"отчёты"),/topic_ambiguous: .*Штурвал \/ Отчёты/);
   assert.throws(()=>findTopic(s,BOT,undefined,"нет такой"),/topic_unknown; known topics: .*Стенд: этап 2/);
   assert.equal(findPerson(s,BOT,"Алисе"),ALICE,"a name in another case");
-  const owner=sendTargets(s,BOT,OWNER,{kind:"owner"},groupsOf);
+  const owner=await sendTargets(s,BOT,OWNER,{kind:"owner"},groupsOf);
   assert.deepEqual(owner.groups.map((g:any)=>g.title).sort(),["Склад","Штурвал"]);
   assert.ok(owner.groups.find((g:any)=>g.chat===TEAM).topics.some((t:any)=>t.name==="Стенд: этап 2"));
   assert.deepEqual(owner.people.map((p:any)=>[p.name,!!p.note]),[["Алиса",false],["Боб",true]]);
-  const group=sendTargets(s,BOT,OWNER,{kind:"group",chat:OTHER},groupsOf);
+  const group=await sendTargets(s,BOT,OWNER,{kind:"group",chat:OTHER},groupsOf);
   assert.deepEqual(group.groups.map((g:any)=>g.title),["Склад"]);
   assert.deepEqual(group.people.map((p:any)=>p.name),["Боб"],"only people it may reach, and who to mention");
 });
@@ -128,7 +128,7 @@ test("the same question asked again stays one open question",()=>{
   assert.equal(openAsks(s,BOT,ALICE).length,2);
 });
 
-test("a question to the owner from a person's private chat reaches the owner's turn and its answer goes back",()=>{
+test("a question to the owner from a person's private chat reaches the owner's turn and its answer goes back",async()=>{
   const rows=new Map<string,any>();
   const s={get:<T>(k:string)=>rows.get(k) as T,put:(k:string,v:unknown)=>{rows.set(k,v);},del:(k:string)=>{rows.delete(k);},
     atomic:(f:()=>void)=>f(),list:<T>(p:string)=>[...rows].filter(([k])=>k.startsWith(p)).map(([key,value])=>({key,value:value as T}))};
@@ -136,17 +136,17 @@ test("a question to the owner from a person's private chat reaches the owner's t
   const ask=rememberAsk(s as never,BOT,OWNER,{chat:ALICE,topic:0},"Вопрос из лички «Алиса»: закрыть задачу 12? да/нет");
   // 0.9.77: free text is not glued to the open question; a reply to its card is (owner-ask test).
   assert.equal(ownerAskNotes(s as never,OWNER),"");
-  assert.equal(sendRefusal(s as never,BOT,OWNER,{kind:"owner"},{chat:ALICE,topic:0},()=>[],ask.id),undefined);
+  assert.equal((await sendRefusal(s as never,BOT,OWNER,{kind:"owner"},{chat:ALICE,topic:0},()=>[],ask.id)),undefined);
   assert.equal(ownerAskNotes(s as never,ALICE),"");
 });
 
-test("General of a forum is a send target like a topic; a group without topics has none; the group's name follows Telegram",()=>{
+test("General of a forum is a send target like a topic; a group without topics has none; the group's name follows Telegram",async()=>{
   const s=setup() as any;
   s.put(`group:topic-name:${BOT}:${TEAM}:64`,{name:"Стенд: этап 2"});
   s.put(`group:policy:${TEAM}:0`,{chatId:TEAM,topicId:0,threadId:"thr_general"});
   s.put(`group:policy:${OTHER}:0`,{chatId:OTHER,topicId:0,threadId:"thr_other"});
   assert.deepEqual(findTopic(s,BOT,TEAM,"General"),{chat:TEAM,topic:0});
-  const owner=sendTargets(s,BOT,OWNER,{kind:"owner"},groupsOf);
+  const owner=await sendTargets(s,BOT,OWNER,{kind:"owner"},groupsOf);
   assert.ok(owner.groups.find((g:any)=>g.chat===TEAM).topics.some((t:any)=>t.topic===0 && t.name==="General"));
   assert.deepEqual(owner.groups.find((g:any)=>g.chat===OTHER).topics,[]);   // no topics: the group itself
   // Any group message carries the current title: a group renamed before is found by its new name.
@@ -165,15 +165,7 @@ test("a group's report to the owner: text only, marked with the group, one per f
   assert.match((ownerReport(s,BOT,{kind:"group",chat:TEAM,topic:5},"файл",true) as any).error,/owner_report_text_only/);
 });
 
-test("С90: from an approved person's private chat a relay goes only to a group where both the requester and the addressee are",()=>{
-  const s=setup() as any;
-  const groupsOf=(p:number)=>p===ALICE ? [TEAM] : p===999 ? [TEAM,OTHER] : p===777 ? [OTHER] : [];
-  const alice={kind:"person" as const,subject:ALICE};
-  assert.equal(sendRefusal(s,BOT,OWNER,alice,{chat:TEAM,topic:0},groupsOf,undefined,undefined,false,999),undefined);
-  assert.match(sendRefusal(s,BOT,OWNER,alice,{chat:TEAM,topic:0},groupsOf)!,/relay_needs_addressee_in_this_group/);
-  assert.match(sendRefusal(s,BOT,OWNER,alice,{chat:TEAM,topic:0},groupsOf,undefined,undefined,false,777)!,/relay_needs_addressee/);
-  assert.match(sendRefusal(s,BOT,OWNER,alice,{chat:OTHER,topic:0},groupsOf,undefined,undefined,false,999)!,/group_not_allowed/,"not a group without the requester");
-});
+
 
 test("agents-in-chats п.6: the curator is asked like the owner — a question only, and only when named",()=>{
   assert.match((curatorTarget([],true) as any).error,/^no_curator/);
@@ -225,4 +217,34 @@ test("a long group report to the owner keeps its final paragraph", () => {
   const body = "Проверили макет.\n".repeat(300) + "Последняя запись.";
   const result = ownerReport(setup() as any, BOT, {kind:"group", chat:TEAM}, body, false);
   assert.ok("text" in result && result.text.endsWith(body));
+});
+
+test("С112 checks current membership for targets and each cross-group send",async()=>{
+  const s=setup() as any;
+  const group={kind:"group" as const,chat:TEAM};
+  const privateChat={kind:"person" as const,subject:ALICE};
+  let member={status:"member",is_member:true};
+  const lookup=async(chat:number,id:number)=>{
+    assert.equal(chat,OTHER);
+    assert.equal(id,ALICE);
+    if (member.status==="offline") throw Error();
+    return member;
+  };
+  const send=(caller:typeof group|typeof privateChat=group,own=true,participants=[ALICE])=>
+    sendRefusal(s,BOT,OWNER,caller,{chat:OTHER,topic:0},groupsOf,undefined,ALICE,false,own,lookup,participants);
+  assert.ok((await sendTargets(s,BOT,OWNER,group,groupsOf,ALICE,true,lookup)).groups.some(g=>g.chat===OTHER));
+  for (const status of ["member","creator","administrator","restricted"]) {
+    member={status,is_member:true};
+    assert.equal(await send(),undefined);
+    assert.equal(await send(privateChat),undefined);
+  }
+  for (const status of ["left","kicked","restricted"]) {
+    member={status,is_member:false};
+    assert.equal((await sendTargets(s,BOT,OWNER,group,groupsOf,ALICE,true,lookup)).groups.some(g=>g.chat===OTHER),false);
+    assert.equal(await send(),"писать в «Склад» по просьбе Алиса нельзя: его нет в этой группе");
+  }
+  member.status="offline";
+  assert.equal(await send(),"не удалось проверить, состоит ли Алиса в «Склад»");
+  assert.match((await send(group,false))!,/group_not_allowed/);
+  assert.match((await send(group,true,[999,ALICE]))!,/group_not_allowed/);
 });

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Store } from "./model";
 
 export type ReplyRoute = { kind: "bb" } | {
-  kind: "telegram"; chatId: number; topicId: number; updateId: number; messageId?: number;
+  kind: "telegram"; chatId: number; topicId: number; updateId: number; messageId?: number; forwardedOnly?: true;
 };
 const ownerResultInstructions = "\nIf your final answer includes the completed result of a delegated BB turn, append " +
   "one Markdown comment on its own line for each such result: <!-- bb-telegram-child-result:CHILD_THREAD_ID:CHILD_TURN_ID -->. " +
@@ -394,10 +394,21 @@ export class ReplyRoutes {
     if (parent) this.store.put("reply:request-parent:" + this.requestKey(threadId,requestId),parent);
     return true;
   }
+  markForwardedTurn(threadId:string,turnId:string) {
+    this.store.put("reply:turn-forwarded:"+JSON.stringify([threadId,turnId]),true);
+  }
+  hasForwardedInput(threadId:string,turnId:string|undefined) {
+    if (!turnId) return false;
+    const route=this.destination(threadId,turnId);
+    return (route?.kind==="telegram" && route.forwardedOnly===true) ||
+      this.store.get<boolean>("reply:turn-forwarded:"+JSON.stringify([threadId,turnId]))===true;
+  }
   accept(threadId: string, turnId: string, requestId: string) {
     const key = this.turnKey(threadId, turnId);
     const turn = this.store.get<TurnRoutes>(key) ?? {requestIds: [], ambiguous: false};
     if (!turn.requestIds.includes(requestId)) turn.requestIds.push(requestId);
+    const accepted=this.routeOf(threadId,requestId);
+    if (accepted?.kind==="telegram" && accepted.forwardedOnly) this.markForwardedTurn(threadId,turnId);
     const owners = this.owningRequests(threadId, turn);
     const routes = owners.map(id => this.store.get<ReplyRoute>(this.requestKey(threadId, id)));
     // Child notifications can continue the exact same task. Different updates

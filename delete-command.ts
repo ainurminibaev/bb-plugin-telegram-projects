@@ -31,8 +31,9 @@ export function deleteLog(store:Store,bot:number,entry:{thread:string;chat:numbe
  * answer) has an author; a turn begun from BB (a task, a schedule, another thread) has none.
  */
 export function authorOfTurn(store:Store,threadId:string,turnId:string|undefined,ownerChatOwner?:number) {
-  const route=turnId ? new ReplyRoutes(store).destination(threadId,turnId) : undefined;
-  if (route?.kind!=="telegram") return undefined;
+  const routes=new ReplyRoutes(store);
+  const route=turnId ? routes.destination(threadId,turnId) : undefined;
+  if (route?.kind!=="telegram" || routes.hasForwardedInput(threadId,turnId)) return undefined;
   // The author of the very message that started this turn — a later message joining it (the owner writing while a
   // guest's turn runs) never lends its author to the turn (0.9.77 review).
   const updateId=(route as {updateId?:number}).updateId;
@@ -40,6 +41,16 @@ export function authorOfTurn(store:Store,threadId:string,turnId:string|undefined
   // Someone else's message joined this turn: the turn's rights are the least trusted of those in it (С112).
   const joined=store.get<number>(turnMixedKey(threadId,turnId!));
   return joined!==undefined && joined!==author ? joined : author;
+}
+export const turnParticipantsKey=(thread:string,turn:string)=>`group:turn-participants:${thread}:${turn}`;
+export function sendParticipants(store:Store,thread:string,turn:string|undefined) {
+  if (!turn) return [];
+  const route=new ReplyRoutes(store).destination(thread,turn);
+  if (route?.kind!=="telegram" || !("updateId" in route) || typeof route.updateId!=="number") return [];
+  const first=store.get<number>(turnAuthorKey(thread,route.updateId));
+  if (first===undefined) return [];
+  const mixed=store.get<number>(turnMixedKey(thread,turn));
+  return [...new Set([first,...store.get<number[]>(turnParticipantsKey(thread,turn)) ?? [],...(mixed===undefined ? [] : [mixed])])];
 }
 export const turnMixedKey=(threadId:string,turnId:string)=>`group:turn-mixed:${threadId}:${turnId}`;
 export const turnAuthorKey=(threadId:string,updateId:number)=>`group:turn-author:${threadId}:${updateId}`;
@@ -61,6 +72,7 @@ export function ownMessageChat(caller:Conversation|undefined,owner:number,named:
  * in this place; his answer to a narrow question stays an answer to it.
  */
 export function turnStartedByMessage(store:Store,threadId:string,turnId:string|undefined) {
-  const route=turnId ? new ReplyRoutes(store).destination(threadId,turnId) : undefined;
-  return route?.kind==="telegram" && Number((route as {updateId?:number}).updateId)>0;
+  const routes=new ReplyRoutes(store);
+  const route=turnId ? routes.destination(threadId,turnId) : undefined;
+  return route?.kind==="telegram" && !routes.hasForwardedInput(threadId,turnId) && Number((route as {updateId?:number}).updateId)>0;
 }

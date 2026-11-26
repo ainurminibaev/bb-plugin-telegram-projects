@@ -254,3 +254,59 @@ test("send --text-file reports every receipt and a later refusal for an ordinary
     await rm(directory,{recursive:true,force:true});
   }
 });
+
+test("С112: send checks the requester again after listing targets and delivers their text verbatim",async()=>{
+  const threadId="sample-member";
+  const ctx={threadId} as any;
+  const bot=81,owner=82,author=83,origin=-10083,target=-10084;
+  const {bb,harness}=createFakePluginHost({pluginId:"telegram-projects",settings:{enabled:false,botToken:"81:fiction"},
+    sdk:{threads:{get:async()=>({title:"Макет"}),events:{list:async()=>[{scope:{kind:"turn",turnId:"turn"}}]}}} as any});
+  const previous=globalThis.fetch;
+  const sent:string[]=[];
+  let status="member";
+  globalThis.fetch=async(url,init)=>{
+    const body=JSON.parse(String(init?.body));
+    if (String(url).endsWith("/getChatMember")) {
+      assert.deepEqual([body.chat_id,body.user_id],[target,author]);
+      return Response.json({ok:true,result:{status}});
+    }
+    assert.ok(String(url).endsWith("/sendMessage"));
+    assert.equal(body.chat_id,target);
+    sent.push(body.text);
+    return Response.json({ok:true,result:{chat:{id:target},message_id:51,text:body.text}});
+  };
+  try {
+    await plugin(bb);
+    const write=bb.storage.database().prepare("INSERT OR REPLACE INTO state VALUES (?,?)");
+    const put=(key:string,value:unknown)=>write.run(key,JSON.stringify(value));
+    put("bot:id",bot); put("owner:id",owner);
+    put("rights:81:access",[{id:author,name:"Мира"}]);
+    put("group:thread:"+threadId,"group:policy:-10083:0");
+    put("group:policy:-10083:0",{chatId:origin,topicId:0,threadId,botId:bot});
+    put("visibility:81:group:-10084",{chat:target,title:"Макет"});
+    put('reply:turn:["sample-member","turn"]',{requestIds:["request"]});
+    put('reply:request:["sample-member","request"]',{kind:"telegram",chatId:origin,topicId:0,updateId:10});
+    put("group:turn-author:sample-member:10",author);
+    const targets=await harness.behavior.runCli(["send","--targets"],ctx);
+    assert.ok(JSON.parse(targets.stdout!).groups.some((g:any)=>g.chat===target));
+    const send=()=>harness.behavior.runCli(["send","--chat",String(target),"--text","Макет готов"],ctx);
+    status="left";
+    const hidden=await harness.behavior.runCli(["send","--targets"],ctx);
+    assert.equal(JSON.parse(hidden.stdout!).groups.some((g:any)=>g.chat===target),false);
+    assert.match((await send()).stderr!,/его нет в этой группе/);
+    status="member";
+    const first=await send();
+    const result=first.stderr?.includes("first_today_hold") ? await send() : first;
+    assert.equal(result.exitCode,0,result.stderr);
+    put("group:turn-mixed:sample-member:turn",99);
+    assert.match((await send()).stderr!,/group_not_allowed/);
+    const ownerThread="private-owner";
+    put("chat:binding:0",{threadId:ownerThread});
+    put('reply:turn:["private-owner","turn"]',{requestIds:["forward"]});
+    put('reply:request:["private-owner","forward"]',{kind:"telegram",chatId:owner,topicId:0,updateId:11,forwardedOnly:true});
+    const denied=await harness.behavior.runCli(["send","--chat",String(target),"--text","Пересланная просьба"],{threadId:ownerThread} as any);
+    assert.equal(denied.exitCode,1);
+    assert.match(denied.stderr!,/group_not_allowed_from_forward/);
+    assert.deepEqual(sent,["Макет готов"]);
+  } finally {globalThis.fetch=previous;await harness.lifecycle.dispose();}
+});
