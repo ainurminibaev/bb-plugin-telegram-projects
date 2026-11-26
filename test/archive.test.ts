@@ -232,6 +232,7 @@ test("list previews name the full-message command; reading one message preserves
         `…[обрезано: показано 2000 из ${full.length} знаков; полный текст — bb telegram-projects search-history --message ${TEAM}:${u.message.message_id}]`);
     }
   } finally {db.close();}
+});
 
 test("С119: a person's reaction to the bot's own message is kept next to it; taking it off is kept; others' messages and anonymous reactions are not",()=>{
   const db=new Database(":memory:"); const a=openArchive(db);

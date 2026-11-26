@@ -23,6 +23,7 @@ const ALLOWED: Record<string, string> = {
   "owner-ask.ts": "forwarding the person's original message (a quote, not the agent's Markdown)",
   "owner-selection.ts": "selection screens — the bridge's own words",
   "setup-screens.ts": "group setup screens and the greeting — the bridge's own words",
+  "action-buttons.ts": "С118 click mark (✓ Label — Name) appended to existing message while keeping inline buttons",
 };
 const SEND = /\(\s*"(sendMessage|editMessageText|editMessageCaption|sendPhoto|sendDocument|sendVideo|sendMediaGroup)"\s*,/;
 
