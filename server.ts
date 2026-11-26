@@ -3181,19 +3181,27 @@ export default async function plugin(bb: BbPluginApi) {
           else if (rest[i]==="--chat" && rest[i+1]!==undefined) chatArg=rest[++i];
           else return {exitCode:2,stderr:"unexpected_argument "+rest[i]+"; usage: check-rights [--chat C] [--json]"};
         }
-        const caller=ctx.threadId ? await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal).catch(()=>undefined) : undefined;
+        let caller:Awaited<ReturnType<typeof conversationOf>>|undefined;
+        if (ctx.threadId) {
+          try { caller=await conversationOf(store,bb.sdk.threads,ctx.threadId,lifetime.signal); }
+          catch { return {exitCode:1,stderr:"conversation_unavailable"}; }
+          if (!caller || caller.kind==="person") return {exitCode:1,stderr:"not_available_in_this_conversation"};
+        }
         const targets=new Map<number,string>();
-        if (chatArg!==undefined) {
+        if (caller?.kind==="group") {
+          const ownTitle=store.get<{title?:string}>(`visibility:${bot}:group:${caller.chat}`)?.title ?? "";
+          if (chatArg!==undefined) {
+            const matchesId=/^-?\d+$/.test(chatArg) && Number(chatArg)===caller.chat;
+            const matchesTitle=!!ownTitle && ownTitle.toLowerCase()===chatArg.trim().toLowerCase();
+            if (!matchesId && !matchesTitle) return {exitCode:1,stderr:"not_available_in_this_conversation"};
+          }
+          targets.set(caller.chat,ownTitle);
+        } else if (chatArg!==undefined) {
           let chatId:number;
           try { chatId=/^-?\d+$/.test(chatArg) ? Number(chatArg) : findGroup(store,bot,chatArg); }
           catch (error) { return {exitCode:1,stderr:String((error as Error).message)}; }
-          if (caller && owner && archive && !readableChats(store,archive,bot,owner,caller)(chatId))
-            return {exitCode:1,stderr:"not_available_in_this_conversation"};
           const title=store.get<{title?:string}>(`visibility:${bot}:group:${chatId}`)?.title ?? "";
           targets.set(chatId,title);
-        } else if (caller?.kind==="group") {
-          const title=store.get<{title?:string}>(`visibility:${bot}:group:${caller.chat}`)?.title ?? "";
-          targets.set(caller.chat,title);
         } else {
           for (const {value:g} of store.list<{chat:number;title?:string}>(`visibility:${bot}:group:`)) {
             if (Number.isSafeInteger(g.chat) && g.chat<0) targets.set(g.chat,g.title ?? "");

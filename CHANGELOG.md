@@ -1,6 +1,6 @@
 # 0.9.84
 
-- С117 / С114: bot rights in a group are checked via `getChatMember` at group connection (`notifyGroupsAdded`), at setup completion, and on demand via `bb telegram-projects check-rights [--chat C] [--json]`. Missing rights (administrator, delete messages, pin messages, and manage topics in forums) are reported in one clear line with the exact Telegram UI path (С77).
+- С117 / С114: bot rights in a group are checked via `getChatMember` at group connection (`notifyGroupsAdded`) and on demand via `bb telegram-projects check-rights [--chat C] [--json]`. Missing rights (administrator, delete messages, pin messages, and manage topics in forums) are reported in one clear line with the exact Telegram UI path (С77).
 
 # 0.9.83
 

@@ -116,3 +116,44 @@ test("bot-rights: notifyGroupsAdded tells owner missing delete right at connecti
   assert.equal(after.ok, true);
   assert.equal(after.missing.length, 0);
 });
+
+test("bot-rights: empty title never leaks numeric chatId into hint, and notifyGroupsAdded does not spam API on repeat", async () => {
+  const noTitle = evaluateBotGroupRights({
+    chatId: CHAT, title: "", botUsername: "helper_bot", isForum: false,
+    member: { status: "member" },
+  });
+  assert.doesNotMatch(noTitle.hint, /\d{4,}/);
+  assert.match(noTitle.hint, /«группа»/);
+
+  const failTg = (async () => { throw new Error("network"); }) as any;
+  const failRes = await checkBotGroupRights(failTg, BOT, "helper_bot", CHAT);
+  assert.doesNotMatch(failRes.hint, /\d{4,}/);
+  assert.match(failRes.hint, /«группа»/);
+
+  // notifyGroupsAdded deduplicates before calling getChat/getChatMember
+  const rows = new Map<string, any>();
+  const store = {
+    get: <T>(k: string) => rows.get(k) as T,
+    put: (k: string, v: unknown) => { rows.set(k, v); },
+    del: (k: string) => { rows.delete(k); },
+    list: <T>(prefix: string) => [...rows].filter(([k]) => k.startsWith(prefix)).map(([key, v]) => ({ key, value: v as T })),
+    atomic: (fn: () => void) => fn(),
+  };
+  store.put(`visibility:${BOT}:group:${CHAT}`, { chat: CHAT, title: "Команда", administrator: true, inviter: OWNER, event: 10 });
+  store.put(`visibility:${BOT}:privacy`, false);
+  store.put("rights:install-kind", "employee");
+  let apiCalls = 0;
+  const tg = () => (async (method: string) => {
+    if (method === "getChat" || method === "getChatMember") apiCalls++;
+    if (method === "getChat") return { title: "Команда", is_forum: false };
+    if (method === "getChatMember") return { status: "administrator", can_delete_messages: true, can_pin_messages: true };
+    if (method === "getChatMemberCount") return 4;
+    return { message_id: 1 };
+  }) as any;
+  const ctx = { store: store as any, bot: BOT, owner: OWNER, botUsername: "helper_bot", tg, zones: [], role: "Помощник", sdk: {} as any };
+  await notifyGroupsAdded(ctx);
+  const callsFirst = apiCalls;
+  assert.ok(callsFirst > 0);
+  await notifyGroupsAdded(ctx);
+  assert.equal(apiCalls, callsFirst, "second tick with same event must not call getChat/getChatMember again");
+});

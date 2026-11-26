@@ -75,16 +75,17 @@ export function evaluateBotGroupRights(args: {
   };
   const present = required.filter(has);
   const missing = required.filter((r) => !has(r));
+  const displayTitle = args.title.replace(/\s+/g, " ").trim();
   return {
     chatId: args.chatId,
-    title: args.title || String(args.chatId),
+    title: displayTitle || "группа",
     isForum: args.isForum,
     status,
     ok: missing.length === 0,
     required,
     present,
     missing,
-    hint: formatMissingBotRights(args.title, args.botUsername, missing),
+    hint: formatMissingBotRights(displayTitle, args.botUsername, missing),
   };
 }
 
@@ -110,13 +111,13 @@ export async function checkBotGroupRights(
     const member = await tg<BotMemberInfo>("getChatMember", { chat_id: chatId, user_id: botId });
     return evaluateBotGroupRights({
       chatId,
-      title: title || String(chatId),
+      title,
       botUsername,
       isForum,
       member: member ?? {},
     });
   } catch (error) {
-    const cleanTitle = title || String(chatId);
+    const cleanTitle = title.replace(/\s+/g, " ").trim() || "группа";
     return {
       chatId,
       title: cleanTitle,

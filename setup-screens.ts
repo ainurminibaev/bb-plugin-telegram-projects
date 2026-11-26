@@ -163,9 +163,9 @@ export async function notifyGroupsAdded(ctx: SetupContext) {
   for (const g of memberships(ctx.store, ctx.bot)) {
     const key = `rights:${ctx.bot}:added:${g.chat}`;
     const visible = g.administrator || privacy === false;
-    const rights = await checkBotGroupRights(ctx.tg(g.chat), ctx.bot, ctx.botUsername, g.chat, { title: g.title });
-    const signature = JSON.stringify([g.event, visible, rights.missing]);
+    const signature = JSON.stringify([g.event, visible]);
     if (ctx.store.get(key) === signature) continue;
+    const rights = await checkBotGroupRights(ctx.tg(g.chat), ctx.bot, ctx.botUsername, g.chat, { title: g.title });
     const recipient = g.inviter && hasAccess(ctx.store, ctx.bot, ctx.owner, g.inviter) ? g.inviter : ctx.owner;
     let s = activeGroupSettings(ctx.store, ctx.bot, g.chat) ?? defaultGroupSettings();
     if (!s.memory) {
@@ -176,7 +176,7 @@ export async function notifyGroupsAdded(ctx: SetupContext) {
     const lines = [`Меня добавили в «${g.title}». Если ничего не менять: ${summaryLine(ctx, s)}.`];
     if (!visible)
       lines.push("Чтобы я видел обсуждение, а не только обращения ко мне, сделайте меня администратором группы.");
-    if (!rights.ok && rights.hint) lines.push(rights.hint);
+    if (!rights.ok && !rights.error && rights.hint) lines.push(rights.hint);
     try {
       await ctx.tg(recipient)("sendMessage", { chat_id: recipient, text: lines.join("\n"), reply_markup: { inline_keyboard: [[
         { text: "Изменить (3 вопроса)", callback_data: "rs:s1:" + g.chat },
